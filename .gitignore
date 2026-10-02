@@ -1,0 +1,10 @@
+node_modules/
+dist/
+*.log
+.env
+# Local-only material derived from Hi-Rez game files. Never commit or publish.
+reference/
+maps-original/
+certs/
+packages/client/public/voicepacks/*/
+!packages/client/public/voicepacks/.keep

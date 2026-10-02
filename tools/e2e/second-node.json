@@ -1,0 +1,7 @@
+{
+  "publicHost": "localhost",
+  "node": { "port": 7775, "name": "SecondNode", "lan": true, "internet": false, "upnp": false },
+  "servers": [
+    { "id": "lan-tdm", "name": "LAN Test Miasma", "mode": "tdm", "mapSource": "original", "maps": ["miasma"], "port": 7790, "wtPort": 7790, "maxPlayers": 16, "bots": { "fillTo": 4, "difficulty": "adept" } }
+  ]
+}

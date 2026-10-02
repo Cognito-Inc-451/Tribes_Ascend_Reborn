@@ -1,0 +1,26 @@
+{
+  "name": "@ar/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/main.ts",
+    "start": "tsx src/main.ts",
+    "bots": "tsx src/main.ts --config ../../config/servers.json --only ctf-katabatic"
+  },
+  "dependencies": {
+    "@ar/shared": "*",
+    "@peculiar/x509": "^1.14.3",
+    "@silentbot1/nat-api": "^0.4.9",
+    "bittorrent-dht": "^11.0.12",
+    "reflect-metadata": "^0.2.2",
+    "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "@fails-components/webtransport": "^1.1.4",
+    "@fails-components/webtransport-transport-http3-quiche": "^1.1.4"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.13"
+  }
+}
