@@ -39,6 +39,7 @@ export interface ClassDef {
   belts: string[];
   packs: string[];
   defaultLoadout: Loadout;
+  mass?: number;   // TA TrFamilyInfo_<class> m_fMass when it differs from the armor default
   src: string;
 }
 
@@ -65,15 +66,15 @@ export const CLASSES: ClassDef[] = [
   cls({ id: 'soldier', abbrev: 'SLD', name: 'Soldier', armor: 'medium', health: 1300, energy: 105,
     primaries: ['assault_rifle', 'spinfusor', 'gasts_rifle', 'twinfusor'],
     secondaries: ['thumper_d', 'eagle_pistol', 'thumper_dx', 'spare_spinfusor', 'shocklance'],
-    belts: ['frag_xl', 'ap_grenade', 'proximity_grenade', 'short_fuse_frag'], packs: ['energy_pack', 'utility_pack'], src: 'F/Soldier' }),
+    belts: ['frag_xl', 'ap_grenade', 'proximity_grenade', 'short_fuse_frag'], packs: ['energy_pack', 'utility_pack'], mass: 110, src: 'F/Soldier' }),
   cls({ id: 'technician', abbrev: 'TCN', name: 'Technician', armor: 'medium', health: 1300, energy: 110,
     primaries: ['tcn4_smg', 'thumper', 'tcn4_rockwind', 'tc24'],
     secondaries: ['repair_tool', 'sawed_off', 'sparrow', 'lr_repair_tool', 'shocklance'],
-    belts: ['tcng', 'motion_sensor', 'tcng_quickfuse', 'repair_kit'], packs: ['light_turret_pack', 'exr_turret_pack'], perkA: 'mechanic', src: 'F/Technician' }),
+    belts: ['tcng', 'motion_sensor', 'tcng_quickfuse', 'repair_kit'], packs: ['light_turret_pack', 'exr_turret_pack'], perkA: 'mechanic', mass: 100, src: 'F/Technician' }),
   cls({ id: 'raider', abbrev: 'RDR', name: 'Raider', armor: 'medium', health: 1300, energy: 110,
     primaries: ['arx_buster', 'grenade_launcher', 'plasma_gun', 'dust_devil'],
     secondaries: ['nj4_smg', 'nj5b_smg', 'desert_nj4', 'shocklance'],
-    belts: ['emp_grenade', 'whiteout_grenade', 'cluster_grenade', 'emp_xl'], packs: ['shield_pack', 'jammer_pack'], src: 'F/Raider' }),
+    belts: ['emp_grenade', 'whiteout_grenade', 'cluster_grenade', 'emp_xl'], packs: ['shield_pack', 'jammer_pack'], mass: 100, src: 'F/Raider' }),
   cls({ id: 'juggernaut', abbrev: 'JUG', name: 'Juggernaut', armor: 'heavy', health: 2600, energy: 90,
     primaries: ['fusion_mortar', 'mirv_launcher', 'fusion_mortar_deluxe'],
     secondaries: ['spinfusor_mkd', 'x1_lmg', 'spinfusor_mkx', 'heavy_twinfusor', 'shocklance'],
@@ -81,11 +82,11 @@ export const CLASSES: ClassDef[] = [
   cls({ id: 'doombringer', abbrev: 'DMB', name: 'Doombringer', armor: 'heavy', health: 2500, energy: 90,
     primaries: ['chain_gun', 'heavy_bolt_launcher', 'chain_cannon'],
     secondaries: ['saber_launcher', 'titan_launcher', 'shocklance'],
-    belts: ['frag_grenade', 'mines', 'defective_frag'], packs: ['force_field_pack'], src: 'F/Doombringer' }),
+    belts: ['frag_grenade', 'mines', 'defective_frag'], packs: ['force_field_pack'], mass: 130, src: 'F/Doombringer' }),
   cls({ id: 'brute', abbrev: 'BRT', name: 'Brute', armor: 'heavy', health: 2600, energy: 85,
     primaries: ['heavy_spinfusor', 'gladiator', 'devastator_spinfusor'],
     secondaries: ['auto_shotgun', 'nova_colt', 'plasma_cannon', 'the_hammer', 'shocklance'],
-    belts: ['fractal_grenade', 'light_sticky', 'extended_fractal'], packs: ['energy_pack', 'heavy_shield_pack', 'survival_pack'], src: 'F/Brute' }),
+    belts: ['fractal_grenade', 'light_sticky', 'extended_fractal'], packs: ['energy_pack', 'heavy_shield_pack', 'survival_pack'], mass: 130, src: 'F/Brute' }),
 ];
 
 export const CLASS_BY_ID: Record<string, ClassDef> = Object.fromEntries(CLASSES.map((c) => [c.id, c]));
@@ -119,7 +120,7 @@ export function loadoutStats(cls: ClassDef, lo: Loadout, determination = 0, pack
     maxEnergy: energy,
     regenMult: packPassive.regenMult ?? 1,
     runMult: packPassive.runMult ?? 1,
-    massMult: (has('lightweight') ? 0.7 : 1) * (has('super_heavy') ? 1.3 : 1),
+    massMult: (cls.mass ?? ARMOR_PHYSICS[cls.armor].mass) / ARMOR_PHYSICS[cls.armor].mass * (has('lightweight') ? 0.7 : 1) * (has('super_heavy') ? 1.3 : 1),
     healthRegenMult: packPassive.healthRegenMult ?? 1,
     beltExtra: (packPassive.beltExtra ?? 0) + (has('safety_third') ? 1 : 0) + (has('looter') ? 1 : 0),
   };

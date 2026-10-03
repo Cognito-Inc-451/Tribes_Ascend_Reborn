@@ -1,12 +1,58 @@
 import * as THREE from 'three';
-import { isForceFieldMesh, THEMES, type MapData, type Theme } from '@ar/shared';
+import { isForceFieldMesh, THEMES, type MapData, type MeshFx, type Theme } from '@ar/shared';
 import { settings } from '../settings.js';
+import { FOG_UNIFORMS, withFog } from './fog.js';
 import { forceFieldMaterial, forceFieldTime } from './forcefield.js';
+import { disposeLiquids, lavaMaterial, waterMaterial } from './liquids.js';
 import { matFor, surfaceMaterial } from './materials.js';
+import { NORMAL_STRENGTH } from './models.js';
+import { SHADOW_RES } from './renderer.js';
 import type { TextureStore } from './textures.js';
 
 const TEAM_TINT = [0xc0503a, 0x3a70c0];
+/** Imported meshes drawn with alpha cut-out (grass, ferns, leaves, vines...). */
+const FOLIAGE = /grass|foliage|fern|bush|shrub|leaf|leaves|vine|ivy|weed|frond|reed|flower|hedge|seaweed/i;
 const FIELD_TINT = [0xff5a3c, 0x4fa8ff];
+type BlendFx = 'additive' | 'translucent' | 'modulate';
+const isBlendFx = (fx: MeshFx | undefined): fx is BlendFx => fx === 'additive' || fx === 'translucent' || fx === 'modulate';
+const HIDDEN_INSTANCE = new THREE.Matrix4().makeScale(0, 0, 0);
+
+/**
+ * Baked lighting balance, shared by every lightmapped program: how much of the dynamic ambient (hemisphere + sky IBL)
+ * remains on top of the lightmap, and how much dynamic sun reaches lightmapped surfaces (0 when the map bakes its sun).
+ */
+export const LM_UNIFORMS = { lmAmbient: { value: 0.3 }, lmDirect: { value: 1 }, lmGain: { value: 0.25 }, lmSpec: { value: 1 } };
+
+/** TA specular maps: their colour sets the reflectance, bright texels turn glossy (UE3 Phong spec, roughly). */
+const SPEC_UNIFORMS = { specGain: { value: 0.35 }, specRough: { value: 0.32 } };
+
+/** Shader hooks for imported surface materials: height fog, channel-packed diffuse, specular map, TA lightmap with per-instance atlas rect. */
+function setMaterialHooks(mm: THREE.MeshStandardMaterial) {
+  const packed = !!mm.userData.packed, lm = !!mm.userData.lm, spec = mm.userData.spec as { value: THREE.Texture } | undefined;
+  mm.customProgramCacheKey = () => `imported${packed ? '-packed' : ''}${lm ? '-lm' : ''}${spec ? '-spec' : ''}`;
+  mm.onBeforeCompile = (sh) => {
+    withFog(sh);
+    if (packed) {
+      sh.fragmentShader = sh.fragmentShader.replace('#include <map_fragment>',
+        '#ifdef USE_MAP\n vec4 sdc = texture2D(map, vMapUv); diffuseColor.rgb *= vec3(dot(sdc.rgb, vec3(0.3, 0.59, 0.11))) * 1.2;\n#endif');
+    }
+    if (spec) {
+      Object.assign(sh.uniforms, SPEC_UNIFORMS, { specMap: spec });
+      sh.fragmentShader = 'uniform sampler2D specMap;\nuniform float specGain;\nuniform float specRough;\n' + sh.fragmentShader.replace('#include <lights_physical_fragment>',
+        '#include <lights_physical_fragment>\n#ifdef USE_MAP\n  vec3 spc = texture2D(specMap, vMapUv).rgb;\n  material.specularColor = max(material.specularColor, spc * specGain);\n  material.roughness = mix(material.roughness, specRough, clamp(dot(spc, vec3(0.6)), 0.0, 1.0));\n#endif');
+    }
+    if (lm) {
+      Object.assign(sh.uniforms, LM_UNIFORMS);
+      sh.vertexShader = 'attribute vec4 lmST;\nattribute vec3 lmScale;\nvarying vec3 vLmScale;\n' + sh.vertexShader.replace('#include <uv_vertex>',
+        '#include <uv_vertex>\n#ifdef USE_LIGHTMAP\n  vLightMapUv = vLightMapUv * lmST.xy + lmST.zw;\n#endif\n  vLmScale = lmScale;');
+      // A baked sun replaces the dynamic sun's diffuse; its (shadow-mapped) highlights stay.
+      sh.fragmentShader = 'uniform float lmAmbient;\nuniform float lmDirect;\nuniform float lmGain;\nuniform float lmSpec;\nvarying vec3 vLmScale;\n' + sh.fragmentShader.replace('#include <lights_fragment_maps>',
+        THREE.ShaderChunk.lights_fragment_maps.replace('irradiance += lightMapIrradiance;', 'irradiance = irradiance * lmAmbient + lightMapIrradiance * vLmScale * lmGain;') +
+        '\n#ifdef USE_LIGHTMAP\n  iblIrradiance *= lmAmbient;\n  reflectedLight.directDiffuse *= lmDirect;\n  reflectedLight.directSpecular *= max(lmDirect, lmSpec);\n#endif');
+    }
+  };
+  mm.needsUpdate = true;
+}
 const ROOF_CELL = 4;
 const WEATHER_BOX = 120;
 const wrap = (v: number, c: number) => c + ((((v - c) % WEATHER_BOX) + WEATHER_BOX * 1.5) % WEATHER_BOX) - WEATHER_BOX / 2;
@@ -39,11 +85,17 @@ export class WorldView {
   private weatherOffsets: Float32Array | null = null;
   private weatherVel = new THREE.Vector3();
   private hazard: THREE.Mesh | null = null;
-  private texMats = new Map<number, THREE.MeshStandardMaterial>();
+  private texMats = new Map<string, THREE.MeshStandardMaterial>();
+  private blendMats = new Map<string, THREE.Material>();
+  private skyEnv: THREE.Texture | null = null;
+  /** Map force-field instances by blocker index, so they can drop with their generator. */
+  private blockerSlots: { im: THREE.InstancedMesh; k: number; m: THREE.Matrix4; up: boolean }[] = [];
 
-  constructor(readonly map: MapData, private scene: THREE.Scene, private textures: TextureStore | null = null) {
+  constructor(readonly map: MapData, private scene: THREE.Scene, private textures: TextureStore | null = null, private renderer: THREE.WebGLRenderer | null = null) {
     this.theme = THEMES[map.theme] ?? THEMES.alpine;
     const t = this.theme, env = map.env;
+    // Maps lit by a static sun already carry it in their lightmaps; dominant (dynamic) suns still light those surfaces.
+    LM_UNIFORMS.lmDirect.value = env?.sunBaked ? 0 : 1;
     const fogColor = env?.fogColor ?? t.fog;
     scene.background = new THREE.Color(env?.fogColor ?? t.skyHorizon);
     const fogDensity = env?.fogDensity !== undefined ? THREE.MathUtils.clamp(env.fogDensity * 0.03, 0.00025, 0.0025) : t.fogDensity;
@@ -56,20 +108,14 @@ export class WorldView {
     const sunInt = t.sunIntensity * (env?.sunIntensity !== undefined ? THREE.MathUtils.clamp(env.sunIntensity, 0.6, 1.5) : 1);
     this.sun = new THREE.DirectionalLight(env?.sunColor ?? t.sun, sunInt);
     this.sun.position.copy(this.sunDir).multiplyScalar(400);
-    if (settings.shadows) {
-      this.sun.castShadow = true;
-      this.sun.shadow.mapSize.set(settings.quality === 'ultra' ? 4096 : 2048, settings.quality === 'ultra' ? 4096 : 2048);
-      const c = this.sun.shadow.camera;
-      c.left = -120; c.right = 120; c.top = 120; c.bottom = -120; c.near = 1; c.far = 1200;
-      this.sun.shadow.bias = -0.0004;
-      this.sun.shadow.normalBias = 0.6;
-      // UE3-style shadows keep sky/bounce light: a shadowed surface loses ~45% of direct sun, not all of it.
-      this.sun.shadow.intensity = 0.55;
-    }
+    this.fogColor = fogColor;
+    this.setupFog(fogColor);
+    this.setupShadows();
     this.group.add(this.sun, this.sun.target);
 
     this.sky = this.buildSky(fogColor);
     this.group.add(this.sky);
+    if (this.renderer && settings.waterQuality === 'high') this.skyEnv = this.buildSkyEnv();
     this.group.add(this.buildTerrain());
     for (const m of this.buildBoxes()) this.group.add(m);
     for (const m of this.buildMeshes()) this.group.add(m);
@@ -78,6 +124,71 @@ export class WorldView {
     const weather = map.source === 'original' ? (env?.snow ? 'snow' : t.weather) : t.weather;
     if (settings.weather && weather && weather !== 'none') this.buildWeather(weather);
     scene.add(this.group);
+  }
+
+  /** Direction towards the sun (for god rays). */
+  get sunDirection(): THREE.Vector3 { return this.sunDir; }
+
+  /** Like TA's team blockers: the field is hidden while its generator is down. */
+  setBlockerUp(i: number, up: boolean) {
+    const s = this.blockerSlots[i];
+    if (!s || s.up === up) return;
+    s.up = up;
+    s.im.setMatrixAt(s.k, up ? s.m : HIDDEN_INSTANCE);
+    s.im.instanceMatrix.needsUpdate = true;
+  }
+
+  private fogColor = 0;
+  /** Re-apply shadow and fog quality after a settings change. */
+  applyGraphics() {
+    this.setupFog(this.fogColor);
+    this.setupShadows();
+  }
+
+  private setupShadows() {
+    const res = SHADOW_RES[settings.shadowQuality] ?? 0;
+    this.sun.castShadow = settings.shadows && res > 0;
+    if (!this.sun.castShadow) return;
+    if (this.sun.shadow.mapSize.x !== res) {
+      this.sun.shadow.mapSize.set(res, res);
+      this.sun.shadow.map?.dispose();
+      this.sun.shadow.map = null;
+    }
+    // Higher steps also cover more ground around the player.
+    const ext = settings.shadowQuality === 'ultra' ? 170 : settings.shadowQuality === 'high' ? 135 : settings.shadowQuality === 'medium' ? 110 : 90;
+    const c = this.sun.shadow.camera;
+    c.left = -ext; c.right = ext; c.top = ext; c.bottom = -ext; c.near = 1; c.far = 1200;
+    c.updateProjectionMatrix();
+    this.sun.shadow.bias = -0.0004;
+    this.sun.shadow.normalBias = 0.6;
+    this.sun.shadow.radius = settings.softShadows ? 2.5 : 1;
+    // UE3-style shadows keep sky/bounce light: a shadowed surface loses ~45% of direct sun, not all of it.
+    this.sun.shadow.intensity = 0.55;
+  }
+
+  /**
+   * UE3 ExponentialHeightFog from the original level (height, falloff, max opacity, start distance, light/opposite
+   * inscattering colours) when imported; themed defaults otherwise. "Volumetric fog" off = classic uniform fog.
+   */
+  private setupFog(fogColor: number) {
+    const env = this.map.env, T = this.map.terrain;
+    let lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < T.heights.length; i += 7) { const h = T.heights[i]; if (h < lo) lo = h; if (h > hi) hi = h; }
+    if (!Number.isFinite(lo)) { lo = 0; hi = 100; }
+    const on = settings.volumetricFog;
+    // Normalise the density to where people play (median spawn/objective height), so the imported falloff adds
+    // valley fog and clear peaks without changing the tuned overall visibility.
+    const ys = this.map.entities.filter((e) => e.kind === 'spawn' || e.kind === 'flag_stand' || e.kind === 'generator').map((e) => e.pos.y).sort((a, b) => a - b);
+    const base = ys.length ? ys[ys.length >> 1] : lo + (hi - lo) * 0.3;
+    // UE3 FogHeightFalloff is per 1000 uu (default 0.2): 0.2 / 1000 uu * 50 uu/m = 0.01 per metre.
+    const falloff = env?.fogFalloff !== undefined ? THREE.MathUtils.clamp(env.fogFalloff * 0.05, 0.002, 0.02) : 0.006;
+    FOG_UNIFORMS.fogHeight.value.set(base, on ? falloff : 0, env?.fogMaxOpacity ?? 1, env?.fogStart ?? 0);
+    FOG_UNIFORMS.fogSun.value.set(this.sunDir.x, this.sunDir.y, this.sunDir.z, 10);
+    const sunCol = new THREE.Color(env?.fogLightColor ?? env?.sunColor ?? this.theme.sun);
+    const fogLin = new THREE.Color(fogColor);
+    // Extra light toward the sun: the light-side inscattering colour minus the base (opposite) fog colour.
+    const glow = env?.fogLightColor !== undefined ? sunCol.clone().sub(fogLin) : sunCol.clone().multiplyScalar(0.22);
+    FOG_UNIFORMS.fogSunColor.value.copy(on ? new THREE.Color(Math.max(0, glow.r), Math.max(0, glow.g), Math.max(0, glow.b)) : new THREE.Color(0, 0, 0));
   }
 
   private buildSky(fogColor: number): THREE.Mesh {
@@ -112,7 +223,8 @@ export class WorldView {
     const T = this.map.terrain, t = this.theme;
     const textured = !!this.textures && !!this.map.terrainLayers?.some((l) => l.tex >= 0);
     const snowy = !!this.map.env?.snow;
-    const step = settings.quality === 'low' ? 2 : 1;
+    // Render at the collision resolution: a decimated mesh would let players sink into (or float over) slopes.
+    const step = T.resX * T.resZ > 1_100_000 ? 2 : 1;
     const nx = Math.floor((T.resX - 1) / step) + 1, nz = Math.floor((T.resZ - 1) / step) + 1;
     const pos = new Float32Array(nx * nz * 3);
     const col = new Float32Array(nx * nz * 3);
@@ -168,12 +280,14 @@ export class WorldView {
     return mesh;
   }
 
-  /** Splat-blended terrain: up to five imported layers, each tiled at its original mapping scale. */
+  /** Splat-blended terrain: up to five imported layers, each tiled at its original mapping scale, with TA's normal maps on the first three. */
   private terrainMaterial(): THREE.MeshStandardMaterial {
     const T = this.map.terrain, layers = this.map.terrainLayers!.slice(0, 5);
-    const N = layers.length;
+    const N = layers.length, NN = Math.min(3, N);
     const blank = new THREE.DataTexture(new Uint8Array([150, 150, 150, 255]), 1, 1, THREE.RGBAFormat);
     blank.needsUpdate = true;
+    const flat = new THREE.DataTexture(new Uint8Array([128, 128, 255, 255]), 1, 1, THREE.RGBAFormat);
+    flat.needsUpdate = true;
     let splatTex: THREE.DataTexture = new THREE.DataTexture(new Uint8Array(4), 1, 1, THREE.RGBAFormat);
     if (this.map.terrainSplat && this.map.terrainSplat.length === T.resX * T.resZ * 4) {
       splatTex = new THREE.DataTexture(this.map.terrainSplat as Uint8Array<ArrayBuffer>, T.resX, T.resZ, THREE.RGBAFormat);
@@ -185,13 +299,16 @@ export class WorldView {
       uScale: { value: layers.map((l) => 1 / Math.max(1, l.scale)) }, uHas: { value: layers.map(() => 0) },
       uSplat: { value: new THREE.Vector4(T.originX, T.originZ, 1 / (T.cellX * T.resX), 1 / (T.cellZ * T.resZ)) },
       uCellOff: { value: new THREE.Vector2(0.5 / T.resX, 0.5 / T.resZ) },
+      tN: { value: layers.slice(0, NN).map(() => flat as THREE.Texture) }, uHasN: { value: layers.slice(0, NN).map(() => 0) },
     };
     layers.forEach((l, i) => {
       const name = l.tex >= 0 ? this.map.textures?.[l.tex] : undefined;
       if (!name) return;
       void this.textures!.get(name).then((tx) => { if (tx) { uniforms.tL.value[i] = tx; uniforms.uHas.value[i] = 1; } });
+      const nname = i < NN && (l.ntex ?? -1) >= 0 && settings.textureDetail !== 'low' ? this.map.textures?.[l.ntex!] : undefined;
+      if (nname) void this.textures!.get(nname, true).then((tx) => { if (tx) { uniforms.tN.value[i] = tx; uniforms.uHasN.value[i] = 1; } });
     });
-    const m = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.92, metalness: 0 });
+    const m = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.84, metalness: 0 });
     const ch = ['r', 'g', 'b', 'a'];
     const blend = layers.map((_, i) => `{
         vec3 a = texture2D(tL[${i}], vTXZ * uScale[${i}]).rgb;
@@ -199,8 +316,14 @@ export class WorldView {
         vec3 li = mix(a, mix(a, b, 0.5), far);
         ${i === 0 ? 'tc = mix(tc, li, uHas[0]);' : `tc = mix(tc, li, w.${ch[i - 1]} * uHas[${i}]);`}
       }`).join('\n');
-    m.customProgramCacheKey = () => `terrain-splat-${N}`;
+    // Layer normals blend like the colours; UV u runs along +x and v along +z, so those are the tangent frame.
+    const nblend = layers.slice(0, NN).map((_, i) => `{
+        vec3 ln = texture2D(tN[${i}], vTXZ * uScale[${i}]).xyz * 2.0 - 1.0;
+        ${i === 0 ? 'tn = mix(tn, ln, uHasN[0]);' : `tn = mix(tn, ln, w.${ch[i - 1]} * uHasN[${i}]);`}
+      }`).join('\n');
+    m.customProgramCacheKey = () => `terrain-splat-${N}-${NN}`;
     m.onBeforeCompile = (sh) => {
+      withFog(sh);
       Object.assign(sh.uniforms, uniforms);
       sh.vertexShader = sh.vertexShader
         .replace('#include <common>', '#include <common>\nvarying vec2 vTXZ;')
@@ -213,13 +336,26 @@ export class WorldView {
           uniform float uScale[${N}];
           uniform float uHas[${N}];
           uniform vec4 uSplat;
-          uniform vec2 uCellOff;`)
+          uniform vec2 uCellOff;
+          uniform sampler2D tN[${NN}];
+          uniform float uHasN[${NN}];`)
         .replace('#include <color_fragment>', `#include <color_fragment>
           vec4 w = texture2D(tSplat, (vTXZ - uSplat.xy) * uSplat.zw + uCellOff);
           float far = smoothstep(60.0, 260.0, length(vTXZ - cameraPosition.xz));
           vec3 tc = vec3(0.6);
           ${blend}
-          diffuseColor.rgb *= tc * 1.15;`);
+          diffuseColor.rgb *= tc * 1.15;`)
+        .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
+          {
+            vec3 tn = vec3(0.0, 0.0, 1.0);
+            ${nblend}
+            tn.xy *= 0.9 * (1.0 - 0.6 * far);
+            vec3 tv = normalize((viewMatrix * vec4(1.0, 0.0, 0.0, 0.0)).xyz);
+            vec3 bv = normalize((viewMatrix * vec4(0.0, 0.0, 1.0, 0.0)).xyz);
+            tv = normalize(tv - normal * dot(normal, tv));
+            bv = normalize(bv - normal * dot(normal, bv));
+            normal = normalize(tv * tn.x + bv * tn.y + normal * max(tn.z, 0.2));
+          }`);
     };
     return m;
   }
@@ -245,12 +381,89 @@ export class WorldView {
     return out;
   }
 
-  /** One shared material per imported texture; the texture streams in after the world is visible. */
-  private texMaterial(tex: number, tint: string): THREE.MeshStandardMaterial {
-    let m = this.texMats.get(tex);
+  /** Prefiltered environment of this map's sky, for water reflections. */
+  private buildSkyEnv(): THREE.Texture | null {
+    try {
+      const pm = new THREE.PMREMGenerator(this.renderer!);
+      const s = new THREE.Scene();
+      const sky = new THREE.Mesh(this.sky.geometry, this.sky.material);
+      s.add(sky);
+      const rt = pm.fromScene(s, 0, 0.1, 6000);
+      pm.dispose();
+      return rt.texture;
+    } catch { return null; }
+  }
+
+  /**
+   * TA's non-opaque materials: additive / unlit translucent glows (light beams, holograms) add their texture, lit
+   * translucent (glass) blends over the scene, modulate (grime decals) multiplies it. None write depth.
+   */
+  private blendMaterial(tex: number, fx: BlendFx): THREE.Material {
+    const key = `${fx}|${tex}`;
+    const hit = this.blendMats.get(key);
+    if (hit) return hit;
+    const name = tex >= 0 ? this.map.textures?.[tex] : undefined;
+    const common = { transparent: true, depthWrite: false, side: THREE.DoubleSide };
+    const m: THREE.MeshBasicMaterial | THREE.MeshStandardMaterial = fx === 'translucent'
+      ? new THREE.MeshStandardMaterial({ ...common, color: 0xc4d2dc, opacity: 0.32, roughness: 0.12, metalness: 0.3 })
+      : new THREE.MeshBasicMaterial({
+        ...common,
+        color: fx === 'modulate' ? 0xffffff : name ? 0xffffff : 0x55606a,
+        opacity: fx === 'additive' ? 0.6 : 1,
+        blending: fx === 'additive' ? THREE.AdditiveBlending : THREE.MultiplyBlending,
+        premultipliedAlpha: fx === 'modulate',
+      });
+    this.blendMats.set(key, m);
+    if (name && this.textures) {
+      void this.textures.get(name).then((tx) => {
+        if (!tx) return;
+        m.map = tx;
+        m.needsUpdate = true;
+      });
+    }
+    return m;
+  }
+
+  /** One shared material per imported texture (+ normal map, + baked lightmap page); textures stream in after the world is visible. */
+  private texMaterial(tex: number, tint: string, ntex = -1, masked = false, lm = -1, stex = -1): THREE.MeshStandardMaterial {
+    const key = `${tex}|${ntex}|${masked}|${lm}|${stex}`;
+    let m = this.texMats.get(key);
     if (m) return m;
     const mm = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.86, metalness: 0.04, side: THREE.DoubleSide });
-    this.texMats.set(tex, mm);
+    // Foliage cards use TA's masked blend mode: cut out by the diffuse alpha.
+    if (masked) mm.alphaTest = 0.45;
+    this.texMats.set(key, mm);
+    const nname = ntex >= 0 && settings.textureDetail !== 'low' ? this.map.textures?.[ntex] : undefined;
+    if (nname && this.textures) {
+      void this.textures.get(nname, true).then((tx) => {
+        if (!tx) return;
+        mm.normalMap = tx;
+        // UE3 (DirectX) normal maps on mirrored (axis-swapped) geometry.
+        mm.normalScale.set(-NORMAL_STRENGTH, NORMAL_STRENGTH);
+        mm.needsUpdate = true;
+      });
+    }
+    const lname = lm >= 0 ? this.map.textures?.[lm] : undefined;
+    const sname = stex >= 0 && settings.textureDetail !== 'low' ? this.map.textures?.[stex] : undefined;
+    if (sname && this.textures) {
+      void this.textures.get(sname).then((tx) => {
+        if (!tx) return;
+        mm.userData.spec = { value: tx };
+        setMaterialHooks(mm);
+      });
+    }
+    if (lname && this.textures) {
+      void this.textures.get(lname).then((tx) => {
+        if (!tx) return;
+        // TA lightmaps: sRGB texels times the per-instance scale (UE3 BasePassPixelShader SIMPLE_TEXTURE_LIGHTMAP).
+        tx.channel = 1;
+        tx.wrapS = tx.wrapT = THREE.ClampToEdgeWrapping;
+        mm.lightMap = tx;
+        mm.lightMapIntensity = Math.PI;
+        mm.userData.lm = true;
+        setMaterialHooks(mm);
+      });
+    }
     const name = this.map.textures?.[tex];
     if (name && this.textures) {
       void this.textures.get(name).then((tx) => {
@@ -259,11 +472,8 @@ export class WorldView {
         if (tx.userData.packed) {
           // Channel-packed mask: use its luminance as detail over the surface colour.
           mm.color.set(matFor(tint).color).multiplyScalar(1.5);
-          mm.customProgramCacheKey = () => 'packed-luminance';
-          mm.onBeforeCompile = (sh) => {
-            sh.fragmentShader = sh.fragmentShader.replace('#include <map_fragment>',
-              '#ifdef USE_MAP\n vec4 sdc = texture2D(map, vMapUv); diffuseColor.rgb *= vec3(dot(sdc.rgb, vec3(0.3, 0.59, 0.11))) * 1.2;\n#endif');
-          };
+          mm.userData.packed = true;
+          setMaterialHooks(mm);
         } else mm.color.setRGB(1, 1, 1);
         mm.needsUpdate = true;
       });
@@ -279,6 +489,7 @@ export class WorldView {
     const out: THREE.InstancedMesh[] = [];
     const m4 = new THREE.Matrix4();
     const white = new THREE.Color(1, 1, 1);
+    const blockerOf = new Map((this.map.blockers ?? []).map((b, i) => [b.instance, i]));
     for (const [mi, list] of byMesh) {
       const me = meshes[mi];
       if (me.hidden) continue;
@@ -293,8 +504,11 @@ export class WorldView {
           const m = instances[ii].m;
           m4.set(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0, 0, 0, 1);
           im.setMatrixAt(k, m4);
-          const team = instances[ii].team;
-          im.setColorAt(k, new THREE.Color(team === undefined ? 0x5fc8ff : FIELD_TINT[team]));
+          const bi = blockerOf.get(ii);
+          // Team fields (TA blockers, base doors) glow in their team's colour.
+          const team = instances[ii].team ?? (bi !== undefined ? this.map.blockers![bi].team : undefined);
+          im.setColorAt(k, new THREE.Color(team === undefined || team > 1 ? 0x5fc8ff : FIELD_TINT[team]));
+          if (bi !== undefined) this.blockerSlots[bi] = { im, k, m: m4.clone(), up: true };
         });
         im.computeBoundingSphere();
         out.push(im);
@@ -303,35 +517,80 @@ export class WorldView {
       const fallback = matFor(me.mat, this.theme.structure);
       // Imported instances may be mirrored (negative scale), so render both faces.
       fallback.side = THREE.DoubleSide;
-      let material: THREE.Material | THREE.Material[] = fallback;
-      if (me.uvs && me.groups?.length && this.textures) {
-        g.setAttribute('uv', new THREE.BufferAttribute(me.uvs, 2));
-        const mats: THREE.Material[] = [];
-        for (const grp of me.groups) {
-          g.addGroup(grp.start, grp.count, mats.length);
-          mats.push(grp.tex >= 0 ? this.texMaterial(grp.tex, me.mat) : fallback);
-        }
-        material = mats;
+      const textured = !!(me.uvs && me.groups?.length && this.textures);
+      if (textured) g.setAttribute('uv', new THREE.BufferAttribute(me.uvs!, 2));
+      // Glows, glass and decals draw after the opaque world without shadows or depth writes.
+      const blended = me.groups?.filter((gr) => isBlendFx(gr.fx)) ?? [];
+      if (blended.length) {
+        const bg = new THREE.BufferGeometry();
+        for (const [k, a] of Object.entries(g.attributes)) bg.setAttribute(k, a);
+        bg.setIndex(g.index);
+        bg.boundingSphere = g.boundingSphere;
+        const bm: THREE.Material[] = [];
+        for (const grp of blended) { bg.addGroup(grp.start, grp.count, bm.length); bm.push(this.blendMaterial(textured ? grp.tex : -1, grp.fx as BlendFx)); }
+        const im = new THREE.InstancedMesh(bg, bm, list.length);
+        list.forEach((ii, k) => {
+          const m = instances[ii].m;
+          m4.set(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0, 0, 0, 1);
+          im.setMatrixAt(k, m4);
+        });
+        im.renderOrder = 2;
+        im.computeBoundingSphere();
+        out.push(im);
+        if (blended.length === me.groups!.length) continue;
       }
-      const im = new THREE.InstancedMesh(g, material, list.length);
-      list.forEach((ii, k) => {
-        const m = instances[ii].m;
-        m4.set(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0, 0, 0, 1);
-        im.setMatrixAt(k, m4);
-        const team = instances[ii].team;
-        im.setColorAt(k, team === undefined ? white : new THREE.Color(1, 1, 1).lerp(new THREE.Color(TEAM_TINT[team]), 0.45));
-      });
-      im.castShadow = settings.quality !== 'medium' && me.mat !== 'leaves';
-      im.receiveShadow = true;
-      im.computeBoundingSphere();
-      out.push(im);
+      // Instances with TA baked lighting draw per packed lightmap page; the rest use the dynamic lighting only.
+      const lmUv = me.uv2 ?? me.uvs;
+      const byPage = new Map<number, number[]>();
+      for (const ii of list) {
+        const page = settings.bakedLighting && lmUv && me.groups?.length && this.textures ? instances[ii].lm?.tex ?? -1 : -1;
+        const arr = byPage.get(page) ?? [];
+        arr.push(ii);
+        byPage.set(page, arr);
+      }
+      const uv1 = lmUv && byPage.size > (byPage.has(-1) ? 1 : 0) ? new THREE.BufferAttribute(lmUv, 2) : null;
+      for (const [page, sub] of byPage) {
+        let geo = g;
+        if (page >= 0 && uv1) {
+          geo = new THREE.BufferGeometry();
+          for (const [k, a] of Object.entries(g.attributes)) geo.setAttribute(k, a);
+          geo.setIndex(g.index);
+          geo.setAttribute('uv1', uv1);
+          const st = new Float32Array(sub.length * 4), sc = new Float32Array(sub.length * 3);
+          sub.forEach((ii, k) => { const l = instances[ii].lm!; st.set(l.st, k * 4); sc.set(l.scale, k * 3); });
+          geo.setAttribute('lmST', new THREE.InstancedBufferAttribute(st, 4));
+          geo.setAttribute('lmScale', new THREE.InstancedBufferAttribute(sc, 3));
+          geo.boundingSphere = g.boundingSphere;
+        }
+        let material: THREE.Material | THREE.Material[] = fallback;
+        if (me.groups?.length && (textured || blended.length)) {
+          const mats: THREE.Material[] = [];
+          for (const grp of me.groups) {
+            if (isBlendFx(grp.fx)) continue;
+            geo.addGroup(grp.start, grp.count, mats.length);
+            mats.push(!textured ? fallback : grp.fx === 'lava' ? lavaMaterial() : grp.fx === 'water' ? waterMaterial(this.skyEnv) : grp.tex >= 0 ? this.texMaterial(grp.tex, me.mat, grp.ntex ?? -1, FOLIAGE.test(me.name), page, grp.stex ?? -1) : fallback);
+          }
+          material = mats;
+        }
+        const im = new THREE.InstancedMesh(geo, material, sub.length);
+        sub.forEach((ii, k) => {
+          const m = instances[ii].m;
+          m4.set(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], 0, 0, 0, 1);
+          im.setMatrixAt(k, m4);
+          const team = instances[ii].team;
+          im.setColorAt(k, team === undefined ? white : new THREE.Color(1, 1, 1).lerp(new THREE.Color(TEAM_TINT[team]), 0.45));
+        });
+        im.castShadow = settings.quality !== 'medium' && me.mat !== 'leaves';
+        im.receiveShadow = true;
+        im.computeBoundingSphere();
+        out.push(im);
+      }
     }
     return out;
   }
 
   private buildHazard(kind: 'lava' | 'water' | 'acid', level: number) {
-    const color = kind === 'lava' ? 0xff5a1a : kind === 'acid' ? 0x9acd32 : 0x2a5a7a;
-    const mat = new THREE.MeshStandardMaterial({ color, emissive: kind === 'lava' ? 0xff3300 : 0x000000, emissiveIntensity: kind === 'lava' ? 1.2 : 0, roughness: kind === 'water' ? 0.15 : 0.6, metalness: 0.1, transparent: kind !== 'lava', opacity: 0.85 });
+    const mat = kind === 'lava' ? lavaMaterial() : kind === 'water' ? waterMaterial(this.skyEnv) : waterMaterial(this.skyEnv, 0x6f8f1e);
     this.hazard = new THREE.Mesh(new THREE.PlaneGeometry(20000, 20000), mat);
     this.hazard.rotation.x = -Math.PI / 2;
     this.hazard.position.y = level;
@@ -442,5 +701,8 @@ export class WorldView {
       m.geometry?.dispose();
     });
     for (const m of this.texMats.values()) m.dispose();
+    for (const m of this.blendMats.values()) m.dispose();
+    disposeLiquids();
+    this.skyEnv?.dispose();
   }
 }

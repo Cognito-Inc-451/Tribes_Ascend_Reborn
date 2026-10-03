@@ -209,8 +209,12 @@ export interface GameOptions {
   noFallDamage?: boolean;
   /** Call-ins cost nothing and never recharge (2 s anti-spam per player). */
   infiniteCallIns?: boolean;
+  /** Vehicle stations on the map (default on). */
+  vehicles?: boolean;
   /** Scales every credit reward (1 = TA default). */
   creditMultiplier?: number;
+  /** World gravity multiplier for players, projectiles, flags and vehicles (1 = TA default). */
+  gravity?: number;
   timeLimit?: number;   // minutes, 0 = none
   scoreLimit?: number;  // 0 = none
 }
@@ -222,8 +226,8 @@ export interface PlayerInfo {
 
 export type C2S =
   | { t: 'hello'; v: number; name: string; cosmetics: Partial<CosmeticProfile>; spectate?: boolean; mapHash?: string; transport: TransportKind }
-  | { t: 'team'; team: number }
-  | { t: 'class'; cls: string; loadout: Partial<Loadout> }
+  | { t: 'team'; team: number; spawn?: boolean }
+  | { t: 'class'; cls: string; loadout: Partial<Loadout>; spawn?: boolean }
   | { t: 'chat'; text: string; team: boolean }
   | { t: 'vgs'; id: string }
   | { t: 'vote'; yes: boolean }

@@ -4,12 +4,13 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 import { encodeMapData, ITEMS, LAYOUTS, type ModeId, type ThemeId } from '@ar/shared';
+import { exportAnims } from './anim.js';
 import { importMap, indexCooked, loadPackage, modeFromFile } from './extract.js';
 import { Resolver } from './material.js';
 import { exportModels } from './models.js';
 import { extractMusic, extractSfx, extractVoices } from './sound.js';
 import { exportUi } from './ui.js';
-import { encodeTexture, extractTexture } from './texture.js';
+import { encodeTexture, extractTexture, type TextureData } from './texture.js';
 import { UPackage } from './upk.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -22,6 +23,8 @@ const outDir = resolve(opt('out', join(repoRoot, 'maps-original'))!);
 const only = opt('only')?.split(',');
 const all = args.includes('--all');
 const texMax = Number(opt('texmax', '512'));
+// Mips above texmax (up to texhi) go to <name>.hi.atx, fetched only by clients on Ultra texture quality.
+const texHi = Number(opt('texhi', '1024'));
 const withTextures = !args.includes('--no-textures');
 const withVoices = !args.includes('--no-voices');
 const assetsOnly = args.includes('--assets-only');
@@ -81,8 +84,23 @@ const onTexture = withTextures
       const tex = extractTexture(t.pkg, t.exp as never, cooked, texMax);
       if (tex) { writeFileSync(file, encodeTexture(tex)); ok = true; }
     }
+    const hiFile = join(texDir, `${name}.hi.atx`), noHi = join(texDir, `${name}.hi.none`);
+    if (ok && texHi > texMax && !existsSync(hiFile) && !existsSync(noHi)) {
+      const big = extractTexture(t.pkg, t.exp as never, cooked, texHi);
+      const top = big ? big.mips.filter((m) => Math.max(m.w, m.h) > texMax) : [];
+      if (big && top.length) writeFileSync(hiFile, encodeTexture({ ...big, mips: top }));
+      else writeFileSync(noHi, '');
+    }
     texDone.set(name, ok);
     return ok ? name : null;
+  }
+  : undefined;
+/** Packed lightmap pages are regenerated on every import (their layout depends on the level). */
+const onLightmapPage = withTextures
+  ? (t: TextureData) => {
+    const name = t.name.replace(/[^A-Za-z0-9_]/g, '_');
+    writeFileSync(join(texDir, `${name}.atx`), encodeTexture(t));
+    return name;
   }
   : undefined;
 
@@ -103,7 +121,9 @@ if (withVoices && (all || !only || assetsOnly)) {
 
 if (onTexture && (all || !only || assetsOnly)) {
   console.log('Exporting models (characters, weapons, vehicles, stations) ...');
-  exportModels(cooked, outDir, new Resolver(indexCooked(cooked), loadPackage), loadPackage, onTexture, (s) => console.log(`  ${s}`));
+  const anims1p = exportModels(cooked, outDir, new Resolver(indexCooked(cooked), loadPackage), loadPackage, onTexture, (s) => console.log(`  ${s}`));
+  const gameU = join(cooked, 'TribesGame.u');
+  if (existsSync(gameU)) exportAnims(loadPackage(gameU), outDir, (s) => console.log(`  ${s}`), anims1p);
 }
 if (assetsOnly) process.exit(0);
 
@@ -113,7 +133,7 @@ for (const j of jobs) {
   const t0 = Date.now();
   console.log(`${j.internal} -> ${j.id}.${j.mode}`);
   try {
-    const map = importMap([j.file], j.mode, { cookedDir: cooked, id: j.id, name: j.name, theme: j.theme, log: (s) => console.log(s), onTexture });
+    const map = importMap([j.file], j.mode, { cookedDir: cooked, id: j.id, name: j.name, theme: j.theme, log: (s) => console.log(s), onTexture, onLightmapPage });
     const blob = gzipSync(encodeMapData(map), { level: 6 });
     const name = `${j.id}.${j.mode}.arm.gz`;
     writeFileSync(join(outDir, name), blob);

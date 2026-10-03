@@ -76,9 +76,16 @@ export interface MeshAsset {
   hidden?: boolean;
   /** UV0 per vertex (original maps). */
   uvs?: Float32Array;
-  /** Index ranges per material; `tex` indexes MapData.textures (-1 = untextured). */
-  groups?: { start: number; count: number; tex: number }[];
+  /** Lightmap UVs (the mesh's LightMapCoordinateIndex set) when they differ from UV0. */
+  uv2?: Float32Array;
+  /**
+   * Index ranges per material; `tex` indexes MapData.textures (-1 = untextured), `ntex` the normal map, `fx` liquids or
+   * the blend of TA's non-opaque materials (light beams, glows, glass, grime decals).
+   */
+  groups?: { start: number; count: number; tex: number; ntex?: number; stex?: number; fx?: MeshFx }[];
 }
+
+export type MeshFx = 'lava' | 'water' | 'additive' | 'translucent' | 'modulate';
 
 /** Lighting/atmosphere taken from the original level (DominantDirectionalLight, SkyLight, ExponentialHeightFog). */
 export interface MapEnv {
@@ -89,13 +96,55 @@ export interface MapEnv {
   fogColor?: number;
   fogDensity?: number;
   fogStart?: number;
+  /** ExponentialHeightFog actor height (m), FogHeightFalloff (UE units), FogMaxOpacity, light-side inscattering colour. */
+  fogHeight?: number;
+  fogFalloff?: number;
+  fogMaxOpacity?: number;
+  fogLightColor?: number;
   snow?: boolean;
+  /** The sun is a static DirectionalLight, so lightmaps already contain its light (else it is dominant/dynamic). */
+  sunBaked?: boolean;
 }
 
-export interface TerrainLayer { tex: number; scale: number }
+export interface TerrainLayer { tex: number; scale: number; ntex?: number; stex?: number }
 
-/** Affine 3x4 row-major transform: world = M * local + t, packed [m00,m01,m02,tx, m10,m11,m12,ty, m20,m21,m22,tz]. */
-export interface MeshInstance { mesh: number; m: Float32Array; team?: number }
+/**
+ * TA's damage volumes (UTKillZVolume, pain-causing PhysicsVolume such as lava): a convex hull given as planes
+ * [nx, ny, nz, d, ...] with the inside where n·p <= d, plus its bounds.
+ */
+export interface MapVolume { kind: 'kill' | 'pain'; dps: number; min: Vec3; max: Vec3; planes: Float32Array }
+
+/**
+ * TA accelerators and launch pads (Kismet: Touch volume -> [team check] -> SetVelocity): entering sets a player's
+ * velocity to `vel` (map m/s), or multiplies it by `scale` when given. `team` 255 = anyone, else only that team.
+ * `cond`: only when that velocity component is above (`gt`) or below `value` (one-way accelerators).
+ */
+export interface MapBoost {
+  min: Vec3; max: Vec3; planes: Float32Array; vel: Vec3; scale?: number; team: number;
+  cond?: { axis: 'x' | 'y' | 'z'; gt: boolean; value: number };
+}
+
+/**
+ * Energy fields that stop players but not shots. `team` 0/1: the defenders, who pass (TA TrTeamBlockerStaticMeshActor);
+ * 255: blocks everyone. `gate`: the team whose generator powers it (down while that generator is), else always up.
+ */
+export interface MapBlocker { instance: number; team: number; gate?: number }
+
+/** Inside a volume (point in map metres). */
+export function inVolume(v: { min: Vec3; max: Vec3; planes: Float32Array }, p: Vec3): boolean {
+  if (p.x < v.min.x || p.y < v.min.y || p.z < v.min.z || p.x > v.max.x || p.y > v.max.y || p.z > v.max.z) return false;
+  const P = v.planes;
+  for (let i = 0; i < P.length; i += 4) if (P[i] * p.x + P[i + 1] * p.y + P[i + 2] * p.z > P[i + 3]) return false;
+  return true;
+}
+
+/**
+ * Affine 3x4 row-major transform: world = M * local + t, packed [m00,m01,m02,tx, m10,m11,m12,ty, m20,m21,m22,tz].
+ * `lm`: TA's baked (Lightmass) lighting: `tex` indexes MapData.textures (an sRGB lightmap atlas), lightmap UV ->
+ * atlas UV = uv * st.xy + st.zw, and the decoded texel is multiplied by `scale`.
+ */
+export interface MeshInstance { mesh: number; m: Float32Array; team?: number; lm?: InstanceLightmap }
+export interface InstanceLightmap { tex: number; st: [number, number, number, number]; scale: [number, number, number] }
 
 export interface MapData {
   id: string;
@@ -115,4 +164,7 @@ export interface MapData {
   terrainLayers?: TerrainLayer[];
   terrainSplat?: Uint8Array;
   env?: MapEnv;
+  volumes?: MapVolume[];
+  boosts?: MapBoost[];
+  blockers?: MapBlocker[];
 }

@@ -14,30 +14,56 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 
 **Gameplay (tuned to TA's own defaults, read from `TribesGame.u`)**
 - TA movement: skiing with the downhill slope boost, per-armour air control and ski acceleration caps, jetting, fall
-  ("splat") damage. Gravity, jump speed, masses and every projectile's speed, gravity scale, inheritance and
-  momentum come from TA's default properties, so disc jumps, nade jumps and mid-airs behave like the original.
+  ("splat") damage. Gravity, jump speed, per-class masses and every projectile's speed, gravity scale, inheritance and
+  momentum come from TA's default properties. As in TA, energy does not recharge while the jet key is held, and jet
+  lift fades as you climb toward the jetpack's max thrust speed (72 km/h).
+- Knockback follows TA's script (disassembled from `TribesGame.u`): your own explosions push you 1.5x, impulse stays
+  full near the centre of the blast, grounded targets are always lifted, and some weapons add an extra upward kick, so
+  disc jumps, nade jumps and mid-airs feel like the original. Your own discs and grenades are predicted, so the jump
+  is instant.
 - All 9 classes (Pathfinder, Sentinel, Infiltrator, Soldier, Technician, Raider, Juggernaut, Doombringer, Brute) with
   their weapons, belts, packs, perks and upgrades. Everything is unlocked.
 - Game modes: **CTF**, **CTF Blitz**, **Team Deathmatch**, **Rabbit**, **Arena**, **Capture and Hold**, plus Ski Training.
 - Bases: generators, inventory stations (walk in to restock, like TA), repair stations, turrets, radar, vehicle pads,
   vehicles (Grav Cycle, Beowulf, Shrike), deployables and call-ins (tactical strike, supply drop, orbital strike).
-- Bots (Recruit to Godlike, Adept by default) with roles (cappers, chasers, defenders, offense, farmers). They route
-  into base interiors (generator rooms, CaH points) and leave one by one as humans join.
-- Host options: bots per team, bot skill, time/score limits, infinite ammo, infinite energy, no fall damage,
-  **infinite call-ins** and a **credit multiplier**.
+- Bots (Recruit to Godlike, Adept by default) with roles (cappers, chasers, defenders, offense, farmers, roamers).
+  They route into base interiors (generator rooms, CaH points) around enemy force fields, shell the enemy generator,
+  restock at their inventory stations, and roamers keep human players company (escorting or hunting them). Servers
+  keep their bot count and only drop bots when the server is nearly full, to make room for players.
+- Host options: bots per team (10 by default), bot skill, time/score limits, infinite ammo, infinite energy, no fall
+  damage, **infinite call-ins**, **vehicles** on/off, a **credit multiplier** and **gravity** (50%–200% of TA's, for
+  players, projectiles, flags and vehicles).
 
 **With your Tribes: Ascend data imported (`npm run install-ta` or `npm run ta-import -- --all`)**
-- The original maps (geometry, terrain, textures, prefab interiors, force fields), player/weapon/vehicle/station models,
-  TA's class skins (team armour and the Mercenary sets), weapon and effect sounds, voice packs (VGS), music,
-  HUD icons, menu art and the startup splash.
+- The original maps (geometry, terrain with its layer normal maps, textured BSP brushes, textures with normal and
+  specular maps, TA's translucent/additive materials such as light beams and glass, prefab interiors, lava/water, kill
+  and pain volumes such as Lava Arena's lava and Blueshift's space), player/weapon/vehicle/station models, TA's class
+  skins (team armour and the Mercenary sets), sounds (weapons with looping automatic fire, reloads and draws,
+  vehicles' engines and weapons, stations, generators, turrets, deployables, call-ins, deaths, impacts, CTF
+  stingers), voice packs (VGS), music, HUD icons, menu art and the startup splash.
+- Map mechanics from the levels themselves: base force fields that keep enemies out while their generator is up
+  (TA's team blockers on Bella Omega, Permafrost and Sunstar's flag shields, plus the base door fields of Katabatic,
+  Stonehenge, Blueshift, ...), your own base can't be damaged by your team, accelerators and launch pads (Blueshift,
+  Bella Omega, Katabatic, Stonehenge, ...), and spawn points picked like TA does (a random team start, skipping the
+  last one used and any with an enemy in sight; maps without team starts are split in two halves so each team
+  spawns on its own side).
+- TA's baked (Lightmass) lighting on map meshes, packed into a few atlas pages per map (Settings → Video → Baked
+  Lighting).
+- TA's own animations: third-person locomotion blended like TA's AnimTree (8-way run and ski, flight, landing,
+  per-weapon sets, aim offsets, fire/reload/weapon-switch on the upper body) and the first-person arms + weapon
+  meshes playing their 1P animations (idle, fire, reload, retrieve), with an ammo readout on the weapon.
 
 **Client**
 - TA-style front end: login, server browser, host game, class/loadout editor with a live model preview,
   team and class screens, scoreboard, career stats, TA HUD, VGS menu, minimap, kill feed, chat.
 - Loading screen laid out like TA's (next map, game type, rules of engagement over a map screenshot, gameplay tip);
   the screenshot is captured on your first visit to a map.
-- Graphics: imported textures, image-based ambient light, soft shadows, bloom, colour grade, translucent energy force
-  fields, travelling bullet tracers (Settings → Video → Bullet Tracers), weather, quality presets.
+- Graphics (Settings → Video, with Low/Medium/High/Ultra presets that only touch performance options):
+  HDR 16-bit pipeline with ACES/AgX/Neutral/Cineon tone mapping, bloom, screen-space god rays, SSAO, UE3-style
+  exponential height fog with sun inscattering (from each map's fog actor), depth of field, camera motion blur,
+  screen-space reflections on water, soft shadows (1K–4K), contrast/saturation/vibrance/temperature/tint, colour
+  grade looks, vignette, film grain, chromatic aberration, sharpen, anisotropic filtering, texture quality up to the
+  original resolution (Ultra), water quality, translucent energy force fields, bullet tracers, weather.
 
 **Networking (no central server)**
 - Every running copy is a *node*. Nodes find each other on the LAN (UDP multicast) and on the internet through the
@@ -137,7 +163,8 @@ Chat commands: `/g message` (global chat), `/w name message` (whisper), `/r mess
 
 ### VGS (Voice Game System)
 
-Press **V**, then the letters shown on screen. Some favourites:
+Press **V**, then the letters shown on screen (they follow your keyboard layout: on AZERTY the Z key is Z). Some
+favourites:
 
 | Keys | Line | Keys | Line |
 |---|---|---|---|
@@ -158,8 +185,9 @@ Branches: **A**ttack, **D**efend, **F**lag, **G**lobal (**C**ompliment, **R**esp
 - *Play → Host Game*: pick game type, **map set** (original maps by default; generated "Reborn" layouts on request),
   map or rotation, bots per team and skill, limits and rule toggles, then *Launch*. Your game is announced to this PC,
   your LAN and (with port mapping or a relay) the internet, and shuts down after 10 minutes without players.
-- Dedicated servers: edit `config/servers.json` (mode, maps, bots `fillTo`/`difficulty`, max players, options).
-  The default config runs one server per mode on the original maps.
+- Dedicated servers: edit `config/servers.json` (mode, maps, bots `fillTo` = number of bots / `difficulty`, max
+  players, options). Bots leave only when the server is down to 2 free slots. The default config runs one server per
+  mode on the original maps.
 
 ## Repository layout
 
@@ -176,6 +204,11 @@ config            server configuration
 
 ## Known gaps
 
-- Characters use procedural animation (TA's compressed animation sequences are not decoded yet).
+- Lightmaps are imported for static meshes only; terrain and BSP surfaces still use dynamic lighting, and lightmaps
+  are stored at reduced resolution to keep map downloads small. Materials use one diffuse, normal and specular map
+  each (TA's colour parameters, panners and emissive layers are not reproduced).
+- Map force fields stop players but not shots, and Sunstar's flag shields let their own team through (TA blocks
+  everyone) so flags stay capturable.
+- HDR is internal (16-bit rendering, tone-mapped to the display); browsers do not expose HDR output for WebGL.
 - No UDP hole punching (WebRTC/STUN); hosts that cannot map ports rely on a reachable node to relay.
 - Some unofficial/unfinished maps in TA's files (listed as `x_*`) are missing their streamed geometry.

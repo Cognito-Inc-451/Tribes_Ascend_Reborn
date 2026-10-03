@@ -1,9 +1,11 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
-import { buildCollisionWorld, Heightfield, UU_PER_METER, type MapData, type MapEntity, type MapEnv, type MeshAsset, type MeshInstance, type ModeId, type TerrainLayer, type ThemeId, type EntityKind } from '@ar/shared';
-import { resolveDiffuse, Resolver, type ObjRef } from './material.js';
+import { buildCollisionWorld, Heightfield, isForceFieldMesh, UU_PER_METER, type MapBlocker, type MapBoost, type MapData, type MapEntity, type MapEnv, type MapVolume, type MeshAsset, type MeshFx, type MeshInstance, type ModeId, type TerrainLayer, type ThemeId, type EntityKind } from '@ar/shared';
+import { packLightmaps, type LightmapSource } from './lightmaps.js';
+import type { TextureData } from './texture.js';
+import { materialBlend, materialFx, resolveDiffuse, resolveNormal, resolveSpecular, Resolver, type ObjRef } from './material.js';
 import { extractStaticMesh } from './mesh.js';
-import { extractModel } from './model.js';
+import { extractModel, type ModelPolys } from './model.js';
 import { isRaw, isRef, isRot, isVec, parseObject, parseStructArray, type PropValue, type Rot, type Vec } from './props.js';
 import { UPackage, type ExportEntry } from './upk.js';
 
@@ -88,11 +90,57 @@ function actorScale(P: Map<string, PropValue>): Vec {
   return { x: ds * d3.x, y: ds * d3.y, z: ds * d3.z };
 }
 
+/** Brush volume -> convex hull planes (outward normals, inside where n·p <= d) in map metres. */
+function volumeFrom(model: ModelPolys, pre: Vec, m: Float32Array, kind: MapVolume['kind'], dps: number): MapVolume | null {
+  const pts = model.points;
+  const world = (i: number) => {
+    const x = (pts[i * 3] - pre.x) * S, y = (pts[i * 3 + 2] - pre.z) * S, z = (pts[i * 3 + 1] - pre.y) * S;
+    return { x: m[0] * x + m[1] * y + m[2] * z + m[3], y: m[4] * x + m[5] * y + m[6] * z + m[7], z: m[8] * x + m[9] * y + m[10] * z + m[11] };
+  };
+  const polys = [...model.visibleSolid, ...model.invisibleSolid, ...model.visibleNonSolid].filter((p) => p.length >= 3).map((p) => p.map(world));
+  if (!polys.length) return null;
+  const min = { x: Infinity, y: Infinity, z: Infinity }, max = { x: -Infinity, y: -Infinity, z: -Infinity }, c = { x: 0, y: 0, z: 0 };
+  let n = 0;
+  for (const p of polys) for (const v of p) {
+    min.x = Math.min(min.x, v.x); min.y = Math.min(min.y, v.y); min.z = Math.min(min.z, v.z);
+    max.x = Math.max(max.x, v.x); max.y = Math.max(max.y, v.y); max.z = Math.max(max.z, v.z);
+    c.x += v.x; c.y += v.y; c.z += v.z; n++;
+  }
+  c.x /= n; c.y /= n; c.z /= n;
+  const planes: number[] = [];
+  for (const p of polys) {
+    // Newell normal, oriented away from the centroid (winding flips with the axis swap, so do not rely on it).
+    let nx = 0, ny = 0, nz = 0;
+    for (let i = 0; i < p.length; i++) {
+      const a = p[i], b = p[(i + 1) % p.length];
+      nx += (a.y - b.y) * (a.z + b.z); ny += (a.z - b.z) * (a.x + b.x); nz += (a.x - b.x) * (a.y + b.y);
+    }
+    const l = Math.hypot(nx, ny, nz);
+    if (l < 1e-9) continue;
+    nx /= l; ny /= l; nz /= l;
+    let d = nx * p[0].x + ny * p[0].y + nz * p[0].z;
+    if (nx * c.x + ny * c.y + nz * c.z > d) { nx = -nx; ny = -ny; nz = -nz; d = -d; }
+    let dup = false;
+    for (let k = 0; k < planes.length && !dup; k += 4) dup = planes[k] * nx + planes[k + 1] * ny + planes[k + 2] * nz > 0.9999 && Math.abs(planes[k + 3] - d) < 0.01;
+    if (!dup) planes.push(nx, ny, nz, d);
+  }
+  // Only convex brushes reduce to planes; a hollow one (Blueshift's space shell) would otherwise swallow the map.
+  const tol = 0.05 + 1e-4 * Math.max(max.x - min.x, max.y - min.y, max.z - min.z);
+  for (const p of polys) for (const v of p) {
+    for (let k = 0; k < planes.length; k += 4) if (planes[k] * v.x + planes[k + 1] * v.y + planes[k + 2] * v.z - planes[k + 3] > tol) return null;
+  }
+  return planes.length >= 4 ? { kind, dps, min, max, planes: new Float32Array(planes) } : null;
+}
+
 export interface ImportOptions {
   cookedDir: string; id: string; name: string; theme: ThemeId; log?: (s: string) => void;
   /** Export a texture once; returns the shared texture name or null if it could not be read. */
   onTexture?: (t: ObjRef) => string | null;
+  /** Write a packed lightmap page; returns its texture name or null. */
+  onLightmapPage?: (t: TextureData) => string | null;
 }
+
+interface LightmapPending { inst: MeshInstance; src: number; st: [number, number, number, number]; scale: [number, number, number] }
 
 let fileIndex: Map<string, string> | null = null;
 export function indexCooked(dir: string): Map<string, string> {
@@ -153,12 +201,26 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
   const meshIndex = new Map<string, number>();
   const instances: MeshInstance[] = [];
   const entities: MapEntity[] = [];
+  const volumes: MapVolume[] = [];
+  const boosts: MapBoost[] = [];
+  const blockers: MapBlocker[] = [];
+  const spawnOrder = new Map<MapEntity, number>();
+  const lmSources: LightmapSource[] = [];
+  const lmSourceIndex = new Map<string, number>();
+  const lmPending: LightmapPending[] = [];
+  /** Static meshes with simple collision (a BodySetup), i.e. ones that stop players in TA. */
+  const bodyMeshes = new Set<string>();
+  /** Non-colliding copies of meshes (actors with collision switched off), and how often each was used. */
+  const ncMesh = new Map<number, number>();
+  const ncCount = new Map<string, number>();
+  /** Collision-only copies of meshes on actors hidden in game. */
+  const hiddenMesh = new Map<number, number>();
+  const hiddenCount = { proxies: 0, dropped: 0 };
   let terrain: Heightfield | null = null;
   let killZ: number | undefined;
   const env: MapEnv = {};
   const textures: string[] = [];
   const texIndex = new Map<string, number>();
-  const matTex = new Map<string, number>();
   let terrainLayers: TerrainLayer[] | undefined;
   let terrainSplat: Uint8Array | undefined;
   resolver ??= new Resolver(idx, loadPackage);
@@ -189,23 +251,27 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
     return null;
   };
 
-  const texFor = (pkg: UPackage, ref: number): number => {
-    if (!ref || !opts.onTexture) return -1;
-    const key = `${pkg.path}:${ref}`;
-    const hit = matTex.get(key);
-    if (hit !== undefined) return hit;
-    let ti = -1;
-    const mat = R.get(pkg, ref);
-    const tex = mat ? resolveDiffuse(R, mat) : null;
-    if (tex) {
-      const name = opts.onTexture(tex);
-      if (name) {
-        ti = texIndex.get(name) ?? -1;
-        if (ti < 0) { ti = textures.length; textures.push(name); texIndex.set(name, ti); }
-      }
-    }
-    matTex.set(key, ti);
+  const texIndexOf = (tex: ObjRef | null): number => {
+    if (!tex || !opts.onTexture) return -1;
+    const name = opts.onTexture(tex);
+    if (!name) return -1;
+    let ti = texIndex.get(name) ?? -1;
+    if (ti < 0) { ti = textures.length; textures.push(name); texIndex.set(name, ti); }
     return ti;
+  };
+  const infoCache = new Map<string, { tex: number; ntex: number; stex: number; fx?: MeshFx }>();
+  /** Diffuse + normal + specular map and liquid / blend tag of a material reference. */
+  const matInfo = (pkg: UPackage, ref: number): { tex: number; ntex: number; stex: number; fx?: MeshFx } => {
+    if (!ref || !opts.onTexture) return { tex: -1, ntex: -1, stex: -1 };
+    const key = `${pkg.path}:${ref}`;
+    const hit = infoCache.get(key);
+    if (hit) return hit;
+    const mat = R.get(pkg, ref);
+    const info = mat
+      ? { tex: texIndexOf(resolveDiffuse(R, mat)), ntex: texIndexOf(resolveNormal(R, mat)), stex: texIndexOf(resolveSpecular(R, mat)), fx: materialFx(R, mat) ?? materialBlend(R, mat) }
+      : { tex: -1, ntex: -1, stex: -1 };
+    infoCache.set(key, info);
+    return info;
   };
 
   const resolveMesh = (pkg: UPackage, ref: number, overrides: number[] = []): number => {
@@ -218,8 +284,12 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
       const bi = meshIndex.get(baseKey)!;
       if (bi < 0) return -1;
       const base = meshes[bi];
-      const groups = base.groups?.map((g, k) => ({ ...g, tex: overrides[k] ? texFor(pkg, overrides[k]) : g.tex }));
-      if (!groups || groups.every((g, k) => g.tex === base.groups![k].tex)) { meshIndex.set(ovKey, bi); return bi; }
+      const groups = base.groups?.map((g, k) => {
+        if (!overrides[k]) return g;
+        const mi = matInfo(pkg, overrides[k]);
+        return { ...g, tex: mi.tex, ntex: mi.ntex >= 0 ? mi.ntex : undefined, stex: mi.stex >= 0 ? mi.stex : undefined, fx: mi.fx };
+      });
+      if (!groups || groups.every((g, k) => g === base.groups![k])) { meshIndex.set(ovKey, bi); return bi; }
       meshes.push({ ...base, groups });
       meshIndex.set(ovKey, meshes.length - 1);
       return meshes.length - 1;
@@ -237,6 +307,10 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
     const md = exp ? extractStaticMesh(owner, exp) : null;
     if (!md) { meshIndex.set(fullPath, -1); log(`  ! mesh not extracted: ${fullPath}`); return -1; }
     if (SKIP_MESH.test(md.name)) { meshIndex.set(fullPath, -1); return -1; }
+    const body = exp ? parseObject(owner, owner.exportData(exp))?.props : undefined;
+    if (isRef(body?.get('BodySetup')) && (body!.get('BodySetup') as { ref: number }).ref !== 0) bodyMeshes.add(md.name);
+    const lmIndex = num(body?.get('LightMapCoordinateIndex'), 0);
+    const uv2 = lmIndex > 0 ? md.uvSets[lmIndex] : undefined;
     const positions = new Float32Array(md.positions.length);
     for (let i = 0; i < md.positions.length; i += 3) {
       positions[i] = md.positions[i] * S;
@@ -247,10 +321,13 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
     const indices = new Uint32Array(md.indices.length);
     for (let i = 0; i < md.indices.length; i += 3) { indices[i] = md.indices[i]; indices[i + 1] = md.indices[i + 2]; indices[i + 2] = md.indices[i + 1]; }
     const hidden = HIDDEN_MESH.test(md.name);
-    const groups = md.sections.length && md.uvs ? md.sections.map((s) => ({ start: s.firstIndex, count: s.numTriangles * 3, tex: texFor(owner, s.material) })) : undefined;
+    const groups = md.sections.length && md.uvs ? md.sections.map((s) => {
+      const mi = matInfo(owner, s.material);
+      return { start: s.firstIndex, count: s.numTriangles * 3, tex: mi.tex, ntex: mi.ntex >= 0 ? mi.ntex : undefined, stex: mi.stex >= 0 ? mi.stex : undefined, fx: mi.fx };
+    }) : undefined;
     meshes.push({
       name: md.name, positions, indices, mat: meshMaterial(md.name), collide: hidden || !noCollide(md.name), hidden: hidden || undefined,
-      uvs: groups ? md.uvs! : undefined, groups,
+      uvs: groups ? md.uvs! : undefined, uv2: groups ? uv2 : undefined, groups,
     });
     meshIndex.set(fullPath, meshes.length - 1);
     return overrides.some((o) => o) ? resolveMesh(pkg, ref, overrides) : meshes.length - 1;
@@ -279,20 +356,213 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
     return meshes.length - 1;
   };
   const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]);
+
+  /**
+   * TA's baked (Lightmass) lighting of a StaticMeshComponent: after its properties come LODData[]; LOD 0 holds shadow
+   * maps, then an FLightMap2D (type 2: light GUIDs, three textures + scale vectors, atlas coordinate scale and bias).
+   * The third texture is the simple (non-directional) lightmap.
+   */
+  const lightmapOf = (pkg: UPackage, comp: ExportEntry, end: number): Omit<LightmapPending, 'inst'> | undefined => {
+    const d = pkg.exportData(comp);
+    const v = new DataView(d.buffer, d.byteOffset, d.byteLength);
+    let o = end;
+    const i32 = () => { const x = v.getInt32(o, true); o += 4; return x; };
+    const f32 = () => { const x = v.getFloat32(o, true); o += 4; return x; };
+    try {
+      if (o + 24 > d.length || i32() < 1) return undefined;
+      for (let k = 0; k < 2; k++) { const n = i32(); if (n < 0 || n > 64) return undefined; o += n * 4; }
+      if (i32() !== 2) return undefined;
+      const guids = i32();
+      if (guids < 0 || guids > 4096) return undefined;
+      o += guids * 16;
+      const tex: number[] = [], scale: number[][] = [];
+      for (let k = 0; k < 3; k++) { tex.push(i32()); scale.push([f32(), f32(), f32()]); }
+      const st: [number, number, number, number] = [f32(), f32(), f32(), f32()];
+      const ref = tex[2];
+      if (o > d.length || ref <= 0 || pkg.className(pkg.exports[ref - 1]) !== 'LightMapTexture2D' || !st.every(Number.isFinite)) return undefined;
+      const key = `${pkg.path}:${ref}`;
+      let src = lmSourceIndex.get(key);
+      if (src === undefined) { src = lmSources.length; lmSources.push({ pkg, exp: pkg.exports[ref - 1] }); lmSourceIndex.set(key, src); }
+      return { src, st, scale: [scale[2][0], scale[2][1], scale[2][2]] };
+    } catch { return undefined; }
+  };
+
+  /** Ops wired to a Kismet op's outputs (only the output labelled `label` when given). */
+  const kismetOut = (pkg: UPackage, props: Map<string, PropValue>, label?: string): number[] => {
+    const out: number[] = [];
+    for (const link of parseStructArray(pkg, props.get('OutputLinks'))) {
+      if (label && link.get('LinkDesc') !== label) continue;
+      for (const l of parseStructArray(pkg, link.get('Links'))) { const op = l.get('LinkedOp'); if (isRef(op) && op.ref > 0) out.push(op.ref); }
+    }
+    return out;
+  };
+  /** First Kismet variable plugged into a variable link (export ref, 0 if none). */
+  const kismetVarRef = (pkg: UPackage, props: Map<string, PropValue>, label: string): number => {
+    for (const link of parseStructArray(pkg, props.get('VariableLinks'))) {
+      const lv = link.get('LinkedVariables');
+      if (link.get('LinkDesc') !== label || !isRaw(lv) || lv.raw.length < 8) continue;
+      return new DataView(lv.raw.buffer, lv.raw.byteOffset, lv.raw.byteLength).getInt32(4, true);
+    }
+    return 0;
+  };
+  const kismetVar = (pkg: UPackage, props: Map<string, PropValue>, label: string): Map<string, PropValue> | null => {
+    const ref = kismetVarRef(pkg, props, label);
+    return ref > 0 ? parseObject(pkg, pkg.exportData(pkg.exports[ref - 1]))?.props ?? null : null;
+  };
+  /** Actors (export refs) whose collision / visibility a generator's Online/Offline Kismet toggles -> that team. */
+  const generatorGated = (pkg: UPackage): Map<number, number> => {
+    const out = new Map<number, number>();
+    pkg.exports.forEach((e, i) => {
+      if (pkg.className(e) !== 'TrSeqEvent_Generator') return;
+      const P = parseObject(pkg, pkg.exportData(e))?.props;
+      const gen = P?.get('Originator');
+      if (!P || !isRef(gen) || gen.ref <= 0) return;
+      const gc = pkg.className(pkg.exports[gen.ref - 1]);
+      const team = /BloodEagle/.test(gc) ? 0 : /DiamondSword/.test(gc) ? 1 : -1;
+      if (team < 0) return;
+      for (const op of [...kismetOut(pkg, P, 'Online'), ...kismetOut(pkg, P, 'Offline')]) {
+        const ex = pkg.exports[op - 1];
+        if (!ex || !/^SeqAct_(ChangeCollision|ToggleHidden|Toggle)$/.test(pkg.className(ex))) continue;
+        const OP = parseObject(pkg, pkg.exportData(ex))?.props;
+        for (const link of parseStructArray(pkg, OP?.get('VariableLinks'))) {
+          const lv = link.get('LinkedVariables');
+          if (link.get('LinkDesc') !== 'Target' || !isRaw(lv) || lv.raw.length < 4) continue;
+          const dv = new DataView(lv.raw.buffer, lv.raw.byteOffset, lv.raw.byteLength);
+          for (let k = 0; k < dv.getInt32(0, true) && 8 + k * 4 <= lv.raw.length; k++) {
+            const vr = dv.getInt32(4 + k * 4, true);
+            const obj = vr > 0 ? parseObject(pkg, pkg.exportData(pkg.exports[vr - 1]))?.props.get('ObjValue') : undefined;
+            if (isRef(obj) && obj.ref > 0) out.set(obj.ref, team);
+          }
+        }
+      }
+    });
+    return out;
+  };
+  /**
+   * TA accelerators and launch pads are Kismet: Touch(volume) -> [GetTeamNum -> CompareInt A == B] -> [SetPhysics]
+   * -> SetVelocity(VelocityDir). Hellfire's only fire one way (velocity component vs a threshold); Perdition's
+   * dampers read the velocity and halve it.
+   */
+  const boostsFromTouch = (pkg: UPackage, P: Map<string, PropValue>) => {
+    const orig = P.get('Originator');
+    if (!isRef(orig) || orig.ref <= 0) return;
+    const VP = parseObject(pkg, pkg.exportData(pkg.exports[orig.ref - 1]))?.props;
+    const brush = VP?.get('Brush');
+    if (!VP || !isRef(brush) || brush.ref <= 0) return;
+    const model = extractModel(pkg, pkg.exports[brush.ref - 1]);
+    const vloc = isVec(VP.get('Location')) ? (VP.get('Location') as Vec) : { x: 0, y: 0, z: 0 };
+    const vrot = isRot(VP.get('Rotation')) ? (VP.get('Rotation') as Rot) : { pitch: 0, yaw: 0, roll: 0 };
+    const pre = isVec(VP.get('PrePivot')) ? (VP.get('PrePivot') as Vec) : { x: 0, y: 0, z: 0 };
+    const hull = model ? volumeFrom(model, pre, transform(vloc, vrot, actorScale(VP)), 'pain', 0) : null;
+    if (!hull) return;
+    const seen = new Set<number>();
+    const component = new Map<number, 'x' | 'y' | 'z'>();
+    const walk = (ref: number, team: number, scale: number | undefined, cond: MapBoost['cond'], depth: number) => {
+      if (depth > 12 || seen.has(ref)) return;
+      seen.add(ref);
+      const ex = pkg.exports[ref - 1];
+      const OP = ex ? parseObject(pkg, pkg.exportData(ex))?.props : null;
+      if (!ex || !OP) return;
+      const c = pkg.className(ex);
+      const base = { min: hull.min, max: hull.max, planes: hull.planes, team, cond };
+      if (c === 'SeqAct_SetVelocity') {
+        const d = OP.get('VelocityDir');
+        if (kismetVarRef(pkg, OP, 'Velocity Dir') > 0) {
+          if (scale !== undefined && scale !== 1) boosts.push({ ...base, vel: { x: 0, y: 0, z: 0 }, scale });
+          return;
+        }
+        if (!isVec(d)) return;
+        const mag = num(OP.get('VelocityMag'), 0), l = Math.hypot(d.x, d.y, d.z) || 1;
+        boosts.push({ ...base, vel: toMap(mag > 0 ? { x: (d.x / l) * mag, y: (d.y / l) * mag, z: (d.z / l) * mag } : d) });
+        return;
+      }
+      if (c === 'SeqCond_CompareInt') {
+        const b = num(kismetVar(pkg, OP, 'B')?.get('IntValue'), 0);
+        for (const n of kismetOut(pkg, OP, 'A == B')) walk(n, b, scale, cond, depth + 1);
+        return;
+      }
+      if (c === 'SeqCond_CompareFloat') {
+        const axis = component.get(kismetVarRef(pkg, OP, 'A'));
+        const value = num(kismetVar(pkg, OP, 'B')?.get('FloatValue'), 0) * S;
+        for (const [label, gt] of [['A < B', false], ['A <= B', false], ['A > B', true], ['A >= B', true]] as const) {
+          for (const n of kismetOut(pkg, OP, label)) walk(n, team, scale, axis ? { axis, gt, value } : cond, depth + 1);
+        }
+        return;
+      }
+      if (c === 'SeqAct_GetVelocity') scale ??= 1;
+      if (c === 'SeqAct_GetVectorComponents') {
+        for (const [label, axis] of [['X', 'x'], ['Y', 'z'], ['Z', 'y']] as const) { const r = kismetVarRef(pkg, OP, label); if (r > 0) component.set(r, axis); }
+      }
+      if (scale === 1 && (c === 'SeqAct_DivideFloat' || c === 'SeqAct_MultiplyFloat')) {
+        const b = num(kismetVar(pkg, OP, 'B')?.get('FloatValue'), 1);
+        if (b > 0) scale = c === 'SeqAct_DivideFloat' ? 1 / b : b;
+      }
+      for (const n of kismetOut(pkg, OP)) walk(n, team, scale, cond, depth + 1);
+    };
+    for (const n of kismetOut(pkg, P, 'Touched')) walk(n, 255, undefined, undefined, 0);
+  };
+  /**
+   * Visible BSP polygons grouped by surface material, with UE3's BSP texture mapping:
+   * uv = ((P - pBase) . vTextureU|V) / 128 (each polygon gets its own vertices since UVs are per surface).
+   */
+  const pushBsp = (pkg: UPackage, name: string, model: ModelPolys, polys: number[][], surfOf: number[], collide: boolean): number => {
+    if (!polys.length) return -1;
+    const byMat = new Map<number, number[]>();
+    polys.forEach((_, i) => {
+      const s = model.surfs[surfOf[i]];
+      const ref = s && !/DefaultMaterial$/.test(pkg.refPath(s.material)) ? s.material : 0;
+      const arr = byMat.get(ref) ?? [];
+      arr.push(i);
+      byMat.set(ref, arr);
+    });
+    const P = model.points, V = model.vectors;
+    const pos: number[] = [], uv: number[] = [], idx: number[] = [];
+    const groups: NonNullable<MeshAsset['groups']> = [];
+    for (const [ref, list] of byMat) {
+      const start = idx.length;
+      for (const pi of list) {
+        const poly = polys[pi], s = model.surfs[surfOf[pi]];
+        const b = s ? s.base * 3 : -1, u = s ? s.u * 3 : -1, w = s ? s.v * 3 : -1;
+        const first = pos.length / 3;
+        for (const p of poly) {
+          const x = P[p * 3], y = P[p * 3 + 1], z = P[p * 3 + 2];
+          pos.push(x * S, z * S, y * S);
+          if (b >= 0 && u >= 0 && w >= 0 && b + 2 < P.length && u + 2 < V.length && w + 2 < V.length) {
+            const dx = x - P[b], dy = y - P[b + 1], dz = z - P[b + 2];
+            uv.push((dx * V[u] + dy * V[u + 1] + dz * V[u + 2]) / 128, (dx * V[w] + dy * V[w + 1] + dz * V[w + 2]) / 128);
+          } else uv.push(0, 0);
+        }
+        for (let i = 1; i + 1 < poly.length; i++) idx.push(first, first + i + 1, first + i);
+      }
+      const mi = matInfo(pkg, ref);
+      groups.push({ start, count: idx.length - start, tex: mi.tex, ntex: mi.ntex >= 0 ? mi.ntex : undefined, stex: mi.stex >= 0 ? mi.stex : undefined, fx: mi.fx });
+    }
+    const textured = groups.some((g) => g.tex >= 0 || g.fx);
+    meshes.push({
+      name, positions: new Float32Array(pos), indices: new Uint32Array(idx), mat: 'concrete', collide,
+      uvs: textured ? new Float32Array(uv) : undefined, groups: textured ? groups : undefined,
+    });
+    return meshes.length - 1;
+  };
   const addLevelBsp = (pkg: UPackage, e: ExportEntry) => {
     const model = extractModel(pkg, e);
     if (!model) return;
     const tag = basename(pkg.path, extname(pkg.path));
-    for (const [polys, suffix, collide, hidden] of [
-      [model.visibleSolid, 'bsp', true, false], [model.visibleNonSolid, 'bsp_nonsolid', false, false], [model.invisibleSolid, 'bsp_invisible', true, true],
+    for (const [polys, surfOf, suffix, collide] of [
+      [model.visibleSolid, model.visibleSolidSurf, 'bsp', true], [model.visibleNonSolid, model.visibleNonSolidSurf, 'bsp_nonsolid', false],
     ] as const) {
-      const mi = pushPolys(`${tag}_${suffix}`, model.points, polys, 'concrete', collide, hidden);
+      const mi = pushBsp(pkg, `${tag}_${suffix}`, model, polys, surfOf, collide);
       if (mi >= 0) instances.push({ mesh: mi, m: IDENTITY });
     }
+    const mi = pushPolys(`${tag}_bsp_invisible`, model.points, model.invisibleSolid, 'concrete', true, true);
+    if (mi >= 0) instances.push({ mesh: mi, m: IDENTITY });
     log(`  BSP ${tag}: ${model.visibleSolid.length} solid, ${model.visibleNonSolid.length} non-solid, ${model.invisibleSolid.length} invisible polys`);
   };
 
   for (const pkg of pkgs) {
+    const gated = generatorGated(pkg);
+    // TA rates player starts equally and takes the first best one in the level's navigation list, so keep that order.
+    const navNext = new Map<number, number>(), navPointed = new Set<number>(), pkgSpawns: [MapEntity, number][] = [];
     for (let ei = 0; ei < pkg.exports.length; ei++) {
       const e = pkg.exports[ei];
       const outer = pkg.refPath(e.outer);
@@ -303,6 +573,8 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
       const obj = parseObject(pkg, pkg.exportData(e));
       if (!obj) continue;
       const P = obj.props;
+      const nav = P.get('nextNavigationPoint');
+      if (isRef(nav) && nav.ref > 0) { navNext.set(ei + 1, nav.ref); navPointed.add(nav.ref); }
       const loc = isVec(P.get('Location')) ? (P.get('Location') as Vec) : { x: 0, y: 0, z: 0 };
       const rot = isRot(P.get('Rotation')) ? (P.get('Rotation') as Rot) : { pitch: 0, yaw: 0, roll: 0 };
 
@@ -354,11 +626,12 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
             const tmat = isRef(tm) && tls ? R.get(tls.pkg, tm.ref) : null;
             const tmProps = tmat ? R.props(tmat) : null;
             const mref = tmProps?.get('Material');
-            const tex = isRef(mref) && tmat ? texFor(tmat.pkg, mref.ref) : -1;
+            const info = isRef(mref) && tmat ? matInfo(tmat.pkg, mref.ref) : { tex: -1, ntex: -1, stex: -1 };
+            const tex = info.tex;
             const ai = num(layer.get('AlphaMapIndex'), -1);
             if (out.length > 0 && !alpha[ai]) continue;
             if (out.length > 0) { const a = alpha[ai], ch = out.length - 1; for (let i = 0; i < count; i++) splat[i * 4 + ch] = a[i]; }
-            out.push({ tex, scale: num(tmProps?.get('MappingScale'), 4) * cellX });
+            out.push({ tex, scale: num(tmProps?.get('MappingScale'), 4) * cellX, ntex: info.ntex >= 0 ? info.ntex : undefined, stex: info.stex >= 0 ? info.stex : undefined });
           }
           if (out.some((l) => l.tex >= 0)) {
             terrainLayers = out;
@@ -379,6 +652,8 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
         const lp = isRef(lc) && lc.ref > 0 ? parseObject(pkg, pkg.exportData(pkg.exports[lc.ref - 1]))?.props : null;
         env.sunColor = colorOf(lp?.get('LightColor'), 0xffffff);
         env.sunIntensity = num(lp?.get('Brightness'), 1);
+        // A plain (static) DirectionalLight is baked into the lightmaps; a DominantDirectionalLight stays dynamic.
+        if (cls === 'DirectionalLight') env.sunBaked = true;
         continue;
       }
       if (/^SkyLight/.test(cls)) {
@@ -394,11 +669,30 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
         env.fogDensity = num(fp?.get('FogDensity'), 0.02);
         env.fogColor = colorOf(fp?.get('FogInscatteringColor') ?? fp?.get('LightInscatteringColor'), 0x8899aa);
         env.fogStart = num(fp?.get('StartDistance'), 0) * S;
+        if (cls === 'ExponentialHeightFog') {
+          env.fogHeight = loc.z * S;
+          env.fogFalloff = num(fp?.get('FogHeightFalloff'), 0.2);
+          env.fogMaxOpacity = num(fp?.get('FogMaxOpacity'), 1);
+        }
         continue;
       }
       if (cls === 'TrWeatherVolume') { env.snow = true; continue; }
+      if (cls === 'SeqEvent_Touch') { boostsFromTouch(pkg, P); continue; }
 
       const smc = P.get('StaticMeshComponent');
+      // UTKillZVolume kills on touch; PhysicsVolumes with bPainCausing (lava, pits, Walled In's sky) and Blueshift's
+      // space GravityVolumes hurt per second.
+      if (/(KillZVolume|PhysicsVolume|GravityVolume)$/.test(cls)) {
+        const kill = /KillZVolume$/.test(cls), dps = num(P.get('DamagePerSec'), kill ? 90000 : 0);
+        const brush = P.get('Brush');
+        if ((kill || (P.get('bPainCausing') === true && dps > 0)) && isRef(brush) && brush.ref > 0) {
+          const model = extractModel(pkg, pkg.exports[brush.ref - 1]);
+          const pre = isVec(P.get('PrePivot')) ? (P.get('PrePivot') as Vec) : { x: 0, y: 0, z: 0 };
+          const vol = model ? volumeFrom(model, pre, transform(loc, rot, actorScale(P)), kill ? 'kill' : 'pain', dps) : null;
+          if (vol) volumes.push(vol);
+        }
+        continue;
+      }
       if (/BlockingVolume$/.test(cls)) {
         const brush = P.get('Brush');
         const pre = isVec(P.get('PrePivot')) ? (P.get('PrePivot') as Vec) : { x: 0, y: 0, z: 0 };
@@ -424,9 +718,30 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
             const n = dv.getInt32(0, true);
             for (let k = 0; k < n && 4 + k * 4 + 4 <= ov.raw.length; k++) overrides.push(dv.getInt32(4 + k * 4, true));
           }
-          const mi = resolveMesh(mpkg, sm.v.ref, overrides);
+          let mi = resolveMesh(mpkg, sm.v.ref, overrides);
+          const prop = (x: ExportEntry, p: Map<string, PropValue> | undefined, n: string) => inherited(pkg, x, p, n)?.v;
           if (mi >= 0) {
-            const prop = (x: ExportEntry, p: Map<string, PropValue> | undefined, n: string) => inherited(pkg, x, p, n)?.v;
+            // Level designers switch collision off per actor (light beams, decals, set dressing behind blocking volumes).
+            if (meshes[mi].collide && !meshes[mi].hidden && !isForceFieldMesh(meshes[mi].name)
+              && (prop(e, P, 'bCollideActors') === false || prop(comp, cobj?.props, 'CollideActors') === false)) {
+              let nc = ncMesh.get(mi);
+              if (nc === undefined) { meshes.push({ ...meshes[mi], collide: false }); nc = meshes.length - 1; ncMesh.set(mi, nc); }
+              mi = nc;
+              ncCount.set(meshes[mi].name, (ncCount.get(meshes[mi].name) ?? 0) + 1);
+            }
+            // Actors hidden in game (collision proxies) only collide; hidden ones without collision are dropped.
+            // Generator-toggled actors and force fields keep their own handling.
+            const hiddenInGame = (prop(e, P, 'bHidden') === true || prop(comp, cobj?.props, 'HiddenGame') === true)
+              && !isForceFieldMesh(meshes[mi].name) && !gated.has(ei + 1) && !meshes[mi].hidden;
+            if (hiddenInGame && !meshes[mi].collide) { hiddenCount.dropped++; mi = -1; }
+            else if (hiddenInGame) {
+              let hv = hiddenMesh.get(mi);
+              if (hv === undefined) { meshes.push({ ...meshes[mi], hidden: true }); hv = meshes.length - 1; hiddenMesh.set(mi, hv); }
+              mi = hv;
+              hiddenCount.proxies++;
+            }
+          }
+          if (mi >= 0) {
             const dsv = prop(e, P, 'DrawScale'), d3v = prop(e, P, 'DrawScale3D'), csv = prop(comp, cobj?.props, 'Scale'), c3v = prop(comp, cobj?.props, 'Scale3D');
             const ds = typeof dsv === 'number' ? dsv : 1;
             const d3 = isVec(d3v) ? d3v : { x: 1, y: 1, z: 1 };
@@ -436,6 +751,25 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
             const name = meshes[mi].name;
             const team = /(^|_)BE(_|$)|BloodEagle/i.test(name) ? 0 : /(^|_)DS(_|$)|DiamondSword/i.test(name) ? 1 : undefined;
             instances.push({ mesh: mi, m: transform(loc, rot, scale), team });
+            const lmRaw = comp && cobj && opts.onLightmapPage ? lightmapOf(pkg, comp, cobj.end) : undefined;
+            if (lmRaw) lmPending.push({ inst: instances[instances.length - 1], ...lmRaw });
+            if (isForceFieldMesh(name)) {
+              // TA team blockers let their defenders through and drop with their generator; other energy fields with
+              // simple collision stop every player, some (SunStar's flag shields) only while a generator runs them.
+              // Shots pass either way.
+              const flag = (x: ExportEntry, p: Map<string, PropValue> | undefined, n: string) => prop(x, p, n) !== false;
+              const gate = gated.get(ei + 1);
+              if (cls === 'TrTeamBlockerStaticMeshActor') {
+                const t = num(prop(e, P, 'm_DefenderTeamIndex'), 0);
+                instances[instances.length - 1].team = t;
+                blockers.push({ instance: instances.length - 1, team: t, gate: gate ?? t });
+              } else if (gate !== undefined || (bodyMeshes.has(name) && flag(e, P, 'bCollideActors') && flag(comp, cobj?.props, 'CollideActors') && flag(comp, cobj?.props, 'BlockActors'))) {
+                // Generator-run shields (SunStar's flag domes) block all in TA; letting their own team through keeps
+                // flag captures possible while still keeping attackers out until the generator falls.
+                if (gate !== undefined) instances[instances.length - 1].team = gate;
+                blockers.push({ instance: instances.length - 1, team: gate ?? 255, gate });
+              }
+            }
           }
         }
       }
@@ -454,11 +788,26 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
           ent.tag = typeof label === 'string' ? label.replace(/[^A-Za-z]/g, '').slice(-1).toUpperCase() : String.fromCharCode(65 + entities.filter((x) => x.kind === 'cap_point').length);
           ent.team = 255;
         }
+        if (kind === 'spawn') pkgSpawns.push([ent, ei + 1]);
         entities.push(ent);
         break;
       }
     }
+    const navIndex = new Map<number, number>();
+    for (const head of [...navNext.keys()].filter((k) => !navPointed.has(k))) {
+      for (let r = head; r > 0 && !navIndex.has(r); r = navNext.get(r) ?? 0) navIndex.set(r, navIndex.size);
+    }
+    for (const [ent, ref] of pkgSpawns) spawnOrder.set(ent, pkgs.indexOf(pkg) * 1e7 + (navIndex.get(ref) ?? 5e6 + ref));
   }
+  if (ncCount.size) {
+    const top = [...ncCount].sort((a, b) => b[1] - a[1]);
+    log(`  collision off: ${top.reduce((s, [, n]) => s + n, 0)} instances (${top.slice(0, 8).map(([k, n]) => `${k} x${n}`).join(', ')}${top.length > 8 ? ', ...' : ''})`);
+  }
+  if (hiddenCount.proxies || hiddenCount.dropped) log(`  hidden in game: ${hiddenCount.proxies} collision proxies, ${hiddenCount.dropped} dropped`);
+  // Player starts in TA's navigation-list order.
+  const spawnsInOrder = entities.filter((x) => x.kind === 'spawn').sort((a, b) => spawnOrder.get(a)! - spawnOrder.get(b)!);
+  let spawnK = 0;
+  for (let i = 0; i < entities.length; i++) if (entities[i].kind === 'spawn') entities[i] = spawnsInOrder[spawnK++];
 
   if (allTerrains.length > 1) {
     // Several Terrain actors (a big landscape plus detail patches): keep the largest and stamp the others' solid areas into it.
@@ -477,14 +826,40 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
     }
     const pad = 200;
     const w = maxX - minX + pad * 2, d = maxZ - minZ + pad * 2;
-    terrain = new Heightfield(w, d, 2, 2, new Float32Array(4).fill((killZ ?? minY - 60) - 5), minX - pad, minZ - pad);
+    const floorY = (killZ ?? minY - 60) - 5;
+    terrain = new Heightfield(w, d, 2, 2, new Float32Array(4).fill(floorY), minX - pad, minZ - pad);
+    // Falling off a floorless arena must kill (TA falls to KillZ); never let players land on the synthesised floor.
+    if (killZ === undefined) killZ = floorY + 15;
     log('  (no terrain actor; synthesised floor)');
+  }
+  if (volumes.length) log(`  volumes: ${volumes.map((v) => `${v.kind}${v.kind === 'pain' ? `(${v.dps}/s)` : ''}`).join(', ')}`);
+  if (boosts.length) log(`  boosts: ${boosts.map((b) => `${b.scale !== undefined ? `x${b.scale}` : `(${b.vel.x.toFixed(0)},${b.vel.y.toFixed(0)},${b.vel.z.toFixed(0)})`}${b.team !== 255 ? `/t${b.team}` : ''}`).join(' ')}`);
+  if (blockers.length) log(`  force fields: ${blockers.map((b) => `${meshes[instances[b.instance].mesh].name}${b.team !== 255 ? `/t${b.team}` : ''}${b.gate !== undefined ? `/gen${b.gate}` : ''}`).join(' ')}`);
+  if (lmPending.length && opts.onLightmapPage) {
+    // TA atlas UV = lightmap UV * CoordinateScale + CoordinateBias; then into our packed page.
+    const { pages, placed } = packLightmaps(lmSources, opts.cookedDir);
+    const pageTex = pages.map((p, k) => {
+      const name = opts.onLightmapPage!({ ...p, name: `LM_${opts.id}_${mode}_${k}` });
+      if (!name) return -1;
+      let ti = texIndex.get(name) ?? -1;
+      if (ti < 0) { ti = textures.length; textures.push(name); texIndex.set(name, ti); }
+      return ti;
+    });
+    let lit = 0;
+    for (const l of lmPending) {
+      const pl = placed[l.src];
+      if (!pl || pageTex[pl.page] < 0) continue;
+      l.inst.lm = { tex: pageTex[pl.page], st: [l.st[0] * pl.su, l.st[1] * pl.sv, l.st[2] * pl.su + pl.u0, l.st[3] * pl.sv + pl.v0], scale: l.scale };
+      lit++;
+    }
+    log(`  lightmaps: ${lmSources.length} atlases -> ${pages.map((p) => `${p.mips[0].w}x${p.mips[0].h}`).join(', ')}, ${lit} instances`);
   }
 
   log(`  meshes ${meshes.length}, instances ${instances.length}, entities ${entities.length}, textures ${textures.length}`);
   const data: MapData = {
     id: opts.id, name: opts.name, theme: opts.theme, source: 'original', modes: [mode], terrain, boxes: [], entities, meshes, instances, killZ,
     textures: textures.length ? textures : undefined, terrainLayers, terrainSplat, env: Object.keys(env).length ? env : undefined,
+    volumes: volumes.length ? volumes : undefined, boosts: boosts.length ? boosts : undefined, blockers: blockers.length ? blockers : undefined,
   };
   closeFloorlessHoles(data, log);
   return data;

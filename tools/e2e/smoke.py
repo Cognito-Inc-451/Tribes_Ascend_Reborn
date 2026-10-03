@@ -12,6 +12,8 @@ logs = []
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True, args=['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'])
     page = browser.new_page(viewport={'width': 1600, 'height': 900})
+    # Swiftshader stalls for seconds while shader variants compile; give screenshots room.
+    page.set_default_timeout(120000)
     page.on('console', lambda m: logs.append(f'[{m.type}] {m.text}'))
     page.on('pageerror', lambda e: logs.append(f'[pageerror] {e}'))
     page.goto(os.environ.get('AR_URL', 'http://localhost:7770'))
@@ -51,13 +53,20 @@ with sync_playwright() as p:
     page.locator('.ig-screen').wait_for(timeout=60000)
     time.sleep(1.5)
     page.screenshot(path=os.path.join(out, '03_team.png'))
+    print('before team pick:', page.evaluate("() => document.querySelector('.hud .respawn')?.textContent"))
     page.evaluate(click, 'AUTO-ASSIGN')
+    # TA: picking a side closes the screen and deploys with the current class, no ESC or extra click needed.
+    page.wait_for_function("() => !document.querySelector('.ig-screen')", timeout=10000)
+    page.wait_for_function("() => { const r = document.querySelector('.hud .respawn'), s = document.querySelector('.hud .spec-hud'); return r && s && r.classList.contains('hidden') && s.classList.contains('hidden'); }", timeout=30000)
+    print('deployed straight from the team screen')
+    page.keyboard.press('KeyI')
     page.locator('.ig-cols').wait_for(timeout=10000)
     time.sleep(1)
     page.screenshot(path=os.path.join(out, '03_class.png'))
     # Swiftshader frames are slow; dispatch the click directly to avoid actionability races.
     page.evaluate(click, 'DEPLOY')
-    time.sleep(3)
+    page.wait_for_function("() => !document.querySelector('.ig-screen')", timeout=10000)
+    time.sleep(2)
     print('element at center:', page.evaluate("() => { const e = document.elementFromPoint(800, 450); return e.tagName + '.' + e.className + ' parent=' + e.parentElement.className + ' text=' + e.textContent.slice(0, 60); }"))
     canvas = page.locator('#game canvas')
     canvas.click(force=True)

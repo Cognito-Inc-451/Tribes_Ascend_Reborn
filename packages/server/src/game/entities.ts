@@ -45,6 +45,8 @@ export class Player {
   lastHurt = -999;
   respawnAt = 0;
   diedAt = 0;
+  /** A fire click while dead: respawn as soon as the timer allows. */
+  spawnQueued = false;
 
   inputs: InputCmd[] = [];
   lastSeq = -1;

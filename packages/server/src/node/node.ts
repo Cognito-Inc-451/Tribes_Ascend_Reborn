@@ -94,8 +94,13 @@ export class LocalNode {
       return this.json(res, { nodeId: this.o.nodeId, discovery: this.o.discovery.stats(), servers: [...this.local(), ...this.o.discovery.servers()] });
     }
 
-    let m = /^\/assets\/tex\/([A-Za-z0-9_]{1,96})\.atx$/.exec(p);
-    if (m) return this.file(res, join(this.o.assetsDir, 'textures', `${m[1]}.atx`), true);
+    let m = /^\/assets\/tex\/([A-Za-z0-9_]{1,96})(\.hi)?\.atx$/.exec(p);
+    if (m) {
+      const f = join(this.o.assetsDir, 'textures', `${m[1]}${m[2] ?? ''}.atx`);
+      // Most textures have no extra Ultra mips: say so without an error response.
+      if (m[2] && !existsSync(f)) { res.writeHead(204, { 'cache-control': 'public, max-age=3600' }).end(); return; }
+      return this.file(res, f, true);
+    }
     if (p === '/assets/voices/manifest.json') return this.file(res, join(this.o.assetsDir, 'voices', 'manifest.json'), false);
     m = /^\/assets\/voices\/([a-z0-9_]{1,48})\/([A-Za-z0-9_]{1,80})\.ogg$/.exec(p);
     if (m) return this.file(res, join(this.o.assetsDir, 'voices', m[1], `${m[2]}.ogg`), true);
@@ -104,6 +109,9 @@ export class LocalNode {
     if (m) return this.file(res, join(this.o.assetsDir, 'ui', `${m[1]}.png`), true);
     m = /^\/assets\/models\/([a-z0-9_]{1,48})\.amdl$/.exec(p);
     if (m) return this.file(res, join(this.o.assetsDir, 'models', `${m[1]}.amdl`), true);
+    if (p === '/assets/models/anims/manifest.json') return this.file(res, join(this.o.assetsDir, 'models', 'anims', 'manifest.json'), false);
+    m = /^\/assets\/models\/anims\/([a-z0-9_]{1,64})\.aanm$/.exec(p);
+    if (m) return this.file(res, join(this.o.assetsDir, 'models', 'anims', `${m[1]}.aanm`), true);
     if (p === '/assets/index.json') return this.file(res, join(this.o.assetsDir, 'index.json'), false);
     m = /^\/map\/([a-z0-9_]+\.[a-z]+\.arm\.gz)$/.exec(p);
     if (m) return this.file(res, join(this.o.assetsDir, m[1]), true);
@@ -165,10 +173,11 @@ export class LocalNode {
     return {
       name: name || `${this.o.name}'s ${MODES[mode].name}`, mode, maps, mapSource, maxPlayers: num(b.maxPlayers, 2, 32, 16),
       options: {
-        botsPerTeam: num(o.botsPerTeam, 0, 16, 4), botDifficulty: diffs.includes(o.botDifficulty as never) ? (o.botDifficulty as GameOptions['botDifficulty']) : 'adept',
+        botsPerTeam: num(o.botsPerTeam, 0, 16, 10), botDifficulty: diffs.includes(o.botDifficulty as never) ? (o.botDifficulty as GameOptions['botDifficulty']) : 'adept',
         infiniteAmmo: o.infiniteAmmo === true, infiniteEnergy: o.infiniteEnergy === true, noFallDamage: o.noFallDamage === true,
-        infiniteCallIns: o.infiniteCallIns === true,
+        infiniteCallIns: o.infiniteCallIns === true, vehicles: o.vehicles !== false,
         creditMultiplier: typeof o.creditMultiplier === 'number' && Number.isFinite(o.creditMultiplier) ? Math.max(0.25, Math.min(10, o.creditMultiplier)) : 1,
+        gravity: typeof o.gravity === 'number' && Number.isFinite(o.gravity) ? Math.max(0.25, Math.min(3, o.gravity)) : 1,
         timeLimit: num(o.timeLimit, 0, 120, MODES[mode].timeLimit), scoreLimit: num(o.scoreLimit, 0, 999, MODES[mode].scoreLimit),
       },
     };

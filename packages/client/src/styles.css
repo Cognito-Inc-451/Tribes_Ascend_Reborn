@@ -262,6 +262,7 @@ input[type=checkbox] { accent-color: var(--amber); width: 18px; height: 18px; }
 .tabs .btn.active { background: var(--amber); color: #111; }
 .settings-grid { display: grid; grid-template-columns: minmax(200px, 280px) 1fr; gap: .7em 2em; align-items: center; max-width: 900px; overflow: auto; max-height: 68vh; padding-right: 1em; }
 .settings-grid label { color: var(--dim); font-size: 15px; }
+.settings-grid .settings-head { grid-column: 1 / -1; font: 600 13px var(--display); letter-spacing: .2em; color: var(--amber); margin-top: .9em; padding-bottom: .25em; border-bottom: 1px solid rgba(255, 190, 90, .18); }
 .bind-btn { min-width: 130px; justify-content: center; }
 .bind-btn.listening { background: var(--amber); color: #111; animation: blink .6s infinite alternate; }
 @keyframes blink { to { opacity: .6; } }
@@ -407,7 +408,7 @@ body:has(.vgs:not(.hidden)) .chat:not(.open) { opacity: 0; }
 .marker { position: absolute; transform: translate(-50%, -100%); font-size: 12px; text-align: center; white-space: nowrap; text-shadow: 0 1px 3px #000; font-family: var(--body); }
 .marker .d { font-size: 11px; color: #ddd; }
 .marker .icon { width: 14px; height: 14px; margin: 0 auto 2px; transform: rotate(45deg); border: 2px solid currentColor; }
-.marker.flag .icon { background: currentColor; }
+.marker.flag:not(.img) .icon { background: currentColor; }
 .marker .hpb { width: 46px; height: 3px; background: rgba(0,0,0,.6); margin: 2px auto 0; }
 .marker .hpb i { display: block; height: 100%; background: currentColor; }
 .plate { position: absolute; transform: translate(-50%, -100%); font: 600 13px var(--body); text-shadow: 0 1px 3px #000; white-space: nowrap; }

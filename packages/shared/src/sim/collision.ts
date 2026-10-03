@@ -1,4 +1,5 @@
 import type { Vec3 } from '../math.js';
+import type { MapBoost } from '../map/spec.js';
 import { Heightfield, type RayHit } from './terrain.js';
 
 /** Oriented box. `axes` holds the local X, Y, Z unit axes in world space (row-major: ax, ay, az). */
@@ -273,6 +274,12 @@ function capsuleVsTri(T: Float32Array, o: number, ax: number, ay: number, az: nu
 export class CollisionWorld {
   private grid = new Map<number, number[]>();
   readonly dynamic = new Map<number, OBB>();
+  /** Accelerators / launch pads applied by stepMovement. */
+  boosts: MapBoost[] = [];
+  /** Map energy fields by blocker index: stop players only (shots pass); `passTeam` walks through; `off` while unpowered. */
+  blockers: { grid: TriGrid; passTeam?: number; off?: boolean }[] = [];
+  /** Host gravity multiplier (GameOptions.gravity) for pawns, projectiles, flags and vehicles. */
+  gravityScale = 1;
   private stamp = new Uint32Array(0);
   private stampId = 1;
 
@@ -360,9 +367,9 @@ export class CollisionWorld {
       };
       for (const idx of cand) handle(this.boxes[idx], idx);
       for (const [id, box] of this.dynamic) if (id !== ignoreDynamic && !box.noCollide && box.passTeam !== team) handle(box, -1000 - id);
-      if (this.tris) {
-        const T = this.tris.tris, B = this.tris.box;
-        const tc = this.tris.query(pos.x - radius - 0.5, pos.z - radius - 0.5, pos.x + radius + 0.5, pos.z + radius + 0.5, this.tmp2);
+      const collideTris = (grid: TriGrid) => {
+        const T = grid.tris, B = grid.box;
+        const tc = grid.query(pos.x - radius - 0.5, pos.z - radius - 0.5, pos.x + radius + 0.5, pos.z + radius + 0.5, this.tmp2);
         for (const t of tc) {
           const bo = t * 6;
           if (B[bo + 1] > pos.y + height || B[bo + 4] < pos.y || B[bo] > pos.x + radius || B[bo + 3] < pos.x - radius || B[bo + 2] > pos.z + radius || B[bo + 5] < pos.z - radius) continue;
@@ -375,7 +382,9 @@ export class CollisionWorld {
           info.hitBox = -2;
           moved = true;
         }
-      }
+      };
+      if (this.tris) collideTris(this.tris);
+      for (const b of this.blockers) if (!b.off && b.passTeam !== team) collideTris(b.grid);
       if (!moved) break;
     }
 

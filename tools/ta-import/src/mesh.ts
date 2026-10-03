@@ -4,7 +4,8 @@ import type { UPackage, ExportEntry } from './upk.js';
 export interface MeshSection { material: number; firstIndex: number; numTriangles: number }
 export interface MeshData {
   name: string; positions: Float32Array; indices: Uint32Array; bounds: { origin: number[]; extent: number[] };
-  uvs: Float32Array | null; sections: MeshSection[];
+  /** UV set 0; `uvSets` holds every set (lightmap UVs are usually set 1). */
+  uvs: Float32Array | null; uvSets: Float32Array[]; sections: MeshSection[];
 }
 
 function halfToFloat(h: number): number {
@@ -78,19 +79,24 @@ export function extractStaticMesh(pkg: UPackage, e: ExportEntry): MeshData | nul
 
   // Vertex buffer: NumTexCoords, Stride, NumVertices, bUseFullPrecisionUVs, then bulk (elemSize, count).
   let uvs: Float32Array | null = null;
+  const uvSets: Float32Array[] = [];
   const vb = posOff + n * 12;
   if (vb + 24 <= data.length) {
     const nTex = view.getInt32(vb, true), stride = view.getInt32(vb + 4, true), nv = view.getInt32(vb + 8, true), full = view.getInt32(vb + 12, true);
     const es = view.getInt32(vb + 16, true), cnt = view.getInt32(vb + 20, true);
     const uvBytes = full ? 8 : 4;
     if (nTex >= 1 && nTex <= 8 && nv === n && cnt === n && es === stride && stride >= 8 + nTex * uvBytes && vb + 24 + es * cnt <= data.length) {
-      uvs = new Float32Array(n * 2);
-      for (let i = 0; i < n; i++) {
-        const o = vb + 24 + i * es + (stride - nTex * uvBytes);
-        uvs[i * 2] = full ? view.getFloat32(o, true) : halfToFloat(view.getUint16(o, true));
-        uvs[i * 2 + 1] = full ? view.getFloat32(o + 4, true) : halfToFloat(view.getUint16(o + 2, true));
+      for (let s = 0; s < nTex; s++) {
+        const set = new Float32Array(n * 2);
+        for (let i = 0; i < n; i++) {
+          const o = vb + 24 + i * es + (stride - nTex * uvBytes) + s * uvBytes;
+          set[i * 2] = full ? view.getFloat32(o, true) : halfToFloat(view.getUint16(o, true));
+          set[i * 2 + 1] = full ? view.getFloat32(o + 4, true) : halfToFloat(view.getUint16(o + 2, true));
+        }
+        for (let i = 0; i < set.length; i++) if (!Number.isFinite(set[i])) set[i] = 0;
+        uvSets.push(set);
       }
-      for (let i = 0; i < uvs.length; i++) if (!Number.isFinite(uvs[i])) uvs[i] = 0;
+      uvs = uvSets[0];
     }
   }
 
@@ -114,5 +120,5 @@ export function extractStaticMesh(pkg: UPackage, e: ExportEntry): MeshData | nul
     if (v >= n) return null;
     indices[i] = v;
   }
-  return { name: e.objectName, positions, indices, bounds: { origin, extent }, uvs, sections: findSections(view, posOff - 16, m) };
+  return { name: e.objectName, positions, indices, bounds: { origin, extent }, uvs, uvSets, sections: findSections(view, posOff - 16, m) };
 }

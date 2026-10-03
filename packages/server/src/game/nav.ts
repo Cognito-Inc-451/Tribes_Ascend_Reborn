@@ -1,4 +1,4 @@
-import type { CollisionWorld, Vec3 } from '@ar/shared';
+import type { CollisionWorld, TriGrid, Vec3 } from '@ar/shared';
 
 const VOX = 0.5;            // voxel size (m)
 const DOWN = 12, UP = 28;   // region below / above the goal (m)
@@ -21,9 +21,19 @@ export class IndoorRoutes {
 
   private static key(p: Vec3) { return `${Math.round(p.x)},${Math.round(p.y)},${Math.round(p.z)}`; }
 
-  /** Waypoints (outdoor entrance first, goal last), or null when the goal is outdoors, unreachable or not prepared. */
-  route(goal: Vec3): Vec3[] | null {
-    return this.done.get(IndoorRoutes.key(goal)) ?? null;
+  /**
+   * Waypoints (outdoor entrance first, goal last), or null when the goal is outdoors, unreachable or not prepared.
+   * With a team, standing enemy force fields count as walls (null when they seal the goal off).
+   */
+  route(goal: Vec3, team?: number): Vec3[] | null {
+    const k = IndoorRoutes.key(goal);
+    if (team !== undefined && this.done.has(`${k}|${team}`) && this.fieldsUp(team)) return this.done.get(`${k}|${team}`) ?? null;
+    return this.done.get(k) ?? null;
+  }
+
+  /** Whether `team` faces standing enemy force fields. */
+  fieldsUp(team: number): boolean {
+    return this.world.blockers.some((b) => !b.off && b.passTeam !== undefined && b.passTeam !== team);
   }
 
   prepare(goal: Vec3) {
@@ -31,15 +41,33 @@ export class IndoorRoutes {
     if (this.done.has(k)) return;
     const t0 = performance.now();
     // Most entrances are close; big bases (Katabatic) need a wider region.
-    this.done.set(k, this.openSky(goal) ? null : this.search(goal, 45) ?? this.search(goal, 90));
+    const sky = this.openSky(goal);
+    const base = sky ? null : this.search(goal, 45) ?? this.search(goal, 90);
+    this.done.set(k, base);
+    // Per team, with the other team's fields solid, when the plain route runs through one of them.
+    for (const team of [0, 1]) {
+      const enemy = this.world.blockers.filter((b) => b.passTeam !== undefined && b.passTeam !== team && b.grid.query(goal.x - 90, goal.z - 90, goal.x + 90, goal.z + 90, []).length);
+      if (!base || !enemy.length || !this.crosses(base, enemy.map((b) => b.grid))) continue;
+      this.done.set(`${k}|${team}`, this.search(goal, 45, enemy.map((b) => b.grid)) ?? this.search(goal, 90, enemy.map((b) => b.grid)));
+    }
     this.lastMs = performance.now() - t0;
+  }
+
+  /** Whether a waypoint path passes through any triangle of the given grids. */
+  private crosses(route: Vec3[], grids: TriGrid[]): boolean {
+    const tmp: number[] = [];
+    for (let i = 1; i < route.length; i++) {
+      const a = { x: route[i - 1].x, y: route[i - 1].y + 1, z: route[i - 1].z }, b = { x: route[i].x, y: route[i].y + 1, z: route[i].z };
+      for (const g of grids) if (g.raycast(a, b, tmp)) return true;
+    }
+    return false;
   }
 
   openSky(p: Vec3): boolean {
     return !this.world.raycast({ x: p.x, y: p.y + 1.2, z: p.z }, { x: p.x, y: p.y + 150, z: p.z }, undefined, false);
   }
 
-  private search(goal: Vec3, HALF: number): Vec3[] | null {
+  private search(goal: Vec3, HALF: number, walls: TriGrid[] = []): Vec3[] | null {
     const nx = Math.round((HALF * 2) / VOX), nz = nx, ny = Math.round((DOWN + UP) / VOX);
     const ox = goal.x - HALF, oz = goal.z - HALF, oy = goal.y - DOWN;
     const idx = (ix: number, iy: number, iz: number) => (iy * nz + iz) * nx + ix;
@@ -50,8 +78,8 @@ export class IndoorRoutes {
     };
 
     // Triangles: small ones mark their bounding voxels, large ones are sampled on a sub-voxel lattice.
-    const grid = this.world.tris;
-    if (grid) {
+    for (const grid of [this.world.tris, ...walls]) {
+      if (!grid) continue;
       const T = grid.tris;
       for (const t of grid.query(ox, oz, ox + HALF * 2, oz + HALF * 2, [])) {
         const o = t * 9;
@@ -106,6 +134,10 @@ export class IndoorRoutes {
     }
 
     // BFS on a 1 m lattice through the goal voxel.
+    const at = (k: number): Vec3 => {
+      const ix = k % nx, iz = Math.floor(k / nx) % nz, iy = Math.floor(k / (nx * nz));
+      return { x: ox + (ix + 0.5) * VOX, y: oy + iy * VOX + 0.05, z: oz + (iz + 0.5) * VOX };
+    };
     const gx = Math.floor(HALF / VOX), gz = gx, gy0 = Math.floor(DOWN / VOX) + 1;
     let gy = -1;
     for (let k = 0; k <= 6; k++) if (gy0 + k < ny && !blocked[idx(gx, gy0 + k, gz)]) { gy = gy0 + k; break; }
@@ -114,11 +146,13 @@ export class IndoorRoutes {
     const queue: number[] = [idx(gx, gy, gz)];
     parent.set(queue[0], -1);
     let exit = -1;
+    // The voxel box stops UP metres above the goal: confirm an exit really sees the sky (snow piles, roofs above the box).
+    const sky = (k: number) => this.openSky(at(k));
     for (let h = 0; h < queue.length; h++) {
       const cur = queue[h];
       const ix = cur % nx, iz = Math.floor(cur / nx) % nz, iy = Math.floor(cur / (nx * nz));
       const col = iz * nx + ix;
-      if (h > 0 && iy > top[col] && iy > terrainTop[col]) { exit = cur; break; }
+      if (h > 0 && iy > top[col] && iy > terrainTop[col] && sky(cur)) { exit = cur; break; }
       for (const [dx, dy, dz] of [[STEP, 0, 0], [-STEP, 0, 0], [0, 0, STEP], [0, 0, -STEP], [0, STEP, 0], [0, -STEP, 0]]) {
         const x = ix + dx, y = iy + dy, z = iz + dz;
         if (x < 0 || y < 0 || z < 0 || x >= nx || y >= ny || z >= nz) continue;
@@ -132,10 +166,6 @@ export class IndoorRoutes {
     if (exit < 0) return null;
     const cells: number[] = [];
     for (let k = exit; k >= 0; k = parent.get(k) ?? -1) cells.push(k);
-    const at = (k: number): Vec3 => {
-      const ix = k % nx, iz = Math.floor(k / nx) % nz, iy = Math.floor(k / (nx * nz));
-      return { x: ox + (ix + 0.5) * VOX, y: oy + iy * VOX + 0.05, z: oz + (iz + 0.5) * VOX };
-    };
     // A straight segment is usable when every feet voxel along it (or one step up) has capsule clearance.
     const clear = (a: Vec3, b: Vec3) => {
       const len = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);

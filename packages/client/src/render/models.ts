@@ -1,10 +1,15 @@
 import * as THREE from 'three';
 import { PF } from '@ar/shared';
+import { settings } from '../settings.js';
+import { anims, animSetFor, TaAnimator } from './anim.js';
 import { TextureStore } from './textures.js';
+
+/** Normal-map strength for imported TA models and map meshes. */
+export const NORMAL_STRENGTH = 0.9;
 
 export interface ModelBone { name: string; parent: number; q: number[]; p: number[] }
 export interface ModelData {
-  key: string; bones: ModelBone[]; geometry: THREE.BufferGeometry; sections: { first: number; count: number; tex: string }[];
+  key: string; bones: ModelBone[]; geometry: THREE.BufferGeometry; sections: { first: number; count: number; tex: string; normal?: string }[];
   /** Model-space direction the mesh faces (characters/vehicles face +Z, weapons +X). */
   forward: THREE.Vector3;
 }
@@ -35,7 +40,9 @@ function parse(key: string, buf: ArrayBuffer): ModelData | null {
   for (let i = 0; i < ns; i++) {
     const first = v.getUint32(o, true), count = v.getUint32(o + 4, true); o += 8;
     const l = v.getUint8(o++);
-    sections.push({ first, count, tex: dec.decode(new Uint8Array(buf, o, l)) }); o += l;
+    // "diffuse|normal" (older exports: diffuse only).
+    const [tex, normal] = dec.decode(new Uint8Array(buf, o, l)).split('|');
+    sections.push({ first, count, tex, normal: normal || undefined }); o += l;
   }
   const sw = new Float32Array(nv * 4);
   for (let i = 0; i < nv * 4; i++) sw[i] = swRaw[i] / 255;
@@ -75,12 +82,15 @@ class ModelLibrary {
 
   private manifest(): Promise<Set<string>> {
     this.keys ??= (async () => {
+      let failed = false;
       for (const base of this.bases) {
         try {
-          const r = await fetch(`${base}/assets/models/manifest.json`, { signal: AbortSignal.timeout(4000) });
+          const r = await fetch(`${base}/assets/models/manifest.json`, { signal: AbortSignal.timeout(15000) });
           if (r.ok) return new Set(Object.keys(((await r.json()) as { models: Record<string, unknown> }).models));
-        } catch { /* next */ }
+        } catch { failed = true; }
       }
+      // A busy or unreachable node (e.g. while the menu backdrop streams in) must not disable models for the session.
+      if (failed) this.keys = null;
       return new Set<string>();
     })();
     return this.keys;
@@ -93,7 +103,9 @@ class ModelLibrary {
     let p = this.cache.get(key);
     if (!p) {
       p = (async () => {
-        if (!this.renderer || !(await this.manifest()).has(key)) return null;
+        if (!this.renderer) return null;
+        const keys = await this.manifest();
+        if (!keys.has(key)) { if (!keys.size) this.cache.delete(key); return null; }
         for (const base of this.bases) {
           try {
             const r = await fetch(`${base}/assets/models/${key}.amdl`, { signal: AbortSignal.timeout(15000) });
@@ -117,6 +129,13 @@ class ModelLibrary {
         if (!t) return;
         mat.map = t;
         if (selfLit) { mat.emissiveMap = t; mat.emissive.setHex(0xffffff); mat.emissiveIntensity = selfLit; }
+        mat.needsUpdate = true;
+      });
+      if (s.normal && this.textures && settings.textureDetail !== 'low') void this.textures.get(s.normal, true).then((t) => {
+        if (!t) return;
+        mat.normalMap = t;
+        // UE3 normal maps are DirectX-style (green down) and our axis swap mirrors the mesh: flip both.
+        mat.normalScale.set(-NORMAL_STRENGTH, NORMAL_STRENGTH);
         mat.needsUpdate = true;
       });
       return mat;
@@ -163,8 +182,8 @@ function rotateWorld(bone: THREE.Object3D, delta: THREE.Quaternion) {
 }
 
 /**
- * Skinned TA character driven procedurally: leg cycles for running/skiing/flying, spine aim and two-bone arm IK
- * onto the held weapon (TA's own animations are compressed AnimSequences we do not decode).
+ * Skinned TA character. With TA's animations imported it plays them like the game's AnimTree (TaAnimator) and holds
+ * the weapon on the CSO_RHand_01 socket (bone Prop1); otherwise legs, aim and arm IK are procedural.
  */
 export class CharacterRig {
   readonly root = new THREE.Group();
@@ -178,9 +197,12 @@ export class CharacterRig {
   private phase = 0;
   private wSki = 0;
   private wAir = 0;
+  private animator: TaAnimator | null = null;
+  private animKey = '';
+  private handGun: THREE.Object3D | null = null;
   readonly mats: THREE.MeshStandardMaterial[];
 
-  constructor(m: ModelData) {
+  constructor(m: ModelData, private heavy = false) {
     const bones = m.bones.map((b) => {
       const bone = new THREE.Bone();
       bone.name = b.name;
@@ -214,19 +236,60 @@ export class CharacterRig {
     this.restRootY = bones[0].position.y;
   }
 
-  /** Swap the 3P weapon in the character's hands. */
+  /** Swap the 3P weapon in the character's hands (and TA's locomotion set for that weapon type). */
   setWeapon(item: string) {
+    const { set, aim } = animSetFor(this.heavy, item);
+    const ak = `${set}|${aim}`;
+    if (ak !== this.animKey) {
+      this.animKey = ak;
+      void Promise.all([anims.get(set), anims.get('as_offsets')]).then(([s, off]) => {
+        if (this.animKey !== ak || !s) return;
+        const first = !this.animator;
+        this.animator = new TaAnimator(s, this.bones, off, aim);
+        if (!first) this.animator.play('Retrieve');
+        this.attachGun();
+      });
+    }
     const key = weaponModelKey(item) ?? '';
     if (key === this.gunKey) return;
     this.gunKey = key;
+    this.animator?.play('Retrieve');
     this.gun.clear();
+    if (this.handGun) { this.handGun.removeFromParent(); this.handGun = null; }
     if (!key) return;
     void models.get(key).then((wm) => {
       if (!wm || this.gunKey !== key) return;
       const w = staticModel(wm);
       w.children[0].position.set(0, 0, 0);
       this.gun.add(w);
+      // Raw (unrotated) copy for the hand socket: TA attaches weapons to CSO_RHand_01 on Prop1 with no offset.
+      const hand = new THREE.Mesh(wm.geometry, models.materials(wm));
+      hand.userData.sharedGeometry = true;
+      hand.castShadow = true;
+      this.handGun = hand;
+      this.attachGun();
     });
+  }
+
+  private attachGun() {
+    const prop = this.bones.get('Prop1');
+    if (!this.handGun || !prop || !this.animator) return;
+    prop.add(this.handGun);
+    this.gun.visible = false;
+  }
+
+  /** Upper-body fire animation (TA plays it on the weapon slot when the pawn fires). */
+  fire() { this.animator?.play('Fire'); }
+  /** Off-hand grenade toss. */
+  throwBelt() { this.animator?.play('OffhandGrenade'); }
+
+  /** World position of the CSO_JetPack_C socket (Spine1 + RelativeLocation) once TA animations drive the rig. */
+  jetSocket(out: THREE.Vector3): boolean {
+    const sp = this.bones.get('Spine1');
+    if (!sp || !this.animator) return false;
+    sp.updateWorldMatrix(true, false);
+    out.set(this.heavy ? 0.2 : 0.16, 0, this.heavy ? 0.36 : 0.2).applyMatrix4(sp.matrixWorld);
+    return true;
   }
 
   private turn(name: string, axis: THREE.Vector3, angle: number) {
@@ -252,14 +315,21 @@ export class CharacterRig {
     rotateWorld(fo, new THREE.Quaternion().setFromUnitVectors(H2.sub(E2).normalize(), want));
   }
 
-  update(dt: number, pitch: number, flags: number, speed: number) {
+  update(dt: number, pitch: number, flags: number, speed: number, vel?: { x: number; y: number; z: number }) {
+    const jet = (flags & PF.JETTING) !== 0, ski = (flags & PF.SKIING) !== 0, ground = (flags & PF.ON_GROUND) !== 0;
+    if (this.animator) {
+      const q = this.root.getWorldQuaternion(_q);
+      const f = _v.set(0, 0, -1).applyQuaternion(q), r = _v2.set(1, 0, 0).applyQuaternion(q);
+      const vx = vel?.x ?? 0, vz = vel?.z ?? 0;
+      this.animator.update(dt, { fwd: vx * f.x + vz * f.z, right: vx * r.x + vz * r.z, up: vel?.y ?? 0, onGround: ground, skiing: ski && !jet, jetting: jet, pitch });
+      return;
+    }
     for (const [b, q] of this.rest) b.quaternion.copy(q);
     const rootBone = this.mesh.skeleton.bones[0];
     rootBone.position.y = this.restRootY;
     this.root.updateMatrixWorld(true);
     const rq = this.root.getWorldQuaternion(new THREE.Quaternion());
     const right = new THREE.Vector3(1, 0, 0).applyQuaternion(rq), fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(rq), upW = new THREE.Vector3(0, 1, 0);
-    const jet = (flags & PF.JETTING) !== 0, ski = (flags & PF.SKIING) !== 0, ground = (flags & PF.ON_GROUND) !== 0;
     const s = this.height / 2;
     // Pose weights ease in/out so hopping between ground and air while skiing does not snap the legs.
     const ease = (cur: number, to: number) => cur + (to - cur) * Math.min(1, dt * 9);
@@ -308,5 +378,7 @@ export class CharacterRig {
   dispose() {
     for (const m of this.mats) m.dispose();
     this.gun.clear();
+    this.animKey = 'disposed';
+    if (this.handGun) { this.handGun.removeFromParent(); ((this.handGun as THREE.Mesh).material as THREE.Material[]).forEach((m) => m.dispose()); this.handGun = null; }
   }
 }

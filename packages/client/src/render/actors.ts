@@ -8,6 +8,8 @@ import { forceFieldMaterial } from './forcefield.js';
 import { skinMaterial } from './materials.js';
 import { CharacterRig, models, staticModel } from './models.js';
 
+const _jet = new THREE.Vector3();
+
 const NEUTRAL = 0xd0d0d0;
 export const teamColor = (t: number) => (t === 0 || t === 1 ? TEAM_COLORS[t] : NEUTRAL);
 
@@ -139,7 +141,7 @@ export class PlayerModel {
     const [first, fallback] = taSkinModelKeys(cls.id, team, settings.forceDefaultSkins ? 0 : Number(cos.taSkins?.[clsIndex] ?? 0));
     void models.get(first).then((m) => (m || !fallback ? m : models.get(fallback))).then((m) => {
       if (!m || this.disposed) return;
-      this.rig = new CharacterRig(m);
+      this.rig = new CharacterRig(m, cls.armor === 'heavy');
       // Mercenary armour is not team-painted: a faint team cast keeps friend/foe readable.
       if (m.key.includes('_merc')) for (const mat of this.rig.mats) mat.color.lerp(new THREE.Color(tc), 0.14);
       this.root.add(this.rig.root);
@@ -172,7 +174,7 @@ export class PlayerModel {
     });
   }
 
-  update(dt: number, yaw: number, pitch: number, flags: number, speed: number, flagTeam: number | null) {
+  update(dt: number, yaw: number, pitch: number, flags: number, speed: number, flagTeam: number | null, vel?: { x: number; y: number; z: number }) {
     this.root.rotation.y = yaw;
     this.armR.rotation.x = pitch;
     const jet = (flags & PF.JETTING) !== 0, ski = (flags & PF.SKIING) !== 0, ground = (flags & PF.ON_GROUND) !== 0;
@@ -196,8 +198,17 @@ export class PlayerModel {
     if (flagTeam !== null) ((this.flag.children[1] as THREE.Mesh).material as THREE.MeshStandardMaterial).color.setHex(teamColor(flagTeam));
     this.shield.visible = (flags & PF.SHIELD) !== 0;
     this.applyStealth((flags & PF.STEALTH) !== 0);
-    this.rig?.update(dt, pitch, flags, speed);
+    this.rig?.update(dt, pitch, flags, speed, vel);
+    // Thrust comes out of the jetpack (CSO_JetPack_C), which moves with the animated spine.
+    if (jet && this.rig?.jetSocket(_jet)) {
+      this.body.worldToLocal(_jet);
+      this.flames.forEach((f, i) => f.position.set(_jet.x + (i ? 0.09 : -0.09), _jet.y - 0.45, _jet.z));
+    }
   }
+
+  /** Third-person fire / belt-throw animations (TA's upper-body slot). */
+  fire() { this.rig?.fire(); }
+  throwBelt() { this.rig?.throwBelt(); }
 
   setWeaponLength(len: number) { this.weapon.scale.z = len; }
 

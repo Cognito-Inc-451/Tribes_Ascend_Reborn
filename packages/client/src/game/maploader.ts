@@ -1,4 +1,4 @@
-import { decodeMapData, entitiesForMode, generateMap, LAYOUT_BY_ID, type MapData, type MapRef, type ModeId } from '@ar/shared';
+import { addBaseFieldBlockers, decodeMapData, entitiesForMode, generateMap, LAYOUT_BY_ID, MODES, type MapData, type MapRef, type ModeId } from '@ar/shared';
 import { NODE_URL } from '../net/node.js';
 
 const DB = 'ascend-reborn-maps';
@@ -90,5 +90,7 @@ export async function loadMap(ref: MapRef, mode: ModeId, serverHttp: string, onP
     void cachePut(key, gz);
   }
   onProgress(0.95, 'Unpacking map');
-  return decodeMapData(await gunzip(gz));
+  const map = decodeMapData(await gunzip(gz));
+  if (MODES[mode].usesBases) addBaseFieldBlockers(map);
+  return map;
 }

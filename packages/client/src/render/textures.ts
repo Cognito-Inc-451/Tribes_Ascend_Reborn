@@ -81,26 +81,37 @@ export class TextureStore {
     }
   }
 
-  get(name: string): Promise<THREE.Texture | null> {
-    let p = this.cache.get(name);
-    if (!p) { p = this.load(name); this.cache.set(name, p); }
+  /** `linear` for data textures such as normal maps (no sRGB decode). */
+  get(name: string, linear = false): Promise<THREE.Texture | null> {
+    const key = linear ? `${name}|lin` : name;
+    let p = this.cache.get(key);
+    if (!p) { p = this.load(name, linear); this.cache.set(key, p); }
     return p;
   }
 
-  private async load(name: string): Promise<THREE.Texture | null> {
+  private async fetchAtx(base: string, file: string): Promise<Atx | null> {
+    try {
+      const r = await fetch(`${base}/assets/tex/${encodeURIComponent(file)}.atx`, { signal: AbortSignal.timeout(20000) });
+      return r.ok ? parseAtx(await r.arrayBuffer()) : null;
+    } catch { return null; }
+  }
+
+  private async load(name: string, linear: boolean): Promise<THREE.Texture | null> {
     for (const base of this.bases) {
-      try {
-        const r = await fetch(`${base}/assets/tex/${encodeURIComponent(name)}.atx`, { signal: AbortSignal.timeout(15000) });
-        if (!r.ok) continue;
-        const atx = parseAtx(await r.arrayBuffer());
-        if (atx) return this.build(atx);
-      } catch { /* try next source */ }
+      const atx = await this.fetchAtx(base, name);
+      if (!atx) continue;
+      // Ultra: the importer keeps the original top mips (above 512) in a separate file.
+      if (settings.textureDetail === 'ultra') {
+        const hi = await this.fetchAtx(base, `${name}.hi`);
+        if (hi && hi.format === atx.format) atx.mips = [...hi.mips, ...atx.mips];
+      }
+      return this.build(atx, linear);
     }
     return null;
   }
 
-  private build(atx: Atx): THREE.Texture {
-    const cap = settings.textureDetail === 'low' ? 128 : settings.textureDetail === 'medium' ? 256 : 4096;
+  private build(atx: Atx, linear = false): THREE.Texture {
+    const cap = settings.textureDetail === 'low' ? 128 : settings.textureDetail === 'medium' ? 256 : settings.textureDetail === 'high' ? 512 : 4096;
     let mips = atx.mips;
     while (mips.length > 1 && Math.max(mips[0].w, mips[0].h) > cap) mips = mips.slice(1);
     let tex: THREE.Texture;
@@ -135,8 +146,8 @@ export class TextureStore {
     }
     tex.magFilter = THREE.LinearFilter;
     tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-    tex.colorSpace = THREE.SRGBColorSpace;
-    tex.anisotropy = Math.min(maxAniso, settings.quality === 'low' ? 1 : settings.quality === 'medium' ? 4 : 8);
+    tex.colorSpace = linear ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+    tex.anisotropy = Math.min(maxAniso, Math.max(1, settings.anisotropy || 1));
     tex.userData.packed = atx.packed;
     tex.needsUpdate = true;
     return tex;

@@ -2,7 +2,7 @@ import { CALLINS, CLASSES, ITEMS, MODES, PERKS, PERKS_A, PERKS_B, TEAM_NAMES, VE
 import { audio } from '../audio/audio.js';
 import { NODE_URL } from '../net/node.js';
 import { saveSettings, settings } from '../settings.js';
-import { clear, h } from './dom.js';
+import { clear, h, layoutChar } from './dom.js';
 
 export function overlay(...children: HTMLElement[]): HTMLElement {
   return h('div', { class: 'overlay-center' }, h('div', { class: 'panel modal' }, ...children));
@@ -131,10 +131,14 @@ export class VgsMenu {
   close() { this.node = null; this.el.classList.add('hidden'); }
   get isOpen() { return this.node !== null; }
 
-  press(code: string): VgsLeaf | 'close' | null {
+  /** `key` is the event's character, so VGS letters follow the keyboard layout (AZERTY's Z is "Z", not "W"). */
+  press(code: string, key?: string): VgsLeaf | 'close' | null {
     if (!this.node) return null;
     if (code === 'Escape' || code === 'Backspace') { this.close(); return 'close'; }
-    const letter = code.replace(/^Key/, '');
+    const physical = code.replace(/^(Key|Digit)/, '');
+    const k = key?.length === 1 ? key.toUpperCase() : (layoutChar(code) ?? '').toUpperCase();
+    // Latin letters/digits as typed; non-Latin layouts (Cyrillic, Greek...) fall back to the key's position.
+    const letter = /^[A-Z0-9]$/.test(k) ? k : !k || /\p{L}/u.test(k) ? physical : k;
     const child = this.node.children.find((c) => c.key === letter);
     if (!child) return null;
     if (isVgsNode(child)) { this.node = child; this.render(); return null; }

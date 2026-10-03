@@ -45,7 +45,9 @@ export function rulesText(o: GameOptions): string {
   if (o.infiniteEnergy) r.push('Infinite energy');
   if (o.noFallDamage) r.push('No fall damage');
   if (o.infiniteCallIns) r.push('Infinite call-ins');
+  if (o.vehicles === false) r.push('No vehicles');
   if (o.creditMultiplier && o.creditMultiplier !== 1) r.push(`Credits x${o.creditMultiplier}`);
+  if (o.gravity && o.gravity !== 1) r.push(`Gravity x${o.gravity}`);
   if (o.timeLimit !== undefined) r.push(o.timeLimit ? `${o.timeLimit} min time limit` : 'No time limit');
   if (o.scoreLimit !== undefined) r.push(o.scoreLimit ? `Score limit ${o.scoreLimit}` : 'No score limit');
   return r.join(' · ');
@@ -103,7 +105,7 @@ export class Menus {
     window.addEventListener('keydown', (e) => {
       if (this.root.classList.contains('hidden') || this.login || (e.target as HTMLElement)?.tagName === 'INPUT') return;
       if (e.code === 'Escape' && this.back) { e.preventDefault(); this.back(); }
-      if (e.code === 'KeyM') this.showMain();
+      if (e.key === 'm' || e.key === 'M') this.showMain();
     });
     social.onChange(() => this.renderAccount());
     this.renderAccount();
@@ -271,7 +273,7 @@ export class Menus {
 
   // ---------------- host game
   private hostCfg: { mode: ModeId; map: string; source: 'original' | 'reborn'; options: Required<Omit<GameOptions, 'timeLimit' | 'scoreLimit'>> & { timeLimit: number; scoreLimit: number } } = {
-    mode: 'ctf', map: '', source: 'original', options: { botsPerTeam: 4, botDifficulty: 'adept', infiniteAmmo: false, infiniteEnergy: false, noFallDamage: false, infiniteCallIns: false, creditMultiplier: 1, timeLimit: -1, scoreLimit: -1 },
+    mode: 'ctf', map: '', source: 'original', options: { botsPerTeam: 10, botDifficulty: 'adept', infiniteAmmo: false, infiniteEnergy: false, noFallDamage: false, infiniteCallIns: false, vehicles: true, creditMultiplier: 1, gravity: 1, timeLimit: -1, scoreLimit: -1 },
   };
   private mapList: { id: string; name: string; mode: string }[] | null = null;
 
@@ -306,7 +308,9 @@ export class Menus {
       { label: 'INFINITE ENERGY', badge: o.infiniteEnergy ? 'ENABLED' : 'DISABLED', badgeKind: o.infiniteEnergy ? 'gold' : 'blue', onClick: () => { o.infiniteEnergy = !o.infiniteEnergy; rerender(); } },
       { label: 'FALL DAMAGE', badge: o.noFallDamage ? 'DISABLED' : 'ENABLED', badgeKind: o.noFallDamage ? 'gold' : 'blue', onClick: () => { o.noFallDamage = !o.noFallDamage; rerender(); } },
       { label: 'INFINITE CALL-INS', badge: o.infiniteCallIns ? 'ENABLED' : 'DISABLED', badgeKind: o.infiniteCallIns ? 'gold' : 'blue', onClick: () => { o.infiniteCallIns = !o.infiniteCallIns; rerender(); } },
+      { label: 'VEHICLES', badge: o.vehicles ? 'ENABLED' : 'DISABLED', badgeKind: o.vehicles ? 'blue' : 'gold', onClick: () => { o.vehicles = !o.vehicles; rerender(); } },
       { label: 'CREDIT MULTIPLIER', badge: `x${o.creditMultiplier}`, badgeKind: o.creditMultiplier !== 1 ? 'gold' : 'blue', onClick: (e) => { o.creditMultiplier = cycle([0.5, 1, 1.5, 2, 3, 5, 10], o.creditMultiplier, e); rerender(); } },
+      { label: 'GRAVITY', badge: `${Math.round(o.gravity * 100)}%`, badgeKind: o.gravity !== 1 ? 'gold' : 'blue', onClick: (e) => { o.gravity = cycle([0.5, 0.75, 0.9, 1, 1.1, 1.2, 1.35, 1.5, 2], o.gravity, e); rerender(); } },
       { label: 'LAUNCH', sub: 'START THE SERVER AND JOIN', badge: 'GO', onClick: () => void this.launch() },
     ], () => this.showPlay());
     const m = MODES[c.mode];
@@ -340,7 +344,7 @@ export class Menus {
       mapSource: maps[0]?.source ?? 'reborn',
       options: {
         botsPerTeam: o.botsPerTeam, botDifficulty: o.botDifficulty, infiniteAmmo: o.infiniteAmmo, infiniteEnergy: o.infiniteEnergy, noFallDamage: o.noFallDamage,
-        infiniteCallIns: o.infiniteCallIns, creditMultiplier: o.creditMultiplier,
+        infiniteCallIns: o.infiniteCallIns, vehicles: o.vehicles, creditMultiplier: o.creditMultiplier, gravity: o.gravity,
         timeLimit: o.timeLimit < 0 ? undefined : o.timeLimit, scoreLimit: o.scoreLimit < 0 ? undefined : o.scoreLimit,
       },
     };
@@ -411,7 +415,7 @@ export class Menus {
       const exp = expectedTransport(s, settings.transport);
       const ping = this.pings.get(this.key(s));
       const friends = this.friendsOn(s);
-      const custom = s.options && (s.options.infiniteAmmo || s.options.infiniteEnergy || s.options.noFallDamage || s.options.infiniteCallIns || (s.options.creditMultiplier ?? 1) !== 1 || s.options.botsPerTeam !== undefined);
+      const custom = s.options && (s.options.infiniteAmmo || s.options.infiniteEnergy || s.options.noFallDamage || s.options.infiniteCallIns || s.options.vehicles === false || (s.options.creditMultiplier ?? 1) !== 1 || (s.options.gravity ?? 1) !== 1 || s.options.botsPerTeam !== undefined);
       const row = h('tr', { class: `row ${this.selected && this.key(this.selected) === this.key(s) ? 'sel' : ''}`, onclick: () => { this.selected = s; this.renderRows(); }, ondblclick: () => this.hooks.join(s) },
         h('td', null, h('span', { class: `tag loc-${s.origin}` }, where[s.origin] ?? s.origin), ' ', h('span', { class: 'name' }, s.name), s.passworded ? ' \u{1F512}' : '',
           friends.length ? h('span', { class: 'tag friend', title: friends.join(', ') }, `${friends.length} FRIEND${friends.length > 1 ? 'S' : ''}`) : null),
@@ -606,22 +610,58 @@ export class Menus {
     }, opts.map(([v, l]) => h('option', { value: v, selected: settings[key] === v }, l)));
 
     if (this.tab === 'video') {
+      const head = (t: string) => grid.append(h('div', { class: 'settings-head' }, t));
+      const pct = (v: number) => `${Math.round(v * 100)}%`;
+      const signed = (v: number) => (v === 0 ? '0' : `${v > 0 ? '+' : ''}${v.toFixed(2)}`);
+      const needsPost = () => { if (settings.post === 'off') this.toast('Needs Post-Processing on'); gfx(); };
       row('Graphics Preset', h('select', { onchange: (e: Event) => { applyQuality((e.target as HTMLSelectElement).value as Quality); gfx(); this.showSettings(); } },
         (['low', 'medium', 'high', 'ultra'] as const).map((q) => h('option', { value: q, selected: settings.quality === q }, q.toUpperCase()))));
       row('Display Mode', h('button', { class: 'btn small', onclick: () => { if (document.fullscreenElement) void document.exitFullscreen(); else void document.documentElement.requestFullscreen(); } }, document.fullscreenElement ? 'Fullscreen → Windowed' : 'Windowed → Fullscreen'));
-      row('Screen Percentage', range('renderScale', 0.4, 2, 0.05, (v) => `${Math.round(v * 100)}%`, gfx));
+      row('Screen Percentage', range('renderScale', 0.4, 2, 0.05, pct, gfx));
       row('Field of View', range('fov', 70, 130, 1, (v) => `${v}°`, gfx));
-      row('Brightness', range('brightness', 0.6, 1.6, 0.02, (v) => `${Math.round(v * 100)}%`, gfx));
-      row('Texture Detail', select('textureDetail', [['low', 'Low'], ['medium', 'Medium'], ['high', 'High']], () => this.toast('Applies on next map load')));
-      row('World Detail (view distance)', range('viewDistance', 600, 4000, 100, (v) => `${v} m`, gfx));
-      row('Shadow Detail', check('shadows', gfx));
-      row('Effects Detail', range('particles', 0.2, 1.5, 0.05, (v) => `${Math.round(v * 100)}%`));
-      row('Weather Effects', check('weather'));
-      row('Bullet Tracers', check('tracers'));
-      row('Bloom', check('bloom', gfx));
-      row('Post-Processing', select('post', [['off', 'Off'], ['light', 'Light (grade + vignette)'], ['full', 'Full (+ sharpen)']], gfx));
-      row('Anti-Aliasing', check('antialias', gfx));
+      row('Anti-Aliasing (MSAA)', check('antialias', () => { gfx(); this.toast('Fully applies after a reload when post-processing is off'); }));
       row('Frame Rate Limit', range('maxFps', 0, 300, 10, (v) => (v ? `${v} fps` : 'Unlimited')));
+
+      head('DETAIL');
+      row('Texture Quality', select('textureDetail', [['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['ultra', 'Ultra (original resolution)']], () => this.toast('Applies on next map load')));
+      row('Anisotropic Filtering', h('select', { onchange: (e: Event) => { settings.anisotropy = Number((e.target as HTMLSelectElement).value); saveSettings(); this.toast('Applies on next map load'); } },
+        [1, 4, 8, 16].map((v) => h('option', { value: v, selected: settings.anisotropy === v }, v === 1 ? 'Off' : `${v}x`))));
+      row('World Detail (view distance)', range('viewDistance', 600, 4000, 100, (v) => `${v} m`, gfx));
+      row('Water Quality', select('waterQuality', [['low', 'Low'], ['medium', 'Medium (animated)'], ['high', 'High (waves + sky reflections)']], () => this.toast('Applies on next map load')));
+      row('Effects Detail', range('particles', 0.2, 1.5, 0.05, pct));
+      row('Weather Effects (snow, rain, dust)', check('weather'));
+      row('Bullet Tracers', check('tracers'));
+
+      head('LIGHTING');
+      row('Baked Lighting (TA lightmaps)', check('bakedLighting', () => this.toast('Applies on next map load')));
+      row('Shadow Quality', select('shadowQuality', [['off', 'Off'], ['low', 'Low (1K)'], ['medium', 'Medium (2K)'], ['high', 'High (2K, wider)'], ['ultra', 'Ultra (4K)']], gfx));
+      row('Soft Shadows', check('softShadows', gfx));
+      row('Volumetric Height Fog', check('volumetricFog', gfx));
+      row('God Rays', check('godrays', needsPost));
+      row('Ambient Occlusion (SSAO)', select('ao', [['off', 'Off'], ['low', 'Low'], ['high', 'High']], needsPost));
+      row('Water Reflections (SSR)', check('ssr', needsPost));
+
+      head('POST-PROCESSING');
+      row('Post-Processing', select('post', [['off', 'Off (fastest)'], ['light', 'On'], ['full', 'On + sharpen']], gfx));
+      row('HDR Rendering (16-bit)', check('hdr', needsPost));
+      row('Tone Mapping', select('toneMapping', [['aces', 'ACES Filmic'], ['agx', 'AgX'], ['neutral', 'Khronos Neutral'], ['cineon', 'Cineon']], gfx));
+      row('Bloom', check('bloom', needsPost));
+      row('Bloom Intensity', range('bloomStrength', 0.1, 1.5, 0.05, (v) => v.toFixed(2), needsPost));
+      row('Depth of Field', check('dof', needsPost));
+      row('Motion Blur', range('motionBlur', 0, 1, 0.05, (v) => (v ? pct(v) : 'Off'), needsPost));
+
+      head('COLOR');
+      row('Brightness', range('brightness', 0.6, 1.6, 0.02, pct, gfx));
+      row('Contrast', range('contrast', 0.7, 1.4, 0.01, (v) => v.toFixed(2), needsPost));
+      row('Saturation', range('saturation', 0, 1.6, 0.01, (v) => v.toFixed(2), needsPost));
+      row('Vibrance', range('vibrance', -0.5, 1, 0.01, signed, needsPost));
+      row('Color Temperature', range('temperature', -1, 1, 0.02, signed, needsPost));
+      row('Tint', range('tint', -1, 1, 0.02, signed, needsPost));
+      row('Color Grade', select('grade', [['neutral', 'Neutral'], ['ascend', 'Ascend'], ['cinematic', 'Cinematic'], ['vivid', 'Vivid'], ['bleach', 'Bleach Bypass']], needsPost));
+      row('Vignette', range('vignette', 0, 1, 0.01, pct, needsPost));
+      row('Film Grain', range('filmGrain', 0, 1, 0.01, (v) => (v ? pct(v) : 'Off'), needsPost));
+      row('Chromatic Aberration', range('chromatic', 0, 1, 0.01, (v) => (v ? pct(v) : 'Off'), needsPost));
+      row('Sharpen', range('sharpen', 0, 1, 0.01, (v) => (v ? pct(v) : 'Off'), needsPost));
     } else if (this.tab === 'audio') {
       const va = () => audio.applyVolumes();
       row('Master Volume', range('masterVolume', 0, 1, 0.01, (v) => `${Math.round(v * 100)}%`, va));

@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { ArmorSkin, SkinPattern } from '@ar/shared';
+import { withFog } from './fog.js';
 
 /** MeshStandardMaterial with world-space procedural grime/detail so untextured geometry does not look flat. */
 export function surfaceMaterial(color: number, opts: { roughness?: number; metalness?: number; detail?: number; scale?: number; emissive?: number; vertexColors?: boolean; flat?: boolean; transparent?: boolean; opacity?: number; side?: THREE.Side } = {}): THREE.MeshStandardMaterial {
@@ -10,6 +11,7 @@ export function surfaceMaterial(color: number, opts: { roughness?: number; metal
   });
   const detail = opts.detail ?? 0.18, scale = opts.scale ?? 0.35;
   m.onBeforeCompile = (sh) => {
+    withFog(sh);
     sh.uniforms.uDetail = { value: detail };
     sh.uniforms.uScale = { value: scale };
     sh.vertexShader = sh.vertexShader

@@ -11,6 +11,8 @@ export interface HudState {
   myScore?: number;
   /** Team-relative top bar: my team (0/1, else 1), flag state per team (0 home, 1 carried, 2 dropped), generator up per team. */
   myTeam: number; teamFlags: (number | null)[]; gens: (boolean | null)[]; armor: string; waiting: boolean;
+  /** A respawn click is queued for when the timer runs out. */
+  spawnQueued?: boolean;
 }
 
 export interface Marker { x: number; y: number; color: string; label: string; dist: number; kind: 'flag' | 'asset' | 'ally' | 'enemy' | 'point' | 'strike' | 'station'; hp?: number; icon?: string }
@@ -225,7 +227,7 @@ export class Hud {
     }
 
     this.respawn.classList.toggle('hidden', alive || !!s.spectating);
-    if (!alive && !s.spectating) this.respawn.textContent = s.respawn > 0 ? `RESPAWN IN ${s.respawn.toFixed(1)}` : 'CLICK TO RESPAWN · I = CLASS · P = TEAM';
+    if (!alive && !s.spectating) this.respawn.textContent = s.respawn > 0 ? `${s.spawnQueued ? 'DEPLOYING' : 'RESPAWN'} IN ${s.respawn.toFixed(1)}` : 'CLICK TO RESPAWN · I = CLASS · P = TEAM';
     this.spec.classList.toggle('hidden', !s.spectating);
     if (s.spectating) this.spec.textContent = `SPECTATING ${s.spectating} · LMB/RMB cycle · MMB free cam · Q/E up/down · wheel speed · G gens · F flags · B stands · V vehicles · R fastest`;
     this.net.classList.toggle('hidden', !sessionStats);
@@ -235,7 +237,7 @@ export class Hud {
 
   killFeed(killer: PlayerInfo | undefined, victim: PlayerInfo | undefined, item: string, assist?: PlayerInfo) {
     const name = (p: PlayerInfo | undefined) => h('span', { class: p ? `t${p.team === 255 ? 'n' : p.team}` : 'tn' }, p ? (p.bot ? p.name : p.name) : 'World');
-    const weapon = ITEMS[item]?.name ?? ({ melee: 'Melee', fall: 'Impact', killz: 'Out of Bounds', suicide: 'Suicide', vehicle_crash: 'Roadkill', force_field: 'Force Field', turret_base: 'Base Turret', light_turret: 'Turret', tactical_strike: 'Tactical Strike', orbital_strike: 'Orbital Strike', supply_drop: 'Supply Drop' } as Record<string, string>)[item] ?? item;
+    const weapon = ITEMS[item]?.name ?? ({ melee: 'Melee', fall: 'Impact', killz: 'Out of Bounds', hazard: 'Hazard', suicide: 'Suicide', vehicle_crash: 'Roadkill', force_field: 'Force Field', turret_base: 'Base Turret', light_turret: 'Turret', tactical_strike: 'Tactical Strike', orbital_strike: 'Orbital Strike', supply_drop: 'Supply Drop' } as Record<string, string>)[item] ?? item;
     const row = killer && killer !== victim
       ? h('div', { class: 'k' }, name(killer), assist ? h('span', { class: 'muted' }, ` + ${assist.name}`) : null, h('span', { class: 'muted' }, ` [${weapon}] `), name(victim))
       : h('div', { class: 'k' }, name(victim), h('span', { class: 'muted' }, ` [${weapon}]`));

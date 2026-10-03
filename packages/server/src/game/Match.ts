@@ -2,10 +2,10 @@ import {
   ASSETS, assetDamageMult, BTN, CALLINS, CLASS_BY_ID, CLASSES, clamp, CREDITS, dirFromAngles, distSq, distToCapsule, DT, encodeSnapshot,
   FALL_DAMAGE_PER_MS, FALL_DAMAGE_THRESHOLD, FLAG_DRAG_KMH, FLAG_GRAB_RADIUS, FLAG_RETURN_TIME, FLAG_THROW_SPEED, GRAVITY,
   HEALTH_REGEN_DELAY, HEALTH_REGEN_RATE, hitscanFalloff, ITEM_INDEX, ITEMS, loadoutStats, makeOBB, MELEE, MODES, mulberry32, newMoveState, PF,
-  PHASE, projDef, RESPAWN_TIME, SELF_IMPULSE_MULT, SHOCKLANCE_BACK_MULT, segmentVsCapsule, splashDamage, stepMovement, THEMES, validateLoadout,
+  PHASE, projDef, RESPAWN_TIME, SHOCKLANCE_BACK_MULT, segmentVsCapsule, splashDamage, splashKnockback, applyKnockback, stepMovement, THEMES, validateLoadout,
   VEHICLES, advanceProjectile, AF, ASSET_TYPES, VEHICLE_TYPES, UU_PER_METER,
   type AssetType, type CallInType, type InputCmd, type ItemDef, type Loadout, type MapEntity, type ModeDef, type MoveParams,
-  type PlayerSnap, type ProjState, type ProjectileDef, type S2C, type Snapshot, type Vec3, type VehicleType,
+  type PlayerSnap, type ProjState, type ProjectileDef, type S2C, type Snapshot, type Vec3, type VehicleType, inVolume, type MapVolume,
 } from '@ar/shared';
 import type { ServerConfig } from '../config.js';
 import { makeWeapon, Player, type Asset, type FlagState, type Vehicle } from './entities.js';
@@ -48,9 +48,12 @@ export class Match {
   private killZ: number;
   private hazardY: number;
   readonly nav: IndoorRoutes;
+  /** Inventory stations bots go back to when their main weapon runs dry, per team. */
+  readonly restock: [Vec3[], Vec3[]] = [[], []];
 
   constructor(readonly cfg: ServerConfig, readonly map: LoadedMap, readonly io: MatchIO) {
     this.mode = { ...MODES[cfg.mode] };
+    this.world.gravityScale = cfg.options?.gravity ?? 1;
     if (cfg.options?.timeLimit !== undefined) this.mode.timeLimit = cfg.options.timeLimit;
     if (cfg.options?.scoreLimit !== undefined) this.mode.scoreLimit = cfg.options.scoreLimit;
     const theme = THEMES[map.data.theme];
@@ -61,6 +64,14 @@ export class Match {
     // Bots need routes into base interiors (generator rooms, CaH points, roofed flag stands).
     for (const a of this.assets) if (a.type === 'generator' || a.type === 'cap_point') this.nav.prepare(a.pos);
     for (const f of this.flags) this.nav.prepare(f.home);
+    // Where bots restock: each team's inventory station closest to its flag.
+    for (const t of [0, 1]) {
+      const home = this.flags.find((f) => f.team === t)?.home;
+      const st = this.assets.filter((a) => a.type === 'inventory' && a.team === t);
+      if (home) st.sort((a, b) => distSq(a.pos, home) - distSq(b.pos, home));
+      this.restock[t] = st.slice(0, 1).map((a) => a.pos);
+      for (const p of this.restock[t]) this.nav.prepare(p);
+    }
     this.phase = PHASE.WARMUP;
     this.phaseEnd = this.mode.id === 'training' ? Infinity : 10;
   }
@@ -75,6 +86,7 @@ export class Match {
       const def = ASSETS[e.kind as AssetType];
       if (!def || e.kind === 'flag_stand') continue;
       if (!this.mode.usesBases && ['generator', 'base_turret', 'radar', 'vehicle_pad'].includes(e.kind)) continue;
+      if (e.kind === 'vehicle_pad' && this.cfg.options?.vehicles === false) continue;
       if (e.kind === 'cap_point' && m !== 'cah') continue;
       this.addAsset(e.kind as AssetType, e.team, this.onFloor(e.kind, e.pos), e.yaw, -1, e.tag);
     }
@@ -110,7 +122,7 @@ export class Match {
   }
 
   private teamCentroid(team: number): Vec3 {
-    const sp = this.entities.filter((e) => e.kind === 'spawn' && e.team === team);
+    const sp = team <= 1 ? this.teamSpawns(team) : [];
     if (!sp.length) return this.mapCenter();
     const c = sp.reduce((a, e) => ({ x: a.x + e.pos.x, y: a.y + e.pos.y, z: a.z + e.pos.z }), { x: 0, y: 0, z: 0 });
     return { x: c.x / sp.length, y: c.y / sp.length, z: c.z / sp.length };
@@ -153,12 +165,14 @@ export class Match {
     if (p.vehicle) this.exitVehicle(p);
     for (const a of this.assets.filter((x) => x.owner === p.id)) this.removeAsset(a);
     this.players.delete(p.id);
+    this.lastStart.delete(-1 - p.id);
   }
 
-  autoTeam(): number {
+  /** Smaller team; `self` is left out of the count so re-picking auto-assign does not swap a lone player. */
+  autoTeam(self?: Player): number {
     if (!this.mode.teams) return this.rng() < 0.5 ? 0 : 1;
     let a = 0, b = 0;
-    for (const p of this.players.values()) { if (p.team === 0) a++; else if (p.team === 1) b++; }
+    for (const p of this.players.values()) { if (p === self) continue; if (p.team === 0) a++; else if (p.team === 1) b++; }
     return a <= b ? 0 : 1;
   }
 
@@ -168,7 +182,7 @@ export class Match {
       p.team = 255; p.spectator = true; p.alive = false;
       return;
     }
-    if (team !== 0 && team !== 1) team = this.autoTeam();
+    if (team !== 0 && team !== 1) team = this.autoTeam(p);
     if (p.team === team && !p.spectator) return;
     if (p.alive) this.kill(p, null, 'none', true);
     p.team = team;
@@ -202,13 +216,35 @@ export class Match {
 
   private spawnPoint(p: Player): { pos: Vec3; yaw: number } {
     const all = this.entities.filter((e) => e.kind === 'spawn' && this.validSpawn(e));
-    let list = this.mode.teams ? all.filter((e) => e.team === p.team) : all;
+    let list = this.mode.teams && p.team <= 1 ? this.teamSpawns(p.team).filter((e) => this.validSpawn(e)) : all;
     if (!list.length) list = all;
     if (!list.length) {
       const c = this.mode.teams ? this.teamCentroid(p.team) : this.mapCenter();
       return { pos: this.surfaceAbove(c), yaw: 0 };
     }
-    // Prefer spawns far from living enemies.
+    if (this.mode.teams) {
+      // TA (UTGame.ChoosePlayerStart / RatePlayerStart): scan the team's starts from a random index and take the first
+      // good-enough one (rating >= 30: a primary start that was not the last one used and has no enemy in sight within
+      // 60 m), else the best rated. Occupied starts rate lower so a crowd spills over instead of stacking.
+      const n = list.length, r0 = Math.floor(this.rng() * n);
+      let best = list[r0], bestScore = -Infinity;
+      for (let k = 0; k < n; k++) {
+        const e = list[(r0 + k) % n];
+        let score = e === this.lastStart.get(p.team) || e === this.lastStart.get(-1 - p.id) ? 15 : 30;
+        for (const o of this.players.values()) {
+          if (!o.alive || o === p) continue;
+          const d = Math.hypot(o.move.pos.x - e.pos.x, o.move.pos.y - e.pos.y, o.move.pos.z - e.pos.z);
+          if (d < 2) score -= 10;
+          if (d < 60 && this.isEnemy(o, p) && !this.world.raycast({ x: e.pos.x, y: e.pos.y + 1, z: e.pos.z }, { x: o.move.pos.x, y: o.move.pos.y + 1.6, z: o.move.pos.z }, undefined, false)) score -= 5 - d / 20;
+        }
+        if (score >= 30) { best = e; break; }
+        if (score > bestScore) { bestScore = score; best = e; }
+      }
+      this.lastStart.set(p.team, best);
+      this.lastStart.set(-1 - p.id, best);
+      return { pos: this.freeSpot({ x: best.pos.x, y: best.pos.y + 0.3, z: best.pos.z }, p), yaw: best.yaw };
+    }
+    // Free-for-all: prefer spawns far from living enemies.
     let best = list[0], bestScore = -Infinity;
     for (let i = 0; i < Math.min(8, list.length); i++) {
       const e = list[Math.floor(this.rng() * list.length)];
@@ -218,6 +254,42 @@ export class Match {
       if (score > bestScore) { bestScore = score; best = e; }
     }
     return { pos: this.freeSpot({ x: best.pos.x, y: best.pos.y + 0.3, z: best.pos.z }, p), yaw: best.yaw };
+  }
+
+  /** Last start used per team (key = team) and per player (key = -1 - id). */
+  private lastStart = new Map<number, MapEntity>();
+
+  private spawnHalves: [MapEntity[], MapEntity[]] | null = null;
+  /**
+   * A team's spawn points. Maps whose starts are not split by team (most TDM / CaH / arena layouts, where TA spawned
+   * anywhere) are cut in two along their main axis, so each team spawns on its own half.
+   */
+  private teamSpawns(team: number): MapEntity[] {
+    if (!this.spawnHalves) {
+      const sp = this.entities.filter((e) => e.kind === 'spawn');
+      const byTeam: [MapEntity[], MapEntity[]] = [sp.filter((e) => e.team === 0), sp.filter((e) => e.team === 1)];
+      const mean = (l: MapEntity[]) => ({ x: l.reduce((a, e) => a + e.pos.x, 0) / l.length, z: l.reduce((a, e) => a + e.pos.z, 0) / l.length });
+      const c = mean(sp);
+      let sxx = 0, sxz = 0, szz = 0;
+      for (const e of sp) { const dx = e.pos.x - c.x, dz = e.pos.z - c.z; sxx += dx * dx; sxz += dx * dz; szz += dz * dz; }
+      const ang = 0.5 * Math.atan2(2 * sxz, sxx - szz);
+      const ax = { x: Math.cos(ang), z: Math.sin(ang) };
+      const proj = (q: { x: number; z: number }) => (q.x - c.x) * ax.x + (q.z - c.z) * ax.z;
+      const ps = sp.map((e) => proj(e.pos));
+      const spread = Math.max(...ps) - Math.min(...ps);
+      const split = byTeam[0].length >= 2 && byTeam[1].length >= 2 && Math.abs(proj(mean(byTeam[0])) - proj(mean(byTeam[1]))) >= spread * 0.4;
+      if (split || sp.length < 2) this.spawnHalves = byTeam;
+      else {
+        const sorted = [...sp].sort((a, b) => proj(a.pos) - proj(b.pos));
+        const half = Math.ceil(sorted.length / 2);
+        // Keep a team's own (or its flag's) side when the map gives one.
+        const home0 = this.entities.find((e) => e.team === 0 && (e.kind === 'flag_stand' || e.kind === 'generator'))?.pos ?? (byTeam[0].length && byTeam[1].length ? mean(byTeam[0]) : null);
+        const flip = home0 ? proj(home0) > 0 : false;
+        const lo = sorted.slice(0, half), hi = sorted.slice(half);
+        this.spawnHalves = flip ? [hi, lo] : [lo, hi];
+      }
+    }
+    return this.spawnHalves[team] ?? [];
   }
 
   private spawnValid = new Map<MapEntity, boolean>();
@@ -233,6 +305,12 @@ export class Match {
       if (h?.back) inside++;
     }
     ok = !!floor && !floor.back && floor.normal.y > 0.5 && inside < 4 && e.pos.y > this.killZ + 5;
+    // Below the terrain surface is only valid inside an interior: something other than terrain must roof the spawn.
+    const T = w.terrain;
+    if (ok && !T.isHole(p.x, p.z) && p.y < T.heightAt(p.x, p.z) - 0.5) {
+      const roof = w.raycast(p, { x: p.x, y: T.heightAt(p.x, p.z) + 1, z: p.z }, undefined, false);
+      if (!roof || roof.boxIndex === -1) ok = false;
+    }
     this.spawnValid.set(e, ok);
     return ok;
   }
@@ -257,16 +335,23 @@ export class Match {
   /** Spawn points can sit inside geometry or on top of another player: settle on the floor, else search a ring of nearby spots. */
   private freeSpot(start: Vec3, p: Player): Vec3 {
     const settle = (s: Vec3): Vec3 => {
-      const hit = this.world.raycast({ x: s.x, y: s.y + 1, z: s.z }, { x: s.x, y: s.y - 4, z: s.z }, undefined, false);
+      const hit = this.world.raycast({ x: s.x, y: s.y + 1, z: s.z }, { x: s.x, y: s.y - 6, z: s.z }, undefined, false);
       return hit && hit.normal.y > 0.6 ? { x: s.x, y: hit.point.y + 0.05, z: s.z } : s;
     };
-    const first = settle(start);
+    // A start that grazes a rock or bush is pushed clear rather than moved away (or into the air).
+    const nudge = (s: Vec3): Vec3 => {
+      const q = { ...s }, v = { x: 0, y: 0, z: 0 };
+      for (let i = 0; i < 2; i++) this.world.resolveCapsule(q, v, p.phys.radius, p.phys.height);
+      return Math.hypot(q.x - s.x, q.y - s.y, q.z - s.z) < 0.6 ? q : s;
+    };
+    const first = nudge(settle(start));
     if (!this.overlaps(first, p)) return first;
-    for (let r = 1.5; r <= 9; r += 1.5) {
-      for (let k = 0; k < 8; k++) {
-        const a = (k / 8) * Math.PI * 2 + r;
-        for (const dy of [0, 1.5, 3]) {
-          const c = settle({ x: start.x + Math.cos(a) * r, y: start.y + dy, z: start.z + Math.sin(a) * r });
+    // Ground-level spots all around first; raised ones only when the floor is crowded.
+    for (const dy of [0, 1.5, 3]) {
+      for (let r = 1.5; r <= 9; r += 1.5) {
+        for (let k = 0; k < 8; k++) {
+          const a = (k / 8) * Math.PI * 2 + r;
+          const c = nudge(settle({ x: start.x + Math.cos(a) * r, y: start.y + dy, z: start.z + Math.sin(a) * r }));
           // Must still be reachable: no wall between the spawn point and the candidate.
           if (this.world.raycast({ x: start.x, y: start.y + 1, z: start.z }, { x: c.x, y: c.y + 1, z: c.z }, undefined, false)) continue;
           if (!this.overlaps(c, p)) return c;
@@ -284,6 +369,7 @@ export class Match {
     p.move.energy = p.maxEnergy;
     p.health = p.maxHealth;
     p.alive = true;
+    p.spawnQueued = false;
     p.lastHurt = -999;
     p.damagers.clear();
     p.flag = null;
@@ -309,10 +395,13 @@ export class Match {
       if (p.brain) p.inputs.push(p.brain.think(this, p));
       let n = p.inputs.length > 6 ? 3 : 1;
       if (!p.alive || p.spectator) {
-        const cmd = p.inputs.length ? p.inputs[p.inputs.length - 1] : null;
-        if (cmd) { p.lastSeq = Math.max(p.lastSeq, cmd.seq); p.lastCmd = cmd; }
+        // Any click in this batch queues the respawn: short clicks between ticks and clicks during the countdown both count.
+        for (const c of p.inputs) {
+          if ((c.buttons & BTN.FIRE) && !(p.lastCmd.buttons & BTN.FIRE)) p.spawnQueued = true;
+          p.lastSeq = Math.max(p.lastSeq, c.seq); p.lastCmd = c;
+        }
         p.inputs.length = 0;
-        if (!p.spectator && playing && this.canRespawn(p) && this.now >= p.respawnAt && (p.isBot || (cmd && (cmd.buttons & BTN.FIRE)) || this.now - p.respawnAt > 10)) this.spawn(p);
+        if (!p.spectator && playing && this.canRespawn(p) && this.now >= p.respawnAt && (p.isBot || p.spawnQueued || (p.lastCmd.buttons & BTN.FIRE) || this.now - p.respawnAt > 10)) this.spawn(p);
         continue;
       }
       while (n-- > 0 && p.inputs.length) {
@@ -369,12 +458,29 @@ export class Match {
     const h = p.history;
     h.push({ t: this.now, x: p.move.pos.x, y: p.move.pos.y, z: p.move.pos.z });
     if (h.length > 40) h.shift();
+    if (this.map.data.volumes && this.hazards(p)) return;
     this.checkFlagTouch(p);
     this.checkPickups(p);
     if (this.tick % 6 === 0) this.checkStationTouch(p);
   }
 
   private stationUsed = new Map<number, number>();
+
+  /** Which damage volume (if any) contains a point. */
+  volumeAt(pos: Vec3): MapVolume | null {
+    for (const v of this.map.data.volumes ?? []) if (inVolume(v, pos)) return v;
+    return null;
+  }
+
+  /** TA's UTKillZVolume (instant) and pain-causing PhysicsVolumes (lava etc., bPhysicsOnContact: feet or body count). Returns true if the player died. */
+  private hazards(p: Player): boolean {
+    const pos = p.move.pos;
+    const v = this.volumeAt({ x: pos.x, y: pos.y + 0.1, z: pos.z }) ?? this.volumeAt({ x: pos.x, y: pos.y + p.phys.height * 0.5, z: pos.z });
+    if (!v) return false;
+    if (v.kind === 'kill') this.kill(p, null, 'killz');
+    else this.damagePlayer(p, v.dps * DT, null, 'hazard', false, null, 0);
+    return !p.alive;
+  }
   /** Like TA: walking into a friendly powered inventory station restocks and applies a pending loadout. */
   private checkStationTouch(p: Player) {
     if (p.vehicle || (this.stationUsed.get(p.id) ?? 0) > this.now) return;
@@ -435,6 +541,7 @@ export class Match {
       this.fireShot(p, d, cmd);
       w.clip--; w.burstLeft--; w.burstNext = now + (d.burst?.interval ?? 0.1);
       if (this.cfg.options?.infiniteAmmo) w.clip = Math.max(w.clip, 1);
+      if (w.clip === 0 && w.ammo > 0) { w.burstLeft = 0; w.reloadUntil = now + d.reload; }
     }
 
     if (held(BTN.FIRE) && now >= p.switchUntil && now >= w.nextFire && w.reloadUntil === 0 && this.phase !== PHASE.ROUND_END) {
@@ -698,10 +805,8 @@ export class Match {
       if (dist >= radius) continue;
       let dmg = splashDamage(sMax, sMin, radius, dist);
       if (self) dmg *= SELF_DAMAGE * (o.hasPerk('egocentric') ? 0.5 : 1);
-      const c = { x: o.move.pos.x, y: o.move.pos.y + o.phys.height * 0.5, z: o.move.pos.z };
-      const dir = { x: c.x - pr.pos.x, y: c.y - pr.pos.y, z: c.z - pr.pos.z };
-      const falloff = 1 - dist / radius;
-      this.damagePlayer(o, dmg, owner, pr.item, pr.explosive, dir, d.impulse * falloff * (self ? SELF_IMPULSE_MULT : 1));
+      const kick = splashKnockback(pr.pos, o.move.pos, o.phys.height, radius, d.impulse, o.phys.mass * o.massMult, self, d.knockMin, d.selfLift);
+      this.damagePlayer(o, dmg, owner, pr.item, pr.explosive, null, 0, false, kick);
     }
     if (direct) {
       const c = { x: direct.move.pos.x, y: direct.move.pos.y + direct.phys.height * 0.5, z: direct.move.pos.z };
@@ -734,10 +839,7 @@ export class Match {
     if (impulse <= 0) return;
     const l = Math.hypot(dir.x, dir.y, dir.z) || 1;
     const dv = impulse / (p.phys.mass * p.massMult) / UU_PER_METER;
-    p.move.vel.x += (dir.x / l) * dv;
-    p.move.vel.y += (dir.y / l) * dv;
-    p.move.vel.z += (dir.z / l) * dv;
-    p.move.onGround = false;
+    applyKnockback(p.move, { x: (dir.x / l) * dv, y: (dir.y / l) * dv, z: (dir.z / l) * dv });
   }
 
   private melee(p: Player, cmd: InputCmd) {
@@ -929,11 +1031,12 @@ export class Match {
   }
 
   // ------------------------------------------------------------------ damage
-  damagePlayer(t: Player, amount: number, attacker: Player | null, item: string, explosive: boolean, dir: Vec3 | null, impulse: number, direct = false) {
-    if (!t.alive || amount <= 0 && impulse <= 0) return;
+  damagePlayer(t: Player, amount: number, attacker: Player | null, item: string, explosive: boolean, dir: Vec3 | null, impulse: number, direct = false, kick: Vec3 | null = null) {
+    if (!t.alive || amount <= 0 && impulse <= 0 && !kick) return;
     if (this.phase === PHASE.WARMUP && attacker && attacker !== t) return;
     if (this.now < t.invulnUntil && attacker && attacker !== t) return;
     if (attacker && attacker !== t && !this.isEnemy(attacker, t)) return;
+    if (kick) applyKnockback(t.move, kick);
     if (dir && impulse > 0) this.applyImpulse(t, dir, impulse);
     if (amount <= 0) return;
     if (t.packActive && ['shield_pack', 'heavy_shield_pack'].includes(t.loadout.pack)) {
@@ -958,6 +1061,7 @@ export class Match {
     if (!v.alive) return;
     v.alive = false;
     v.health = 0;
+    v.spawnQueued = false;
     v.diedAt = this.now;
     v.respawnAt = this.now + (silent ? 0.5 : RESPAWN_TIME);
     if (v.flag) this.dropFlag(v, false);
@@ -993,6 +1097,8 @@ export class Match {
 
   damageAsset(a: Asset, amount: number, attacker: Player | null, item: string, explosive: boolean, isDisc: boolean) {
     if (a.destroyed || !a.def.health || this.phase === PHASE.WARMUP) return;
+    // A team never damages its own base or teammates' deployables (only your own deployables are fair game).
+    if (attacker && a.team === attacker.team && a.owner !== attacker.id) return;
     if (a.def.armored && !explosive) return;
     const target = a.type === 'generator' ? 'generator' : a.type.includes('turret') ? 'turret' : 'other';
     amount *= assetDamageMult(explosive, isDisc, target);
@@ -1001,14 +1107,14 @@ export class Match {
     if (a.health > 0) return;
     a.health = 0;
     if (a.owner >= 0 || a.type === 'supply_drop') {
-      this.io.broadcast({ t: 'fx', kind: 'explode', pos: a.pos, radius: 4, item: 'asset' });
+      this.io.broadcast({ t: 'fx', kind: 'explode', pos: a.pos, radius: 4, item: `asset_${a.type}` });
       this.removeAsset(a);
       if (attacker) this.earn(attacker, 50);
       return;
     }
     a.destroyed = true;
     a.destroyedAt = this.now;
-    this.io.broadcast({ t: 'fx', kind: 'explode', pos: a.pos, radius: 6, item: 'asset' });
+    this.io.broadcast({ t: 'fx', kind: 'explode', pos: a.pos, radius: 6, item: `asset_${a.type}` });
     if (attacker) {
       this.earn(attacker, a.type === 'generator' ? CREDITS.genDestroy : CREDITS.turretDestroy);
       attacker.score += a.type === 'generator' ? 20 : 10;
@@ -1018,14 +1124,23 @@ export class Match {
   }
 
   isPowered(a: Asset): boolean {
-    if (!a.def.needsPower || !this.mode.usesBases) return true;
-    const gens = this.assets.filter((g) => g.type === 'generator' && g.team === a.team);
-    if (!gens.length) return true;
-    return gens.some((g) => !g.destroyed);
+    return !a.def.needsPower || this.teamPowered(a.team);
+  }
+
+  /** A base has power while any of its generators stands (or it has none, or the mode has no bases). */
+  teamPowered(team: number): boolean {
+    if (!this.mode.usesBases) return true;
+    const gens = this.assets.filter((g) => g.type === 'generator' && g.team === team);
+    return !gens.length || gens.some((g) => !g.destroyed);
   }
 
   // ------------------------------------------------------------------ assets
   private stepAssets() {
+    // Map force fields (TA team blockers, SunStar's flag shields) stand only while the generator powering them does.
+    this.map.data.blockers?.forEach((b, i) => {
+      const f = this.world.blockers[i];
+      if (f) f.off = b.gate !== undefined && !this.teamPowered(b.gate);
+    });
     for (const a of [...this.assets]) {
       if (a.def.lifetime && this.now - a.createdAt > a.def.lifetime) { this.removeAsset(a); continue; }
       if (a.type === 'generator' && a.destroyed && a.def.autoRepair) {
@@ -1088,6 +1203,7 @@ export class Match {
     const l = Math.hypot(dir.x, dir.y, dir.z) || 1;
     a.aimYaw = Math.atan2(-dir.x, -dir.z);
     this.spawnProjectile(a.owner, a.team, a.type === 'base_turret' ? 'turret_base' : 'turret_exr', pd, muzzle, { x: dir.x / l, y: dir.y / l, z: dir.z / l }, null);
+    this.io.broadcast({ t: 'fx', kind: 'fire', pos: muzzle, item: a.type === 'base_turret' ? 'turret_base' : 'turret_exr' });
     a.nextFire = this.now + (a.def.refire ?? 2) * levelRate;
   }
 
@@ -1215,7 +1331,7 @@ export class Match {
         const eye = { x: v.pos.x, y: v.pos.y + v.def.size[1] + 1, z: v.pos.z };
         const dir = dirFromAngles(cmd.yaw + (this.rng() - 0.5) * v.def.gunner.spread, cmd.pitch + (this.rng() - 0.5) * v.def.gunner.spread);
         const end = this.hitscan(p, eye, dir, 300, (t, _d) => this.damagePlayer(t, v.def.gunner!.damage, p, 'veh_beowulf_gun', false, dir, 0));
-        if (this.tick % 3 === 0) this.io.broadcast({ t: 'fx', kind: 'tracer', pos: eye, to: end, item: 'chain_gun' });
+        if (this.tick % 3 === 0) this.io.broadcast({ t: 'fx', kind: 'tracer', pos: eye, to: end, item: 'veh_beowulf_gun', player: p.id });
       }
       return;
     }
@@ -1236,7 +1352,8 @@ export class Match {
       const r = { x: Math.cos(v.yaw), z: -Math.sin(v.yaw) };
       v.vel.x += r.x * cmd.strafe * accel * 0.4 * DT; v.vel.z += r.z * cmd.strafe * accel * 0.4 * DT;
       const hs = Math.hypot(v.vel.x, v.vel.y, v.vel.z);
-      v.vel.y += GRAVITY * DT * Math.min(1, hs / 20) - GRAVITY * DT;
+      const g = GRAVITY * this.world.gravityScale;
+      v.vel.y += g * DT * Math.min(1, hs / 20) - g * DT;
       if (cmd.buttons & BTN.SKI) v.vel.y -= 10 * DT;
       v.roll = clamp(-dy * 1.5, -0.8, 0.8);
     } else {
@@ -1254,7 +1371,8 @@ export class Match {
       this.spawnProjectile(p.id, v.team, `veh_${v.type}`, pd, muzzle, dir, v.vel);
       v.clip--; v.nextFire = this.now + d.weapon.refire;
       if (v.clip <= 0) { v.reloadUntil = this.now + d.weapon.reload; v.clip = d.weapon.clip; }
-      this.io.broadcast({ t: 'fx', kind: 'fire', pos: muzzle, item: `veh_${v.type}`, player: p.id }, (o) => o !== p);
+      // The driver hears their own shots from this too (vehicle fire is not predicted).
+      this.io.broadcast({ t: 'fx', kind: 'fire', pos: muzzle, item: `veh_${v.type}`, player: p.id });
     }
   }
 
@@ -1265,13 +1383,13 @@ export class Match {
         const h = this.world.terrain.heightAt(v.pos.x, v.pos.z);
         const target = h + d.hover;
         if (v.pos.y < target + 2.5) v.vel.y += ((target - v.pos.y) * 22 - v.vel.y * 5) * DT;
-        v.vel.y -= GRAVITY * DT * (v.pos.y > target + 2.5 ? 1 : 0.15);
+        v.vel.y -= GRAVITY * this.world.gravityScale * DT * (v.pos.y > target + 2.5 ? 1 : 0.15);
         const n = this.world.terrain.normalAt(v.pos.x, v.pos.z);
         const f = { x: -Math.sin(v.yaw), z: -Math.cos(v.yaw) };
         v.pitch = Math.asin(clamp(f.x * n.x + f.z * n.z, -1, 1)) * -1;
         v.roll = 0;
       } else if (!v.driver) {
-        v.vel.y -= GRAVITY * DT;
+        v.vel.y -= GRAVITY * this.world.gravityScale * DT;
       }
       const drag = v.driver ? (d.flying ? 0.25 : 0.6) : 1.8;
       v.vel.x *= 1 - drag * DT; v.vel.z *= 1 - drag * DT;
@@ -1298,7 +1416,7 @@ export class Match {
         occ.move.vel = { ...v.vel };
       }
       if (!v.driver && !v.gunner && this.now - v.emptySince > 60) this.destroyVehicle(v, null);
-      if (v.pos.y < this.killZ || v.pos.y < this.hazardY) this.destroyVehicle(v, null);
+      if (v.pos.y < this.killZ || v.pos.y < this.hazardY || this.volumeAt(v.pos)?.kind === 'kill') this.destroyVehicle(v, null);
     }
   }
 
@@ -1312,7 +1430,7 @@ export class Match {
 
   destroyVehicle(v: Vehicle, attacker: Player | null, item = 'vehicle_crash') {
     this.vehicles = this.vehicles.filter((x) => x !== v);
-    this.io.broadcast({ t: 'fx', kind: 'explode', pos: v.pos, radius: 8, item: 'vehicle' });
+    this.io.broadcast({ t: 'fx', kind: 'explode', pos: v.pos, radius: 8, item: `vehicle_${v.type}` });
     for (const occ of [v.driver, v.gunner]) {
       if (!occ) continue;
       occ.vehicle = null;
@@ -1456,7 +1574,7 @@ export class Match {
         f.pos = { x: f.carrier.move.pos.x, y: f.carrier.move.pos.y + 1.4, z: f.carrier.move.pos.z };
         if (this.mode.id === 'rabbit' && this.phase === PHASE.PLAYING && this.tick % (60 * 10) === 0) f.carrier.modeScore += 1;
       } else if (f.state === 2) {
-        f.vel.y -= GRAVITY * DT;
+        f.vel.y -= GRAVITY * this.world.gravityScale * DT;
         const next = { x: f.pos.x + f.vel.x * DT, y: f.pos.y + f.vel.y * DT, z: f.pos.z + f.vel.z * DT };
         const hit = this.world.raycast(f.pos, next);
         if (hit) {
@@ -1465,7 +1583,7 @@ export class Match {
           f.vel = { x: (f.vel.x - 1.6 * vn * hit.normal.x) * 0.5, y: (f.vel.y - 1.6 * vn * hit.normal.y) * 0.5, z: (f.vel.z - 1.6 * vn * hit.normal.z) * 0.5 };
           if (Math.hypot(f.vel.x, f.vel.y, f.vel.z) < 1.5) f.vel = { x: 0, y: 0, z: 0 };
         } else f.pos = next;
-        if (f.pos.y < this.killZ || f.pos.y < this.hazardY || ((f.team <= 1) && this.now - f.droppedAt > FLAG_RETURN_TIME)) this.returnFlag(f, null);
+        if (f.pos.y < this.killZ || f.pos.y < this.hazardY || this.volumeAt(f.pos)?.kind === 'kill' || ((f.team <= 1) && this.now - f.droppedAt > FLAG_RETURN_TIME)) this.returnFlag(f, null);
       }
     }
   }

@@ -49,6 +49,7 @@ export class BotBrain {
   private unstickUntil = 0;
   private unstickDir = 1;
   private unstickBack = false;
+  private voidBelow = false;
   private wander: Vec3 | null = null;
   private nextVgs = 0;
   /** The current goal is a flag or flag stand: needs a precise pass, not just "get close". */
@@ -59,15 +60,21 @@ export class BotBrain {
   private indoor = false;
   private routeKey = '';
   private routeIdx = 0;
+  /** Indoor objectives this bot keeps getting stuck on: goal key -> time until it tries again. */
+  private abandoned = new Map<string, number>();
+  private stuckHits = 0;
+
+  private static key(g: Vec3) { return `${Math.round(g.x)},${Math.round(g.y)},${Math.round(g.z)}`; }
+  private gaveUp(m: Match, g: Vec3) { return (this.abandoned.get(BotBrain.key(g)) ?? 0) > m.now; }
 
   /** Steering target for a fixed objective: the route's entrance first, then its waypoints into the building. */
   private viaRoute(m: Match, p: Player, goal: Vec3): Vec3 {
     this.indoor = false;
     if (!this.staticGoal) return goal;
-    const route = m.nav.route(goal);
+    const key = BotBrain.key(goal);
+    if (key !== this.routeKey) { this.routeKey = key; this.routeIdx = 0; this.stuckHits = 0; }
+    const route = m.nav.route(goal, p.team);
     if (!route || route.length < 2) return goal;
-    const key = `${Math.round(goal.x)},${Math.round(goal.y)},${Math.round(goal.z)}`;
-    if (key !== this.routeKey) { this.routeKey = key; this.routeIdx = 0; }
     const pos = p.move.pos;
     const d3 = (a: Vec3) => Math.hypot(a.x - pos.x, a.y + 0.05 - pos.y, a.z - pos.z);
     // Distance to the segment we are walking (waypoints can be far apart on long straight corridors).
@@ -141,6 +148,8 @@ export class BotBrain {
     if (!p.alive) { cmd.buttons = BTN.FIRE; return cmd; }
     const now = m.now;
     const pos = p.move.pos;
+    const dry = (k: number) => !p.weapons[k] || (p.weapons[k].clip === 0 && p.weapons[k].ammo === 0 && p.weapons[k].reloadUntil === 0);
+    if (dry(0) && !dry(1)) cmd.weapon = 1;
 
     if (now >= this.nextScan) {
       this.nextScan = now + 0.25 + this.rnd() * 0.1;
@@ -153,8 +162,19 @@ export class BotBrain {
     const w = p.weapon;
     let fire = false;
     let desiredYaw = this.aimYaw, desiredPitch = 0;
+    // Offense: with nobody to fight, shell the enemy generator once it is in sight (shots cross force fields).
+    const gen = !this.target && this.role === 'offense' && w.def.explosive && w.clip + w.ammo > 0 ? this.genInSight(m, p, eye) : null;
 
-    if (this.target && this.target.alive && now - this.targetSince > this.skill.reaction) {
+    if (gen) {
+      const pr = w.def.projectile;
+      const d0 = Math.sqrt(distSq(eye, gen));
+      const tt = pr ? d0 / pr.speed : 0;
+      const aimPt = pr ? { x: gen.x - p.move.vel.x * pr.inherit * tt, y: gen.y + 0.5 * GRAVITY * m.world.gravityScale * pr.gravity * tt * tt - p.move.vel.y * pr.inherit * tt, z: gen.z - p.move.vel.z * pr.inherit * tt } : gen;
+      const dx = aimPt.x - eye.x, dy = aimPt.y - eye.y, dz = aimPt.z - eye.z;
+      desiredYaw = Math.atan2(-dx, -dz);
+      desiredPitch = Math.atan2(dy, Math.hypot(dx, dz));
+      fire = Math.abs(angDiff(this.aimYaw, desiredYaw)) + Math.abs(this.aimPitch - desiredPitch) < this.skill.fireAngle + 0.03;
+    } else if (this.target && this.target.alive && now - this.targetSince > this.skill.reaction) {
       const t = this.target;
       const d = w.def;
       const tc = { x: t.move.pos.x, y: t.move.pos.y + (t.move.onGround && d.projectile?.radius ? 0.2 : t.phys.height * 0.55), z: t.move.pos.z };
@@ -165,7 +185,7 @@ export class BotBrain {
         for (let i = 0; i < 4; i++) {
           aimPt = {
             x: tc.x + (t.move.vel.x * this.skill.lead - p.move.vel.x * pr.inherit) * tt,
-            y: tc.y + (t.move.vel.y * this.skill.lead * (t.move.onGround ? 0 : 1) - p.move.vel.y * pr.inherit) * tt + 0.5 * GRAVITY * pr.gravity * tt * tt,
+            y: tc.y + (t.move.vel.y * this.skill.lead * (t.move.onGround ? 0 : 1) - p.move.vel.y * pr.inherit) * tt + 0.5 * GRAVITY * m.world.gravityScale * pr.gravity * tt * tt,
             z: tc.z + (t.move.vel.z * this.skill.lead - p.move.vel.z * pr.inherit) * tt,
           };
           tt = Math.sqrt(distSq(eye, aimPt)) / pr.speed;
@@ -195,10 +215,11 @@ export class BotBrain {
     cmd.yaw = this.aimYaw;
     cmd.pitch = this.aimPitch;
     if (fire && w.clip > 0) cmd.buttons |= BTN.FIRE;
+    if (w.clip === 0 && w.ammo > 0 && w.reloadUntil === 0 && this.seq % 2 === 0) cmd.buttons |= BTN.RELOAD;
     if (w.def.spinup && this.target) cmd.buttons |= BTN.FIRE;
     if (w.def.kind === 'repair') cmd.weapon = 0;
 
-    if (goal) this.navigate(m, p, goal, cmd);
+    if (goal && !(gen && distSq(gen, pos) < 18 * 18)) this.navigate(m, p, goal, cmd);
     if (p.pending && this.rnd() < 0.005) cmd.buttons |= BTN.USE;
     return cmd;
   }
@@ -228,6 +249,12 @@ export class BotBrain {
     const enemy = m.flags.find((f) => f.team !== p.team && f.team !== 255);
     this.flagGoal = false;
     this.staticGoal = false;
+    // Main weapon dry: restock at one of our inventory stations (unless carrying a flag).
+    const w0 = p.weapons[0];
+    if (!p.flag && w0 && w0.def.kind !== 'repair' && w0.clip === 0 && w0.ammo === 0 && p.team <= 1) {
+      const st = m.restock[p.team].filter((s) => !this.gaveUp(m, s)).sort((a, b) => distSq(a, p.move.pos) - distSq(b, p.move.pos))[0];
+      if (st) { this.staticGoal = true; return st; }
+    }
     if (mode === 'ctf' || mode === 'blitz') {
       if (p.flag && own) { this.flagGoal = true; this.staticGoal = true; return own.home; }
       if (this.role === 'chaser' || this.role === 'defender') {
@@ -238,15 +265,28 @@ export class BotBrain {
       // Anyone near a dropped own flag returns it.
       if (own && own.state === 2 && distSq(own.pos, p.move.pos) < 120 * 120) { this.flagGoal = true; return own.pos; }
       if (this.role === 'offense') {
-        const gen = m.assets.find((a) => a.type === 'generator' && a.team !== p.team && !a.destroyed);
+        const gen = m.assets.find((a) => a.type === 'generator' && a.team !== p.team && !a.destroyed && !this.gaveUp(m, a.pos));
         if (gen) { this.staticGoal = true; return gen.pos; }
       }
       if (this.role === 'farmer') {
         const stand = enemy?.home;
         if (stand) return this.patrol(m, { x: (stand.x + (own?.home.x ?? stand.x)) / 2, y: stand.y, z: (stand.z + (own?.home.z ?? stand.z)) / 2 }, 60);
       }
-      if (enemy && enemy.state !== 1) { this.flagGoal = true; this.staticGoal = enemy.state === 0; return enemy.pos; }
+      const field = this.role === 'chaser' || this.role === 'roamer';
+      // Grab a loose enemy flag nearby; otherwise only cappers (and offense/farmers without a target) run flags.
+      if (enemy && enemy.state === 2 && distSq(enemy.pos, p.move.pos) < 100 * 100) { this.flagGoal = true; return enemy.pos; }
+      if (enemy && enemy.state !== 1 && !field) { this.flagGoal = true; this.staticGoal = enemy.state === 0; return enemy.pos; }
       if (enemy?.carrier && enemy.carrier.team === p.team && own) return this.patrol(m, own.home, 60);
+      if (this.target && distSq(this.target.move.pos, p.move.pos) < 160 * 160) return this.target.move.pos;
+      const human = this.role === 'roamer' ? this.humanFocus(m, p) : null;
+      if (human) return this.patrol(m, human, 45);
+      if (own && enemy) {
+        // Chasers hold our half to intercept cappers, roamers work midfield.
+        const k = this.role === 'chaser' ? 0.3 : 0.5;
+        const span = Math.hypot(enemy.home.x - own.home.x, enemy.home.z - own.home.z);
+        const c = { x: own.home.x + (enemy.home.x - own.home.x) * k, y: 0, z: own.home.z + (enemy.home.z - own.home.z) * k };
+        return this.patrol(m, c, Math.max(40, span * 0.18));
+      }
       return this.target?.move.pos ?? this.patrol(m, m.flags[0]?.pos ?? p.move.pos, 200);
     }
     if (mode === 'cah') {
@@ -266,6 +306,8 @@ export class BotBrain {
       if (f?.carrier && f.carrier !== p && m.isEnemy(p, f.carrier)) return f.carrier.move.pos;
     }
     if (this.target) return this.target.move.pos;
+    const human = this.role === 'roamer' ? this.humanFocus(m, p) : null;
+    if (human) return human;
     let nearest: Player | null = null, nd = Infinity;
     for (const o of m.players.values()) {
       if (!o.alive || !m.isEnemy(p, o)) continue;
@@ -273,6 +315,30 @@ export class BotBrain {
       if (d < nd) { nd = d; nearest = o; }
     }
     return nearest?.move.pos ?? this.patrol(m, p.move.pos, 150);
+  }
+
+  /** Centre of the enemy generator when it stands within 70 m with a clear line of fire (force fields do not stop shots). */
+  private genInSight(m: Match, p: Player, eye: Vec3): Vec3 | null {
+    const a = m.assets.find((x) => x.type === 'generator' && x.team !== p.team && !x.destroyed);
+    if (!a) return null;
+    const c = { x: a.pos.x, y: a.pos.y + a.def.size[1], z: a.pos.z };
+    if (distSq(c, eye) > 70 * 70) return null;
+    // Hitting the generator's own mesh still counts as a clear shot.
+    const hit = m.world.raycast(eye, c, a.id);
+    if (hit && distSq(hit.point, c) > 3 * 3) return null;
+    return c;
+  }
+
+  /** Roamers keep humans company so matches never feel empty: even ids hunt the nearest enemy human, odd ones escort a teammate. */
+  private humanFocus(m: Match, p: Player): Vec3 | null {
+    const hunt = p.id % 2 === 0 || !m.mode.teams;
+    let best: Player | null = null, bd = Infinity;
+    for (const o of m.players.values()) {
+      if (o.isBot || !o.alive || o.spectator || o.team > 1 || (hunt ? !m.isEnemy(p, o) : o.team !== p.team || o === p)) continue;
+      const d = distSq(o.move.pos, p.move.pos);
+      if (d < bd) { bd = d; best = o; }
+    }
+    return best?.move.pos ?? null;
   }
 
   private patrol(m: Match, center: Vec3, radius: number): Vec3 {
@@ -330,12 +396,16 @@ export class BotBrain {
 
     if (now > this.stuckCheck) {
       const moved = Math.hypot(pos.x - this.lastPos.x, pos.z - this.lastPos.z);
-      if (moved < 2 && dist > 8) {
+      // Indoors the next waypoint can be straight up a shaft: judge progress in 3D there.
+      const stalled = this.indoor ? Math.hypot(moved, pos.y - this.lastPos.y) < 1.5 && Math.hypot(dx, goal.y - pos.y, dz) > 2.5 : moved < 2 && dist > 8;
+      if (stalled) {
         this.unstickUntil = now + 1.5;
         this.unstickDir = this.rnd() < 0.5 ? -1 : 1;
         const eye = { x: pos.x, y: pos.y + 1.5, z: pos.z };
         this.unstickBack = !!m.world.raycast(eye, { x: eye.x, y: eye.y + 5, z: eye.z });
-      }
+        // Stuck again and again on the way to an indoor objective: leave it alone for a while.
+        if (this.staticGoal && ++this.stuckHits >= 4) { this.abandoned.set(this.routeKey, now + 30); this.stuckHits = 0; }
+      } else if (moved > 6) this.stuckHits = 0;
       this.lastPos = { ...pos };
       this.stuckCheck = now + 2.5;
     }
@@ -360,7 +430,7 @@ export class BotBrain {
     let brake = false;
     if (this.flagGoal && !this.indoor && dist < 220) {
       // Plan the pass: arrive slightly above the flag and let gravity bring us onto it.
-      const g = GRAVITY * PAWN_GRAVITY_SCALE;
+      const g = GRAVITY * PAWN_GRAVITY_SCALE * m.world.gravityScale;
       const t = dist / Math.max(8, speed);
       const dy = pos.y - (goal.y + 1);
       const fall = -p.move.vel.y * t + 0.5 * g * t * t;
@@ -379,6 +449,18 @@ export class BotBrain {
     // Brake a hard landing with jets when fall damage would apply.
     const vy = p.move.vel.y;
     if (!p.move.onGround && vy < -(FALL_DAMAGE_THRESHOLD - 8) && !p.hasPerk('safe_fall') && pos.y - here < -vy * 1.5) buttons |= BTN.JET;
+    // Lava / kill volumes: never sink into one; jet out if already there.
+    if (m.map.data.volumes) {
+      const look = { x: pos.x + p.move.vel.x * 0.6, y: pos.y + Math.min(0, vy) * 0.6 - 1, z: pos.z + p.move.vel.z * 0.6 };
+      if (m.volumeAt(look) || m.volumeAt({ x: pos.x, y: pos.y - 2, z: pos.z })) { buttons |= BTN.JET; buttons &= ~BTN.SKI; }
+    }
+    // Floating maps (Air Arena): falling with nothing but the kill height below means jet back up.
+    if (p.move.onGround) this.voidBelow = false;
+    else if (vy < -4 && this.seq % 4 === 0) {
+      const below = m.world.raycast(pos, { x: pos.x + p.move.vel.x * 0.5, y: pos.y - 90, z: pos.z + p.move.vel.z * 0.5 }, undefined, false);
+      this.voidBelow = !below || below.point.y < (m.map.data.killZ ?? -Infinity) + 10;
+    }
+    if (this.voidBelow && energyFrac > 0.02) buttons |= BTN.JET;
 
     // Wall ahead: hop over it.
     if (this.seq % 10 === 0 && dist > 5) {

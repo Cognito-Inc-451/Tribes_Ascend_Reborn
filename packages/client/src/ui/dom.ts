@@ -25,8 +25,22 @@ export function clear(el: Element) {
   while (el.firstChild) el.removeChild(el.firstChild);
 }
 
+/** What each physical key prints on this keyboard layout (AZERTY's "KeyW" is "z"): Keyboard API, then learnt from key presses. */
+const layoutKeys = new Map<string, string>();
+const LAYOUT_CODE = /^Key|^(Semicolon|Comma|Period|Slash|Quote|BracketLeft|BracketRight|Backquote|Backslash|Minus|Equal|IntlBackslash)$/;
+void (navigator as Navigator & { keyboard?: { getLayoutMap?: () => Promise<Map<string, string>> } }).keyboard?.getLayoutMap?.()
+  .then((m) => m.forEach((v, k) => { if (!layoutKeys.has(k)) layoutKeys.set(k, v); })).catch(() => { /* not allowed (iframe) */ });
+window.addEventListener('keydown', (e) => {
+  if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey && !e.shiftKey && LAYOUT_CODE.test(e.code)) layoutKeys.set(e.code, e.key);
+}, true);
+
+/** The character a physical key types on the user's layout, when known. */
+export const layoutChar = (code: string): string | undefined => (LAYOUT_CODE.test(code) ? layoutKeys.get(code) : undefined);
+
 export const keyLabel = (code: string): string => {
   if (!code) return '—';
+  const ch = layoutChar(code);
+  if (ch && ch.trim()) return ch.toUpperCase();
   return code
     .replace(/^Key/, '').replace(/^Digit/, '').replace(/^Numpad/, 'Num ').replace('Mouse0', 'LMB').replace('Mouse1', 'MMB').replace('Mouse2', 'RMB')
     .replace('ControlLeft', 'L-Ctrl').replace('ShiftLeft', 'L-Shift').replace('AltLeft', 'L-Alt').replace('Backquote', '~').replace('Space', 'Space');

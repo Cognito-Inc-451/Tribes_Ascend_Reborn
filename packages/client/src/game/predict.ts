@@ -1,5 +1,5 @@
 import {
-  advanceProjectile, ARMOR_PHYSICS, BTN, CLASSES, dirFromAngles, DT, FLAG_DRAG_KMH, ITEMS, loadoutStats, newMoveState, PF, quantizeInput,
+  advanceProjectile, applyKnockback, ARMOR_PHYSICS, BTN, CLASSES, dirFromAngles, DT, FLAG_DRAG_KMH, ITEMS, loadoutStats, newMoveState, PF, quantizeInput,
   splashKnockback, stepMovement,
   type ClassDef, type CollisionWorld, type InputCmd, type Loadout, type MoveParams, type MoveState, type PlayerSnap, type ProjectileDef,
   type ProjState, type SelfSnap, type Vec3,
@@ -34,6 +34,9 @@ export class Predictor {
   private clip = [1, 1];
   private slot = 0;
   private clock = 0;
+  private beltNext = 0;
+  private beltCount = 0;
+  private beltHeld = false;
 
   constructor(public world: CollisionWorld, private infiniteEnergy = false) {}
 
@@ -71,12 +74,17 @@ export class Predictor {
     if ((cmd.buttons & BTN.FIRE) && pd && pd.radius > 0 && pd.impulse > 0 && !item.spinup && !item.burst && this.clock >= this.nextFire[slot] && this.clip[slot] > 0) {
       this.nextFire[slot] = this.clock + item.refire;
       this.clip[slot]--;
-      const s = this.state, h = ARMOR_PHYSICS[this.cls.armor].height;
-      const dir = dirFromAngles(cmd.yaw, cmd.pitch);
-      const rx = Math.cos(cmd.yaw), rz = -Math.sin(cmd.yaw);
-      const pos = { x: s.pos.x + dir.x * 0.6 + rx * 0.25, y: s.pos.y + h * 0.9 - 0.15 + dir.y * 0.6, z: s.pos.z + dir.z * 0.6 + rz * 0.25 };
-      const vel = { x: dir.x * pd.speed + s.vel.x * pd.inherit, y: dir.y * pd.speed + s.vel.y * pd.inherit, z: dir.z * pd.speed + s.vel.z * pd.inherit };
-      this.shots.push({ def: pd, vid: this.nextVid--, st: { id: 0, owner: -1, team: this.team, item: item.id, pos, vel, age: 0, bounces: 0, stuck: false, stuckTo: -1, stuckOffset: { x: 0, y: 0, z: 0 }, resting: false, homingTarget: -1 } });
+      this.launch(item.id, pd, cmd, dirFromAngles(cmd.yaw, cmd.pitch));
+    }
+    // Belt grenades too (same toss as the server), so nade jumps respond instantly.
+    const beltDown = (cmd.buttons & BTN.BELT) !== 0, beltEdge = beltDown && !this.beltHeld;
+    this.beltHeld = beltDown;
+    const belt = ITEMS[this.loadout.belt], bd = belt?.projectile;
+    if (beltEdge && bd && bd.radius > 0 && bd.impulse > 0 && !bd.sticky && !bd.remote && this.beltCount > 0 && this.clock >= this.beltNext) {
+      this.beltNext = this.clock + belt.refire;
+      this.beltCount--;
+      const d = dirFromAngles(cmd.yaw, cmd.pitch), l = Math.hypot(d.x, d.y + 0.12, d.z);
+      this.launch(belt.id, bd, cmd, { x: d.x / l, y: (d.y + 0.12) / l, z: d.z / l });
     }
     for (let i = this.shots.length - 1; i >= 0; i--) {
       const sh = this.shots[i];
@@ -86,15 +94,23 @@ export class Predictor {
       this.shots.splice(i, 1);
       if (sh.def.remote) continue;
       const ph = ARMOR_PHYSICS[this.cls.armor];
-      const kick = splashKnockback(sh.st.pos, this.state.pos, ph.radius, ph.height, sh.def.radius, sh.def.impulse, ph.mass * this.stats.massMult, true);
+      const kick = splashKnockback(sh.st.pos, this.state.pos, ph.height, sh.def.radius, sh.def.impulse, ph.mass * this.stats.massMult, true, sh.def.knockMin, sh.def.selfLift);
       if (kick) { this.applyKick(kick); this.kicks.set(cmd.seq, kick); }
     }
   }
 
+  /** Spawn a predicted projectile from the same muzzle the server uses (Match.aim). */
+  private launch(item: string, pd: ProjectileDef, cmd: InputCmd, dir: Vec3) {
+    const s = this.state, h = ARMOR_PHYSICS[this.cls.armor].height;
+    const aim = dirFromAngles(cmd.yaw, cmd.pitch);
+    const rx = Math.cos(cmd.yaw), rz = -Math.sin(cmd.yaw);
+    const pos = { x: s.pos.x + aim.x * 0.6 + rx * 0.25, y: s.pos.y + h * 0.9 - 0.15 + aim.y * 0.6, z: s.pos.z + aim.z * 0.6 + rz * 0.25 };
+    const vel = { x: dir.x * pd.speed + s.vel.x * pd.inherit, y: dir.y * pd.speed + s.vel.y * pd.inherit, z: dir.z * pd.speed + s.vel.z * pd.inherit };
+    this.shots.push({ def: pd, vid: this.nextVid--, st: { id: 0, owner: -1, team: this.team, item, pos, vel, age: 0, bounces: 0, stuck: false, stuckTo: -1, stuckOffset: { x: 0, y: 0, z: 0 }, resting: false, homingTarget: -1 } });
+  }
+
   private applyKick(k: Vec3) {
-    const v = this.state.vel;
-    v.x += k.x; v.y += k.y; v.z += k.z;
-    this.state.onGround = false;
+    applyKnockback(this.state, k);
   }
 
   reconcile(me: PlayerSnap, self: SelfSnap, now: number) {
@@ -105,6 +121,7 @@ export class Predictor {
     this.pending = this.pending.filter((c) => c.seq > self.ackSeq);
     for (const k of this.kicks.keys()) if (k <= self.ackSeq) this.kicks.delete(k);
     for (let i = 0; i < 2; i++) if (self.ammo[i]) this.clip[i] = Math.max(this.clip[i], self.ammo[i][0]);
+    if (self.ammo[2]) this.beltCount = Math.max(this.beltCount, self.ammo[2][0]);
     if (!this.alive) { this.shots.length = 0; this.kicks.clear(); }
     const before = { ...this.state.pos };
     const s = this.state;

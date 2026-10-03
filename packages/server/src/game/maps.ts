@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import {
-  buildCollisionWorld, decodeMapData, entitiesForMode, generateMap, LAYOUT_BY_ID, type CollisionWorld, type MapData, type ModeId,
+  addBaseFieldBlockers, buildCollisionWorld, decodeMapData, entitiesForMode, generateMap, LAYOUT_BY_ID, MODES, type CollisionWorld, type MapData, type ModeId,
 } from '@ar/shared';
 
 export interface LoadedMap {
@@ -39,6 +39,7 @@ export class MapLibrary {
       if (entry) {
         const blob = readFileSync(join(this.originalDir, entry.file));
         const data = decodeMapData(new Uint8Array(gunzipSync(blob)));
+        if (MODES[mode].usesBases) addBaseFieldBlockers(data);
         const hash = createHash('sha256').update(blob).digest('hex').slice(0, 24);
         return { id, name: entry.name, source: 'original', data, world: buildCollisionWorld(data), blob, file: entry.file, hash };
       }

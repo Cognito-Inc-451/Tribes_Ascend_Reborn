@@ -6,13 +6,28 @@ const PF_INVISIBLE = 0x1;
 const PF_NOT_SOLID = 0x8;
 const PF_PORTAL = 0x04000000;
 
+export interface BspSurf {
+  /** Material object ref in the model's package. */
+  material: number;
+  /** Texture origin (Points index) and U/V axes (Vectors indices). */
+  base: number;
+  u: number;
+  v: number;
+}
+
 export interface ModelPolys {
   /** UE-space points (UU). */
   points: Float32Array;
+  /** UE-space vectors (normals, texture axes). */
+  vectors: Float32Array;
+  surfs: BspSurf[];
   /** Convex polygons as point-index lists, split by how they should be used. */
   visibleSolid: number[][];
   visibleNonSolid: number[][];
   invisibleSolid: number[][];
+  /** Surface index of each visible polygon (parallel to visibleSolid / visibleNonSolid). */
+  visibleSolidSurf: number[];
+  visibleNonSolidSurf: number[];
 }
 
 /**
@@ -33,7 +48,8 @@ export function extractModel(pkg: UPackage, exp: ExportEntry): ModelPolys | null
     o = start + es * n;
     return { start, n };
   };
-  if (!bulk(12)) return null; // Vectors
+  const vecs = bulk(12);
+  if (!vecs) return null;
   const pts = bulk(12);
   const nodes = pts && bulk(64);
   if (!pts || !nodes || !nodes.n) return null;
@@ -54,7 +70,16 @@ export function extractModel(pkg: UPackage, exp: ExportEntry): ModelPolys | null
   const points = new Float32Array(pts.n * 3);
   for (let i = 0; i < pts.n * 3; i++) points[i] = v.getFloat32(pts.start + i * 4, true);
 
-  const out: ModelPolys = { points, visibleSolid: [], visibleNonSolid: [], invisibleSolid: [] };
+  const vectors = new Float32Array(vecs.n * 3);
+  for (let i = 0; i < vecs.n * 3; i++) vectors[i] = v.getFloat32(vecs.start + i * 4, true);
+  // FBspSurf: Material, PolyFlags, pBase, vNormal, vTextureU, vTextureV, iBrushPoly, Actor, Plane, ShadowMapScale, ...
+  const surfs: BspSurf[] = [];
+  for (let s = 0; s < nSurf; s++) {
+    const b = surfStart + s * 60;
+    surfs.push({ material: v.getInt32(b, true), base: v.getInt32(b + 8, true), u: v.getInt32(b + 16, true), v: v.getInt32(b + 20, true) });
+  }
+
+  const out: ModelPolys = { points, vectors, surfs, visibleSolid: [], visibleNonSolid: [], invisibleSolid: [], visibleSolidSurf: [], visibleNonSolidSurf: [] };
   for (let k = 0; k < nodes.n; k++) {
     const b = nodes.start + k * 64;
     const nv = data[b + 54];
@@ -71,8 +96,8 @@ export function extractModel(pkg: UPackage, exp: ExportEntry): ModelPolys | null
     }
     if (poly.length < 3) continue;
     if (flags & PF_INVISIBLE) { if (!(flags & PF_NOT_SOLID)) out.invisibleSolid.push(poly); }
-    else if (flags & PF_NOT_SOLID) out.visibleNonSolid.push(poly);
-    else out.visibleSolid.push(poly);
+    else if (flags & PF_NOT_SOLID) { out.visibleNonSolid.push(poly); out.visibleNonSolidSurf.push(iSurf); }
+    else { out.visibleSolid.push(poly); out.visibleSolidSurf.push(iSurf); }
   }
   return out;
 }

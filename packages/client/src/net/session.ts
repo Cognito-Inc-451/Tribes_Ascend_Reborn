@@ -10,6 +10,10 @@ export interface TimedSnapshot { snap: Snapshot; recvAt: number; serverTime: num
 /** Protocol state for one connection: handshake, snapshot buffer, server clock, RTT. */
 export class Session {
   myId = -1;
+  /** The join screens (team / class) were shown: map changes keep your team and drop you straight in, as in TA. */
+  greeted = false;
+  /** Next input sequence number; carried from map to map within one connection. */
+  inputSeq = 1;
   server: ServerInfo;
   tickRate = 60;
   players = new Map<number, PlayerInfo>();
@@ -56,7 +60,8 @@ export class Session {
     this.bytesIn += d.length;
     if (d[0] === BIN.SNAPSHOT) {
       const snap = decodeSnapshot(d);
-      if (this.latest && snap.tick <= this.latest.tick) return;
+      // Drop late duplicates; a tick far behind the latest means a new match after a map change.
+      if (this.latest && snap.tick <= this.latest.tick && this.latest.tick - snap.tick < 300) return;
       this.snapsIn++;
       const now = performance.now() / 1000;
       const serverTime = snap.tick / this.tickRate;

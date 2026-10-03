@@ -11,8 +11,9 @@ import { connect } from './net/transport.js';
 import { Session } from './net/session.js';
 import { Renderer } from './render/renderer.js';
 import { models } from './render/models.js';
+import { anims } from './render/anim.js';
 import { TextureStore } from './render/textures.js';
-import { WorldView } from './render/world.js';
+import { LM_UNIFORMS, WorldView } from './render/world.js';
 import { settings } from './settings.js';
 import { h } from './ui/dom.js';
 import { LoadingScreen } from './ui/loading.js';
@@ -23,6 +24,7 @@ const uiEl = document.getElementById('ui')!;
 const renderer = new Renderer(gameEl);
 const input = new Input(renderer.canvas);
 models.setup([NODE_URL], renderer.renderer);
+anims.setup([NODE_URL]);
 
 // ---------------------------------------------------------------- menu backdrop: slow flyover (an imported original map when available)
 let backdrop: { view: WorldView; raf: number; tex: TextureStore | null } | null = null;
@@ -49,7 +51,8 @@ function startBackdrop() {
     const ids = ['katabatic', 'arxnovena', 'tartarus', 'raindance', 'bellaomega', 'crossfire'];
     const map: MapData = orig ?? generateMap(LAYOUT_BY_ID[ids[Math.floor(Math.random() * ids.length)]]);
     const tex = orig?.textures?.length ? new TextureStore([NODE_URL], renderer.renderer) : null;
-    const view = new WorldView(map, renderer.scene, tex);
+    const view = new WorldView(map, renderer.scene, tex, renderer.renderer);
+    renderer.setSun(view.sunDirection);
     const pts = map.entities.filter((e) => e.kind === 'flag_stand' || e.kind === 'generator' || e.kind === 'spawn');
     const cx = pts.length ? pts.reduce((a, e) => a + e.pos.x, 0) / pts.length : 0;
     const cz = pts.length ? pts.reduce((a, e) => a + e.pos.z, 0) / pts.length : 0;
@@ -81,6 +84,8 @@ function stopBackdrop() {
 
 // ---------------------------------------------------------------- app flow
 let client: GameClient | null = null;
+// Test hook for the e2e scripts (?debug): camera/renderer access for graphics captures.
+if (new URLSearchParams(location.search).has('debug')) (window as unknown as { __ar: unknown }).__ar = { renderer, settings, lightmap: LM_UNIFORMS, client: () => client, gfx: () => { renderer.configure(); client?.graphicsChanged(); } };
 let session: Session | null = null;
 let loading: LoadingScreen | null = null;
 
@@ -146,7 +151,7 @@ async function enterMap(s: Session, ref: Extract<S2C, { t: 'welcome' }>['map'], 
     if (session !== s) return;
     hideConnecting();
     social.setStatus('In match', s.server.wsUrl, s.server.name);
-    input.lock();
+    client?.focus();
   } catch (e) {
     leave(`Map load failed: ${(e as Error).message}`);
   }
@@ -154,7 +159,7 @@ async function enterMap(s: Session, ref: Extract<S2C, { t: 'welcome' }>['map'], 
 
 let settingsFromGame = false;
 window.addEventListener('keydown', (e) => {
-  if (e.code === 'Escape' && settingsFromGame && client) { settingsFromGame = false; menus.show(false); input.lock(); }
+  if (e.code === 'Escape' && settingsFromGame && client) { settingsFromGame = false; menus.show(false); client.openEscMenu(); }
 });
 
 function leave(reason?: string) {

@@ -14,6 +14,8 @@ export interface ProjectileDef {
   splashMax: number;
   splashMin: number;
   impulse: number;        // knockback impulse (kg*m/s) at center
+  knockMin?: number;      // TA damage type m_fMinDamagePct: falloff scale at the splash edge, which drives the impulse scale
+  selfLift?: number;      // TA m_fInstigatorExtraZMomentum: extra upward impulse on the shooter's own splash
   bounce?: number;        // restitution; bounces instead of exploding on terrain
   bounces?: number;       // max bounces before exploding (nova)
   sticky?: boolean;
@@ -66,14 +68,15 @@ export interface PassiveMods {
 }
 
 // Impulses are TA MomentumTransfer (uu*kg/s): velocity change = impulse / mass / 50. Gravity is TA CustomGravityScaling.
+// knockMin/selfLift come from the TA damage types / projectiles (TrDmgType_Spinfusor 0.3, TrDmgType_Grenade 0.5).
 const disc = (direct: number, splashMax: number, splashMin: number, radius: number, o: Partial<ProjectileDef> = {}): ProjectileDef => ({
-  speed: 78.4, gravity: 0, inherit: 0.5, lifetime: 6, radius, direct, splashMax, splashMin, impulse: 85000, size: 0.2, model: 'disc', color: 0x9fe8ff, ...o,
+  speed: 78.4, gravity: 0, inherit: 0.5, lifetime: 6, radius, direct, splashMax, splashMin, impulse: 85000, knockMin: 0.3, size: 0.2, model: 'disc', color: 0x9fe8ff, ...o,
 });
 const hs = (damage: number, minDamage: number, o: Partial<HitscanDef> = {}): HitscanDef => ({
   damage, minDamage, falloffStart: 20, falloffEnd: 90, pellets: 1, spread: 0.012, range: 400, ...o,
 });
 const gren = (direct: number, splashMax: number, splashMin: number, radius: number, o: Partial<ProjectileDef> = {}): ProjectileDef => ({
-  speed: 28, gravity: 0.5, inherit: 0.5, lifetime: 8, explodeOnExpire: true, radius, direct, splashMax, splashMin, impulse: 85000, bounce: 0.35, fuse: 2, size: 0.15, model: 'grenade', color: 0xffc040, ...o,
+  speed: 28, gravity: 0.5, inherit: 0.5, lifetime: 8, explodeOnExpire: true, radius, direct, splashMax, splashMin, impulse: 85000, knockMin: 0.5, bounce: 0.35, fuse: 2, size: 0.15, model: 'grenade', color: 0xffc040, ...o,
 });
 
 type W = Omit<ItemDef, 'explosive'> & { explosive?: boolean };
@@ -81,22 +84,22 @@ const item = (w: W): ItemDef => ({ explosive: !!w.projectile, ...w });
 
 export const ITEMS: Record<string, ItemDef> = Object.fromEntries(([
   // ---------- Spinfusor family (TD/Spinfusor_Comparison: 78 m/s, 50% inheritance, 6 s life) ----------
-  item({ id: 'light_spinfusor', name: 'Light Spinfusor', slot: 'primary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.24, refire: 1.24, projectile: disc(770, 550, 275, 7.2), src: 'F/Light_Spinfusor' }),
+  item({ id: 'light_spinfusor', name: 'Light Spinfusor', slot: 'primary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.24, refire: 1.24, projectile: disc(770, 550, 275, 7.2, { knockMin: 0.2 }), src: 'F/Light_Spinfusor' }),
   item({ id: 'dueling_spinfusor', name: 'Dueling Spinfusor', slot: 'primary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.24, refire: 1.24, projectile: disc(880, 550, 275, 6.8), src: 'TD/SC' }),
   item({ id: 'blinksfusor', name: 'Blinksfusor', slot: 'primary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.24, refire: 1.24, projectile: disc(770, 550, 275, 6.8, { inherit: 1 }), src: 'TD/SC' }),
   item({ id: 'stealth_spinfusor', name: 'Stealth Spinfusor', slot: 'primary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.24, refire: 1.24, projectile: disc(700, 500, 250, 7.2), src: 'TD/SC' }),
   item({ id: 'spinfusor', name: 'Spinfusor', slot: 'primary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.5, refire: 1.5, projectile: disc(910, 650, 325, 7.2), src: 'F/Spinfusor' }),
   item({ id: 'spare_spinfusor', name: 'Spare Spinfusor', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.5, refire: 1.5, projectile: disc(660, 600, 300, 7.2), src: 'TD/SC' }),
-  item({ id: 'spinfusor_mkd', name: 'Spinfusor MKD', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.5, refire: 1.5, projectile: disc(840, 600, 300, 7.8), src: 'TD/SC' }),
+  item({ id: 'spinfusor_mkd', name: 'Spinfusor MKD', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.5, refire: 1.5, projectile: disc(840, 600, 300, 7.8, { selfLift: 25000 }), src: 'TD/SC' }),
   item({ id: 'spinfusor_mkx', name: 'Spinfusor MK-X', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 29, reload: 1.5, refire: 1.5, projectile: disc(924, 660, 330, 7.2), src: 'TD/SC' }),
-  item({ id: 'heavy_spinfusor', name: 'Heavy Spinfusor', slot: 'primary', kind: 'projectile', clip: 1, ammo: 31, reload: 1.8, refire: 1.8, projectile: disc(1050, 750, 375, 7.2), src: 'TD/SC' }),
+  item({ id: 'heavy_spinfusor', name: 'Heavy Spinfusor', slot: 'primary', kind: 'projectile', clip: 1, ammo: 31, reload: 1.8, refire: 1.8, projectile: disc(1050, 750, 375, 7.2, { knockMin: 0.4, selfLift: 25000 }), src: 'TD/SC' }),
   item({ id: 'devastator_spinfusor', name: 'Devastator Spinfusor', slot: 'primary', kind: 'projectile', clip: 1, ammo: 31, reload: 1.8, refire: 1.8, projectile: disc(1204, 700, 350, 7.8), src: 'TD/SC' }),
-  item({ id: 'light_twinfusor', name: 'Light Twinfusor', slot: 'primary', kind: 'projectile', clip: 2, ammo: 38, reload: 1.4, refire: 0.35, projectile: disc(532, 380, 190, 6, { impulse: 42500 }), src: 'TD/SC' }),
-  item({ id: 'twinfusor', name: 'Twinfusor', slot: 'primary', kind: 'projectile', clip: 2, ammo: 38, reload: 1.6, refire: 0.35, projectile: disc(574, 410, 205, 6, { impulse: 42500 }), src: 'TD/SC' }),
-  item({ id: 'heavy_twinfusor', name: 'Heavy Twinfusor', slot: 'secondary', kind: 'projectile', clip: 2, ammo: 38, reload: 1.9, refire: 0.35, projectile: disc(616, 440, 220, 6, { impulse: 45000 }), src: 'TD/SC' }),
+  item({ id: 'light_twinfusor', name: 'Light Twinfusor', slot: 'primary', kind: 'projectile', clip: 2, ammo: 38, reload: 1.4, refire: 0.35, projectile: disc(532, 380, 190, 6, { impulse: 42500, selfLift: 22500 }), src: 'TD/SC' }),
+  item({ id: 'twinfusor', name: 'Twinfusor', slot: 'primary', kind: 'projectile', clip: 2, ammo: 38, reload: 1.6, refire: 0.35, projectile: disc(574, 410, 205, 6, { impulse: 42500, selfLift: 22500 }), src: 'TD/SC' }),
+  item({ id: 'heavy_twinfusor', name: 'Heavy Twinfusor', slot: 'secondary', kind: 'projectile', clip: 2, ammo: 38, reload: 1.9, refire: 0.35, projectile: disc(616, 440, 220, 6, { impulse: 45000, selfLift: 22500 }), src: 'TD/SC' }),
 
   // ---------- Pathfinder ----------
-  item({ id: 'bolt_launcher', name: 'Bolt Launcher', slot: 'primary', kind: 'projectile', clip: 1, ammo: 24, reload: 1.3, refire: 1.3, projectile: { speed: 76.4, gravity: 0.4, inherit: 0.5, lifetime: 6, radius: 8, direct: 877, splashMax: 650, splashMin: 325, impulse: 85000, size: 0.2, model: 'bolt', color: 0xff8a3a }, src: 'F/Pathfinder; TA TrProj_BoltLauncher' }),
+  item({ id: 'bolt_launcher', name: 'Bolt Launcher', slot: 'primary', kind: 'projectile', clip: 1, ammo: 24, reload: 1.3, refire: 1.3, projectile: { speed: 76.4, gravity: 0.4, inherit: 0.5, lifetime: 6, radius: 8, direct: 877, splashMax: 650, splashMin: 325, impulse: 85000, knockMin: 0.2, size: 0.2, model: 'bolt', color: 0xff8a3a }, src: 'F/Pathfinder; TA TrProj_BoltLauncher' }),
   item({ id: 'shotgun', name: 'Shotgun', slot: 'secondary', kind: 'hitscan', clip: 6, ammo: 56, reload: 2.2, refire: 0.9, hitscan: hs(80, 30, { pellets: 8, spread: 0.07, falloffStart: 6, falloffEnd: 30, range: 60 }), src: 'TD/Shotgun' }),
   item({ id: 'light_assault_rifle', name: 'Light Assault Rifle', slot: 'secondary', kind: 'burst', clip: 24, ammo: 192, reload: 1.6, refire: 0.42, burst: { count: 3, interval: 0.07 }, hitscan: hs(80, 60), src: 'F/Pathfinder' }),
   item({ id: 'holdout_shotgun', name: 'Holdout Shotgun', slot: 'secondary', kind: 'hitscan', clip: 5, ammo: 45, reload: 2.2, refire: 0.9, hitscan: hs(90, 30, { pellets: 8, spread: 0.08, falloffStart: 5, falloffEnd: 25, range: 50 }), src: 'F/Pathfinder' }),
@@ -123,8 +126,8 @@ export const ITEMS: Record<string, ItemDef> = Object.fromEntries(([
   // ---------- Soldier ----------
   item({ id: 'assault_rifle', name: 'Assault Rifle', slot: 'primary', kind: 'hitscan', clip: 28, ammo: 268, reload: 1.71, refire: 0.105, hitscan: hs(80, 60, { spread: 0.022 }), src: 'TD/Assault_Rifle' }),
   item({ id: 'gasts_rifle', name: "Gast's Rifle", slot: 'primary', kind: 'hitscan', clip: 24, ammo: 240, reload: 1.71, refire: 0.12, hitscan: hs(85, 63, { spread: 0.018 }), src: 'F/Soldier' }),
-  item({ id: 'thumper_d', name: 'Thumper D', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 26, reload: 1.5, refire: 1.5, projectile: { speed: 70.4, gravity: 0.7, inherit: 0.5, lifetime: 1.2, explodeOnExpire: true, radius: 7.4, direct: 770, splashMax: 550, splashMin: 275, impulse: 70000, size: 0.2, model: 'grenade', color: 0xffa040 }, src: 'TD/Thumper_DX' }),
-  item({ id: 'thumper_dx', name: 'Thumper DX', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 26, reload: 1.5, refire: 1.5, projectile: { speed: 70.4, gravity: 0.7, inherit: 0.5, lifetime: 1.2, explodeOnExpire: true, radius: 7.4, direct: 840, splashMax: 600, splashMin: 300, impulse: 70000, size: 0.2, model: 'grenade', color: 0xffa040 }, src: 'TD/Thumper_DX' }),
+  item({ id: 'thumper_d', name: 'Thumper D', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 26, reload: 1.5, refire: 1.5, projectile: { speed: 70.4, gravity: 0.7, inherit: 0.5, lifetime: 1.2, explodeOnExpire: true, radius: 7.4, direct: 770, splashMax: 550, splashMin: 275, impulse: 70000, selfLift: 70000, size: 0.2, model: 'grenade', color: 0xffa040 }, src: 'TD/Thumper_DX' }),
+  item({ id: 'thumper_dx', name: 'Thumper DX', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 26, reload: 1.5, refire: 1.5, projectile: { speed: 70.4, gravity: 0.7, inherit: 0.5, lifetime: 1.2, explodeOnExpire: true, radius: 7.4, direct: 840, splashMax: 600, splashMin: 300, impulse: 70000, selfLift: 70000, size: 0.2, model: 'grenade', color: 0xffa040 }, src: 'TD/Thumper_DX' }),
   item({ id: 'eagle_pistol', name: 'Eagle Pistol', slot: 'secondary', kind: 'hitscan', clip: 8, ammo: 64, reload: 1.3, refire: 0.25, hitscan: hs(100, 39), src: 'F/Soldier' }),
 
   // ---------- Technician ----------
@@ -139,8 +142,8 @@ export const ITEMS: Record<string, ItemDef> = Object.fromEntries(([
 
   // ---------- Raider ----------
   item({ id: 'arx_buster', name: 'Arx Buster', slot: 'primary', kind: 'burst', clip: 3, ammo: 42, reload: 1.71, refire: 1.0, burst: { count: 3, interval: 0.245 }, projectile: { speed: 76.4, gravity: 0.3, inherit: 0.5, lifetime: 5, radius: 7, direct: 600, splashMax: 600, splashMin: 300, impulse: 68000, size: 0.2, model: 'bolt', color: 0xff6040 }, src: 'TD/Arx_Buster; TA TrProj_ArxBuster' }),
-  item({ id: 'grenade_launcher', name: 'Grenade Launcher', slot: 'primary', kind: 'projectile', clip: 5, ammo: 38, reload: 2.0, refire: 0.6, projectile: { speed: 54, gravity: 0.8, inherit: 0.5, lifetime: 1.5, explodeOnExpire: true, radius: 10, direct: 550, splashMax: 550, splashMin: 275, impulse: 68000, bounce: 0.35, size: 0.18, model: 'grenade', color: 0xffc040 }, src: 'TD/Grenade_Launcher; TA TrProj_GrenadeLauncher' }),
-  item({ id: 'plasma_gun', name: 'Plasma Gun', slot: 'primary', kind: 'projectile', clip: 10, ammo: 80, reload: 1.8, refire: 0.3, projectile: { speed: 78.4, gravity: 0, inherit: 0.5, lifetime: 4, radius: 5, direct: 500, splashMax: 220, splashMin: 90, impulse: 25000, size: 0.2, model: 'plasma', color: 0x60ff90 }, src: 'F/Raider; TA TrProj_PlasmaGun' }),
+  item({ id: 'grenade_launcher', name: 'Grenade Launcher', slot: 'primary', kind: 'projectile', clip: 5, ammo: 38, reload: 2.0, refire: 0.6, projectile: { speed: 54, gravity: 0.8, inherit: 0.5, lifetime: 1.5, explodeOnExpire: true, radius: 10, direct: 550, splashMax: 550, splashMin: 275, impulse: 68000, knockMin: 0.5, bounce: 0.35, size: 0.18, model: 'grenade', color: 0xffc040 }, src: 'TD/Grenade_Launcher; TA TrProj_GrenadeLauncher' }),
+  item({ id: 'plasma_gun', name: 'Plasma Gun', slot: 'primary', kind: 'projectile', clip: 10, ammo: 80, reload: 1.8, refire: 0.3, projectile: { speed: 78.4, gravity: 0, inherit: 0.5, lifetime: 4, radius: 5, direct: 500, splashMax: 220, splashMin: 90, impulse: 25000, selfLift: 25000, size: 0.2, model: 'plasma', color: 0x60ff90 }, src: 'F/Raider; TA TrProj_PlasmaGun' }),
   item({ id: 'dust_devil', name: 'Dust Devil', slot: 'primary', kind: 'projectile', clip: 3, ammo: 30, reload: 1.8, refire: 0.5, projectile: { speed: 70, gravity: 0.5, inherit: 0.5, lifetime: 2.5, explodeOnExpire: true, radius: 5, direct: 500, splashMax: 500, splashMin: 325, impulse: 25000, sticky: true, fuse: 1.2, size: 0.18, model: 'grenade', color: 0xd0a060 }, src: 'F/Raider,est' }),
   item({ id: 'nj4_smg', name: 'NJ4 SMG', slot: 'secondary', kind: 'hitscan', clip: 28, ammo: 276, reload: 1.3, refire: 0.105, hitscan: hs(75, 52, { spread: 0.028 }), src: 'TD/NJ4_SMG' }),
   item({ id: 'nj5b_smg', name: 'NJ5-B SMG', slot: 'secondary', kind: 'hitscan', clip: 16, ammo: 160, reload: 1.3, refire: 0.19, hitscan: hs(140, 98, { spread: 0.022 }), src: 'F/Raider' }),
@@ -155,7 +158,7 @@ export const ITEMS: Record<string, ItemDef> = Object.fromEntries(([
   // ---------- Doombringer ----------
   item({ id: 'chain_gun', name: 'Chain Gun', slot: 'primary', kind: 'hitscan', clip: 250, ammo: 250, reload: 0, refire: 0.105, spinup: 1.4, hitscan: hs(95, 71, { spread: 0.035 }), src: 'TD/Chain_Gun' }),
   item({ id: 'chain_cannon', name: 'Chain Cannon', slot: 'primary', kind: 'hitscan', clip: 200, ammo: 200, reload: 0, refire: 0.13, spinup: 1.2, hitscan: hs(115, 90, { spread: 0.04 }), src: 'F/Doombringer' }),
-  item({ id: 'heavy_bolt_launcher', name: 'Heavy Bolt Launcher', slot: 'primary', kind: 'projectile', clip: 1, ammo: 30, reload: 1.6, refire: 1.6, projectile: { speed: 76.4, gravity: 0.4, inherit: 0.5, lifetime: 6, explodeOnExpire: true, radius: 8, direct: 1050, splashMax: 750, splashMin: 375, impulse: 85000, size: 0.25, model: 'bolt', color: 0xff7a2a }, src: 'TD/Heavy_Bolt_Launcher; TA TrProj_HeavyBoltLauncher' }),
+  item({ id: 'heavy_bolt_launcher', name: 'Heavy Bolt Launcher', slot: 'primary', kind: 'projectile', clip: 1, ammo: 30, reload: 1.6, refire: 1.6, projectile: { speed: 76.4, gravity: 0.4, inherit: 0.5, lifetime: 6, explodeOnExpire: true, radius: 8, direct: 1050, splashMax: 750, splashMin: 375, impulse: 85000, knockMin: 0.2, selfLift: 25000, size: 0.25, model: 'bolt', color: 0xff7a2a }, src: 'TD/Heavy_Bolt_Launcher; TA TrProj_HeavyBoltLauncher' }),
   item({ id: 'saber_launcher', name: 'Saber Launcher', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 12, reload: 2.5, refire: 2.5, chargeTime: 3, projectile: { speed: 60, gravity: 0, inherit: 0, lifetime: 10, radius: 4, direct: 1000, splashMax: 1000, splashMin: 400, impulse: 30000, homing: 2.2, size: 0.3, model: 'saber', color: 0xff4040 }, src: 'TD/Saber_Launcher,est' }),
   item({ id: 'titan_launcher', name: 'Titan Launcher', slot: 'secondary', kind: 'projectile', clip: 1, ammo: 20, reload: 1.8, refire: 1.8, projectile: { speed: 80, gravity: 0, inherit: 0.5, lifetime: 1.0, explodeOnExpire: true, radius: 7, direct: 814, splashMax: 650, splashMin: 325, impulse: 60000, size: 0.25, model: 'rocket', color: 0xffb040 }, src: 'F/Doombringer,est' }),
 
@@ -163,13 +166,13 @@ export const ITEMS: Record<string, ItemDef> = Object.fromEntries(([
   item({ id: 'gladiator', name: 'Gladiator', slot: 'primary', kind: 'projectile', clip: 1, ammo: 26, reload: 1.8, refire: 1.8, projectile: { speed: 70, gravity: 0.3, inherit: 0.5, lifetime: 6, radius: 7, direct: 1120, splashMax: 800, splashMin: 300, impulse: 65000, size: 0.25, model: 'disc', color: 0xffe07a }, src: 'F/Brute,est' }),
   item({ id: 'auto_shotgun', name: 'Automatic Shotgun', slot: 'secondary', kind: 'hitscan', clip: 8, ammo: 64, reload: 2.4, refire: 0.3, hitscan: hs(50, 19, { pellets: 8, spread: 0.08, falloffStart: 5, falloffEnd: 25, range: 50 }), src: 'F/Brute' }),
   item({ id: 'nova_colt', name: 'Nova Colt', slot: 'secondary', kind: 'hitscan', clip: 6, ammo: 48, reload: 1.6, refire: 0.3, hitscan: hs(190, 124), src: 'F/Brute' }),
-  item({ id: 'plasma_cannon', name: 'Plasma Cannon', slot: 'secondary', kind: 'projectile', clip: 3, ammo: 27, reload: 1.8, refire: 0.9, projectile: { speed: 78.4, gravity: 0, inherit: 0.5, lifetime: 5, radius: 5.5, direct: 575, splashMax: 575, splashMin: 220, impulse: 25000, size: 0.25, model: 'plasma', color: 0x60ff90 }, src: 'F/Brute; TA TrProj_PlasmaCannon' }),
+  item({ id: 'plasma_cannon', name: 'Plasma Cannon', slot: 'secondary', kind: 'projectile', clip: 3, ammo: 27, reload: 1.8, refire: 0.9, projectile: { speed: 78.4, gravity: 0, inherit: 0.5, lifetime: 5, radius: 5.5, direct: 575, splashMax: 575, splashMin: 220, impulse: 25000, selfLift: 25000, size: 0.25, model: 'plasma', color: 0x60ff90 }, src: 'F/Brute; TA TrProj_PlasmaCannon' }),
   item({ id: 'the_hammer', name: 'The Hammer', slot: 'secondary', kind: 'hitscan', clip: 4, ammo: 32, reload: 2.2, refire: 0.9, hitscan: hs(60, 25, { pellets: 8, spread: 0.06, falloffStart: 6, falloffEnd: 30, range: 50 }), src: 'F/Brute' }),
 
   // ---------- Belt items ----------
-  item({ id: 'impact_nitron', name: 'Impact Nitron', slot: 'belt', kind: 'projectile', clip: 3, ammo: 3, reload: 0, refire: 0.8, projectile: gren(300, 100, 50, 5.5, { bounce: undefined, fuse: undefined, explodeOnExpire: true, impulse: 95000 }), src: 'TD/Impact_Nitron' }),
-  item({ id: 'explosive_nitron', name: 'Explosive Nitron', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(650, 650, 190, 7, { bounce: undefined, fuse: undefined, explodeOnExpire: true }), src: 'F/Pathfinder' }),
-  item({ id: 'compact_nitron', name: 'Compact Nitron', slot: 'belt', kind: 'projectile', clip: 4, ammo: 4, reload: 0, refire: 0.8, projectile: gren(300, 90, 45, 4.5, { bounce: undefined, fuse: undefined, explodeOnExpire: true, impulse: 80000 }), src: 'F/Pathfinder' }),
+  item({ id: 'impact_nitron', name: 'Impact Nitron', slot: 'belt', kind: 'projectile', clip: 3, ammo: 3, reload: 0, refire: 0.8, projectile: gren(300, 100, 50, 5.5, { bounce: undefined, fuse: undefined, explodeOnExpire: true, impulse: 64800, knockMin: 0.2 }), src: 'TD/Impact_Nitron; TA TrProj_ConcussionGrenade' }),
+  item({ id: 'explosive_nitron', name: 'Explosive Nitron', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(650, 650, 190, 7, { bounce: undefined, fuse: undefined, explodeOnExpire: true, impulse: 110000, knockMin: 0.2 }), src: 'F/Pathfinder; TA TrProj_STGrenade' }),
+  item({ id: 'compact_nitron', name: 'Compact Nitron', slot: 'belt', kind: 'projectile', clip: 4, ammo: 4, reload: 0, refire: 0.8, projectile: gren(300, 90, 45, 4.5, { bounce: undefined, fuse: undefined, explodeOnExpire: true, impulse: 30000, knockMin: 0.2 }), src: 'F/Pathfinder; TA TrProj_ConcussionGrenade_MKD' }),
   item({ id: 'claymore', name: 'Claymore Mine', slot: 'belt', kind: 'deploy', clip: 2, ammo: 2, reload: 0, refire: 0.8, deploy: 'claymore', src: 'F/Sentinel' }),
   item({ id: 'focused_claymore', name: 'Focused Claymore', slot: 'belt', kind: 'deploy', clip: 2, ammo: 2, reload: 0, refire: 0.8, deploy: 'focused_claymore', src: 'F/Sentinel' }),
   item({ id: 'motion_mine', name: 'Motion Mine', slot: 'belt', kind: 'deploy', clip: 2, ammo: 2, reload: 0, refire: 0.8, deploy: 'motion_mine', src: 'F/Sentinel' }),
@@ -189,7 +192,7 @@ export const ITEMS: Record<string, ItemDef> = Object.fromEntries(([
   item({ id: 'emp_grenade', name: 'EMP Grenade', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(600, 600, 200, 7, { color: 0x60c0ff }), src: 'F/Raider' }),
   item({ id: 'emp_xl', name: 'EMP Grenade XL', slot: 'belt', kind: 'projectile', clip: 3, ammo: 3, reload: 0, refire: 0.8, projectile: gren(500, 500, 180, 7, { color: 0x60c0ff }), src: 'F/Raider' }),
   item({ id: 'cluster_grenade', name: 'Cluster Grenade', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(400, 400, 150, 5, { split: { count: 5, spread: 6, damage: 425, radius: 5 } }), src: 'F/Raider' }),
-  item({ id: 'whiteout_grenade', name: 'Whiteout Grenade', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(50, 50, 15, 10, { color: 0xffffff }), src: 'F/Raider' }),
+  item({ id: 'whiteout_grenade', name: 'Whiteout Grenade', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(50, 50, 15, 10, { color: 0xffffff, impulse: 52000, selfLift: 50000 }), src: 'F/Raider; TA TrProj_WhiteOut' }),
   item({ id: 'heavy_ap', name: 'Heavy AP Grenade', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(1500, 1500, 450, 6), src: 'F/Juggernaut' }),
   item({ id: 'heavy_ap_xl', name: 'Heavy AP XL', slot: 'belt', kind: 'projectile', clip: 3, ammo: 3, reload: 0, refire: 0.8, projectile: gren(1300, 1300, 390, 6), src: 'F/Juggernaut' }),
   item({ id: 'spinfusor_disc', name: 'Spinfusor Disc', slot: 'belt', kind: 'projectile', clip: 3, ammo: 3, reload: 0, refire: 0.8, projectile: disc(910, 650, 325, 7.2, { speed: 60 }), src: 'F/Juggernaut' }),

@@ -1,9 +1,10 @@
-import { AIR_DRAG, AIR_DRAG_START, AIRBORNE_DRAG, GRAVITY, PAWN_GRAVITY_SCALE, SKI_SLOPE_GRAVITY_BOOST, TERMINAL_VELOCITY } from '../constants.js';
+import { AIR_DRAG, AIR_DRAG_START, AIRBORNE_DRAG, GRAVITY, JET_MAX_THRUST_SPEED, JET_THRUST_AT_MAX, PAWN_GRAVITY_SCALE, SKI_SLOPE_GRAVITY_BOOST, TERMINAL_VELOCITY } from '../constants.js';
 import type { ArmorPhysics } from '../data/classes.js';
+import { inVolume, type MapBoost } from '../map/spec.js';
 import type { Vec3 } from '../math.js';
 import type { CollisionWorld } from './collision.js';
 
-const G = GRAVITY * PAWN_GRAVITY_SCALE;
+const PAWN_G = GRAVITY * PAWN_GRAVITY_SCALE;
 
 export const BTN = {
   JET: 1, SKI: 2, JUMP: 4, FIRE: 8, MELEE: 16, BELT: 32, PACK: 64, USE: 128, RELOAD: 256, DROP_FLAG: 512, ZOOM: 1024, SPOT: 2048, ALT: 4096,
@@ -62,6 +63,8 @@ export function wishDir(cmd: InputCmd): Vec3 {
 export function stepMovement(s: MoveState, cmd: InputCmd, p: MoveParams, world: CollisionWorld, dt: number): MoveResult {
   const ph = p.phys;
   const v = s.vel;
+  const G = PAWN_G * world.gravityScale;
+  const start = { x: s.pos.x, y: s.pos.y, z: s.pos.z };
   const wish = wishDir(cmd);
   const wishLen = Math.hypot(wish.x, wish.z);
   const jetHeld = (cmd.buttons & BTN.JET) !== 0;
@@ -124,7 +127,9 @@ export function stepMovement(s: MoveState, cmd: InputCmd, p: MoveParams, world: 
         if (along < ph.skiAccelCap) { const add = Math.min(ph.skiAccel * dt, ph.skiAccelCap - along); v.x += wish.x * add; v.z += wish.z * add; }
       }
     } else if (s.jetting) {
-      v.y += ph.jetAccel * dt;
+      // Full lift up to half the max thrust speed, fading to 16 % at it: a held jet settles into a steady climb.
+      const fade = Math.min(1, Math.max(0, v.y / JET_MAX_THRUST_SPEED - 0.5) * 2);
+      v.y += ph.jetAccel * (1 - (1 - JET_THRUST_AT_MAX) * fade) * dt;
       if (wishLen > 0 && along < ph.jetHorizCap) {
         const add = Math.min(ph.jetSideAccel * dt, ph.jetHorizCap - along);
         v.x += wish.x * add; v.z += wish.z * add;
@@ -136,7 +141,8 @@ export function stepMovement(s: MoveState, cmd: InputCmd, p: MoveParams, world: 
   }
 
   if (s.jetting) s.energy = Math.max(0, s.energy - ph.jetDrain * dt);
-  else s.energy = Math.min(p.maxEnergy, s.energy + ph.energyRegen * p.regenMult * dt);
+  // TA TrPawn.ShouldRechargePowerPool: no recharge while the jet key is held, so an empty tank cannot be pulsed upward.
+  else if (!jetHeld) s.energy = Math.min(p.maxEnergy, s.energy + ph.energyRegen * p.regenMult * dt);
   if (p.infiniteEnergy) s.energy = p.maxEnergy;
 
   let speed = Math.hypot(v.x, v.y, v.z);
@@ -191,5 +197,23 @@ export function stepMovement(s: MoveState, cmd: InputCmd, p: MoveParams, world: 
 
   s.onGround = onGround;
   s.groundNormal = gn;
+  if (world.boosts.length) applyBoosts(s, start, ph.height, p.team ?? -1, world.boosts);
   return { impact, hitWall };
+}
+
+/** TA accelerators / launch pads (Kismet Touch -> SetVelocity): entering one sets (or scales) the velocity. */
+function applyBoosts(s: MoveState, from: Vec3, height: number, team: number, boosts: readonly MapBoost[]): void {
+  const touching = (b: MapBoost, at: Vec3) => {
+    for (const f of [0.1, 0.5, 0.9]) if (inVolume(b, { x: at.x, y: at.y + height * f, z: at.z })) return true;
+    return false;
+  };
+  for (const b of boosts) {
+    if (b.team !== 255 && b.team !== team) continue;
+    if (!touching(b, s.pos) || touching(b, from)) continue;
+    if (b.cond) { const c = s.vel[b.cond.axis]; if (b.cond.gt ? !(c > b.cond.value) : !(c < b.cond.value)) continue; }
+    const k = b.scale;
+    if (k !== undefined) { s.vel.x *= k; s.vel.y *= k; s.vel.z *= k; }
+    else { s.vel.x = b.vel.x; s.vel.y = b.vel.y; s.vel.z = b.vel.z; }
+    s.onGround = false;
+  }
 }

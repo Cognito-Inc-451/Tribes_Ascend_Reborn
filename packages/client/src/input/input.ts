@@ -9,17 +9,21 @@ export class Input {
   gameActive = false;
   /** When set, raw key presses go to this handler (chat, VGS, bind capture) instead of game actions. */
   capture: ((code: string, e: KeyboardEvent | null) => boolean) | null = null;
+  /** When it returns true, the click that grabs the pointer also counts as a press (click-to-respawn). */
+  clickThrough: (() => boolean) | null = null;
   private down = new Set<string>();
   private edges = new Set<string>();
   private listeners = new Set<(code: string) => void>();
   private locked = false;
+  /** Set while we release the pointer ourselves, so a lost lock can be told apart from the player pressing Esc. */
+  private releasing = false;
   private gpPrev: boolean[] = [];
 
   constructor(private el: HTMLElement) {
     window.addEventListener('keydown', (e) => this.onDown(e.code, e));
     window.addEventListener('keyup', (e) => this.onUp(e.code));
     el.addEventListener('mousedown', (e) => {
-      if (this.gameActive && !this.locked) { this.lock(); return; }
+      if (this.gameActive && !this.locked) { this.lock(); if (!this.clickThrough?.()) return; }
       this.onDown(`Mouse${e.button}`, null);
     });
     window.addEventListener('mouseup', (e) => this.onUp(`Mouse${e.button}`));
@@ -40,14 +44,17 @@ export class Input {
     document.addEventListener('pointerlockchange', () => {
       this.locked = document.pointerLockElement === this.el;
       if (!this.locked) this.down.clear();
-      for (const l of this.lockListeners) l(this.locked);
+      const byUser = !this.locked && !this.releasing;
+      if (!this.locked) this.releasing = false;
+      for (const l of this.lockListeners) l(this.locked, byUser);
     });
     window.addEventListener('blur', () => this.down.clear());
   }
 
   zoomScale = 1;
-  private lockListeners = new Set<(locked: boolean) => void>();
-  onLockChange(fn: (locked: boolean) => void) { this.lockListeners.add(fn); }
+  private lockListeners = new Set<(locked: boolean, byUser: boolean) => void>();
+  /** `byUser`: the browser released the pointer (Esc, focus loss) rather than unlock(). Returns an unsubscribe. */
+  onLockChange(fn: (locked: boolean, byUser: boolean) => void) { this.lockListeners.add(fn); return () => { this.lockListeners.delete(fn); }; }
   get isLocked() { return this.locked; }
 
   lock() {
@@ -58,7 +65,7 @@ export class Input {
     } catch { el.requestPointerLock(); }
   }
 
-  unlock() { if (document.pointerLockElement) document.exitPointerLock(); }
+  unlock() { if (document.pointerLockElement) { this.releasing = true; document.exitPointerLock(); } }
 
   onPress(fn: (code: string) => void) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
 

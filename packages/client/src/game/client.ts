@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {
-  AF, ASSET_TYPES, ASSETS, BTN, buildCollisionWorld, CLASSES, DT, ITEM_IDS, ITEM_INDEX, ITEMS, MODES, PF, PHASE, projDef, TEAM_NAMES, VGS_BY_ID, dirFromAngles, GRAVITY,
+  AF, ASSET_TYPES, ASSETS, BTN, buildCollisionWorld, CLASSES, DT, ITEM_IDS, ITEM_INDEX, ITEMS, MODES, PF, PHASE, projDef, TEAM_NAMES, VEHICLE_TYPES, VEHICLES, VGS_BY_ID, dirFromAngles, GRAVITY,
   makeOBB, type AssetSnap, type CollisionWorld, type InputCmd, type Loadout, type MapData, type ModeId, type PlayerSnap, type S2C, type Snapshot, type Vec3,
 } from '@ar/shared';
 import { audio } from '../audio/audio.js';
@@ -11,7 +11,7 @@ import { Effects } from '../render/fx.js';
 import type { Renderer } from '../render/renderer.js';
 import { WorldView } from '../render/world.js';
 import { TextureStore } from '../render/textures.js';
-import { buildViewModel, disposeViewModel, spinViewModel } from '../render/viewmodel.js';
+import { buildViewModel, disposeViewModel, setViewModelStealth, spinViewModel, type FirstPerson } from '../render/viewmodel.js';
 import { assetBases } from '../net/node.js';
 import { social, type ChatMsg } from '../net/social.js';
 import { saveSettings, settings } from '../settings.js';
@@ -77,6 +77,8 @@ export class GameClient {
   private fps = 0;
   private cmdHistory: InputCmd[] = [];
   private landSoundAt = 0;
+  private reloadSnd = 0;
+  private drawnWeapon = '';
   private wasOnGround = true;
   private fellBack: boolean;
 
@@ -84,11 +86,15 @@ export class GameClient {
     this.fellBack = fellBack;
     this.mode = session.server.mode;
     this.world = buildCollisionWorld(map);
+    this.world.gravityScale = session.server.options?.gravity ?? 1;
     this.textures = map.textures?.length ? new TextureStore(assetBases(session.server), r.renderer) : null;
     audio.setAssetBases(assetBases(session.server));
-    this.view = new WorldView(map, r.scene, this.textures);
+    this.view = new WorldView(map, r.scene, this.textures, r.renderer);
+    r.setSun(this.view.sunDirection);
     r.scene.add(this.fx.group);
     this.pred = new Predictor(this.world, !!session.server.options?.infiniteEnergy);
+    // The server keeps our last input seq across map changes and drops anything at or below it.
+    this.pred.seq = session.inputSeq;
     this.pred.setLoadout(this.cls, this.loadout);
     this.hud = new Hud(ui);
     this.minimap = new Minimap(map, () => this.view.roof);
@@ -101,12 +107,15 @@ export class GameClient {
     session.onJson = (m) => this.onJson(m);
     input.gameActive = true;
     input.capture = (code, e) => this.captureKey(code, e);
+    input.clickThrough = () => this.dead();
+    // Browsers swallow the Esc that releases the mouse: treat losing the lock as that Esc.
+    this.lockOff = input.onLockChange((locked, byUser) => { if (!locked && byUser) this.openEscMenu(); });
     const c = this.centroid();
     this.spec.pos.set(c.x, c.y + 80, c.z);
     session.send({ t: 'class', cls: this.cls, loadout: this.loadout });
     session.send({ t: 'mapready' });
     if (fellBack) this.hud.toast('WebTransport unavailable — fell back to WebSocket');
-    this.openClassMenu();
+    if (!session.greeted) { session.greeted = true; this.openClassMenu(); }
     this.socialOff = social.onMessage(this.onSocial);
     this.raf = requestAnimationFrame((t) => this.frame(t));
   }
@@ -145,32 +154,45 @@ export class GameClient {
   /** Swap the first-person weapon model when the held weapon changes. */
   private syncViewModel() {
     const item = this.slot === 1 ? this.loadout.secondary : this.loadout.primary;
-    const key = `${item}|${settings.cosmetics.weaponFinish}`;
+    const armor = (CLASSES.find((c) => c.id === this.cls) ?? CLASSES[0]).armor;
+    const team = this.meSnap()?.team ?? 0;
+    const key = `${item}|${settings.cosmetics.weaponFinish}|${armor}|${team}`;
     if (key === this.vmItem) return;
     this.vmItem = key;
     for (const c of [...this.viewModel.children]) { this.viewModel.remove(c); disposeViewModel(c); }
-    this.viewModel.add(buildViewModel(item, settings.cosmetics.weaponFinish));
+    this.viewModel.add(buildViewModel(item, settings.cosmetics.weaponFinish, { armor, team }));
   }
+
+  /** TA first-person arms/weapon of the held item, once loaded. */
+  private get fp(): FirstPerson | undefined { return this.viewModel.children[0]?.userData.fp as FirstPerson | undefined; }
+  private lastReload = 0;
 
   // ------------------------------------------------------------------ input
   private captureKey(code: string, e: KeyboardEvent | null): boolean {
     if (this.chatInput) return false;
     if (this.vgs.isOpen) {
-      const r = this.vgs.press(code);
+      const r = this.vgs.press(code, e?.key);
       if (r && r !== 'close') this.session.send({ t: 'vgs', id: r.id });
       return true;
     }
-    if (this.overlay && code === 'Escape') { this.closeOverlay(); return true; }
+    if (this.overlay && code === 'Escape') {
+      // The same Esc can arrive right after the lost pointer lock opened the menu.
+      if (performance.now() - this.escOpenedAt > 300) this.closeOverlay();
+      return true;
+    }
     void e;
     return false;
   }
 
   private anyOverlay() { return !!this.overlay || !!this.chatInput; }
 
-  private closeOverlay() {
+  /** Grab the mouse for play, unless a menu (e.g. the team screen on join) needs the cursor. */
+  focus() { if (!this.anyOverlay()) this.input.lock(); }
+
+  private closeOverlay(lock = true) {
     this.overlay?.remove();
     this.overlay = null;
-    this.input.lock();
+    if (lock) this.input.lock();
   }
 
   private setOverlay(el: HTMLElement) {
@@ -186,7 +208,13 @@ export class GameClient {
     this.setOverlay(classMenu(this.mode, me?.team ?? 255,
       (t) => { if (t === -2) { this.openTeamMenu(); return; } this.session.send({ t: 'team', team: t }); if (t === 255) this.closeOverlay(); },
       // The server applies the new loadout at an inventory station or on respawn and confirms with 'spawned'.
-      (cls, lo) => { settings.lastClass = cls; saveSettings(); this.session.send({ t: 'class', cls, loadout: lo }); if ((me?.team ?? 255) === 255 && !this.teamChosen) this.session.send({ t: 'team', team: -1 }); this.closeOverlay(); },
+      (cls, lo) => {
+        settings.lastClass = cls; saveSettings();
+        this.session.send({ t: 'class', cls, loadout: lo, spawn: true });
+        if ((me?.team ?? 255) === 255 && !this.teamChosen) this.session.send({ t: 'team', team: -1, spawn: true });
+        this.spawnQueued = true;
+        this.closeOverlay();
+      },
       () => this.closeOverlay()));
   }
 
@@ -195,12 +223,23 @@ export class GameClient {
     const me = this.session.players.get(this.session.myId);
     const roster = () => [...this.session.players.values()].map((p) => ({ name: p.name, team: p.team, bot: p.bot, score: p.score }));
     this.setOverlay(teamMenu(this.mode, me?.team ?? 255, roster, (t) => {
-      this.session.send({ t: 'team', team: t });
-      if (t === 255) { this.closeOverlay(); return; }
-      this.teamChosen = true;
-      this.openClassMenu();
+      // TA drops you in with your current class once you pick a side; the class menu stays on its key.
+      this.session.send({ t: 'team', team: t, spawn: t !== 255 });
+      if (t !== 255) { this.teamChosen = true; this.spawnQueued = true; }
+      this.closeOverlay();
     }, () => this.openClassMenu()));
   }
+
+  /** Dead (not spectating): a click respawns. */
+  private dead(): boolean {
+    const me = this.meSnap();
+    return !!me && !(me.flags & (PF.ALIVE | PF.SPECTATOR)) && me.team !== 255;
+  }
+
+  private spawnPulseUntil = 0;
+  private spawnQueued = false;
+  /** Respawn as soon as the timer allows: one FIRE press, latched by the server (sent once we are dead and on a team). */
+  private queueSpawn() { this.spawnPulseUntil = performance.now() + 4000; }
 
   private openChat(team: boolean) {
     const inp = h('input', { type: 'text', maxLength: 200, placeholder: team ? 'Team chat  ·  /g global  ·  /w name msg  ·  /r reply' : 'All chat  ·  /g global  ·  /w name msg  ·  /r reply', style: 'width:100%' }) as HTMLInputElement;
@@ -220,6 +259,23 @@ export class GameClient {
   private lastDm = '';
   private stats = new StatsRecorder();
   private socialOff: (() => void) | null = null;
+  private lockOff: (() => void) | null = null;
+  private escOpenedAt = 0;
+
+  openEscMenu() {
+    if (this.overlay || this.chatInput || this.disposed) return;
+    this.vgs.close();
+    this.escOpenedAt = performance.now();
+    this.setOverlay(escMenu({
+      resume: () => this.closeOverlay(), cls: () => this.openClassMenu(), settings: () => { this.closeOverlay(false); this.hooks.openSettings(); },
+      disconnect: () => this.hooks.leave(), admin: () => {
+        const pw = prompt('Admin password'); if (!pw) return;
+        const cmd = prompt('Command (map <id> | kick <name> | bots <n> | end)') ?? '';
+        const [c, ...rest] = cmd.split(' ');
+        this.session.send({ t: 'admin', password: pw, cmd: c, arg: rest.join(' ') });
+      },
+    }, this.session.server.name, this.transportLabel()));
+  }
   private sendChat(text: string, team: boolean) {
     const cmd = /^\/(g|w|r)\s+(.*)$/i.exec(text);
     if (!cmd) { this.session.send({ t: 'chat', text: text.slice(0, 160), team }); return; }
@@ -248,19 +304,10 @@ export class GameClient {
   private handleActions() {
     const i = this.input;
     if (this.chatInput) return;
-    if (i.pressed('menu') && !this.overlay) {
-      this.setOverlay(escMenu({
-        resume: () => this.closeOverlay(), cls: () => this.openClassMenu(), settings: () => { this.closeOverlay(); this.hooks.openSettings(); },
-        disconnect: () => this.hooks.leave(), admin: () => {
-          const pw = prompt('Admin password'); if (!pw) return;
-          const cmd = prompt('Command (map <id> | kick <name> | bots <n> | end)') ?? '';
-          const [c, ...rest] = cmd.split(' ');
-          this.session.send({ t: 'admin', password: pw, cmd: c, arg: rest.join(' ') });
-        },
-      }, this.session.server.name, this.transportLabel()));
-      return;
-    }
+    if (i.pressed('menu') && !this.overlay) { this.openEscMenu(); return; }
     if (this.overlay) return;
+    // Clicks while dead are latched so a quick tap between sim ticks still respawns.
+    if (i.pressed('fire') && this.dead()) this.queueSpawn();
     if (i.pressed('classes') || i.pressed('quickClasses')) { this.openClassMenu(); return; }
     if (i.pressed('teamSelect')) { this.openTeamMenu(); return; }
     if (i.pressed('talk')) { this.openChat(false); return; }
@@ -364,6 +411,10 @@ export class GameClient {
     if (zoom) b |= def?.projectile?.remote ? BTN.ALT : BTN.ZOOM;
     this.input.zoomScale = zoom && def?.zoom ? def.zoom : 1;
     if (spectating) { this.specMove(DT, mv); return; }
+    if (this.spawnPulseUntil && this.dead()) {
+      if (performance.now() < this.spawnPulseUntil) { b |= BTN.FIRE; this.spawnQueued = true; }
+      this.spawnPulseUntil = 0;
+    }
     const cmd = this.pred.step({ seq: 0, fwd: mv.fwd, strafe: mv.strafe, yaw: i.yaw, pitch: i.pitch, buttons: b, weapon: this.slot });
     this.cmdHistory.push(cmd);
     if (this.cmdHistory.length > 4) this.cmdHistory.shift();
@@ -373,13 +424,14 @@ export class GameClient {
 
   private localFireFx(buttons: number, def: typeof ITEMS[string] | undefined) {
     const self = this.session.latest?.self;
-    if (!def || !self || !this.pred.alive) return;
+    if (!def || !self || !this.pred.alive || ((this.meSnap()?.flags ?? 0) & PF.IN_VEHICLE)) return;
     const now = performance.now() / 1000;
     const clip = self.ammo[this.slot]?.[0] ?? 0;
     if ((buttons & BTN.FIRE) && now >= this.nextFireLocal && clip > 0 && self.reload === 0 && (!def.spinup || self.spin >= 0.99) && def.kind !== 'repair') {
       this.nextFireLocal = now + def.refire;
-      audio.playWeapon(def.id);
-      this.recoil = Math.min(1, this.recoil + (def.projectile ? 0.8 : 0.35));
+      audio.fire(this.session.myId, def.id);
+      this.recoil = Math.min(1, this.recoil + (def.projectile ? 0.8 : 0.35) * (this.fp ? 0.35 : 1));
+      this.fp?.player.play('Fire', false, 0.04);
     }
   }
 
@@ -459,6 +511,17 @@ export class GameClient {
       if (def.type === 'force_field') box.noCollide = (a.flags & AF.POWERED) === 0;
     }
     for (const id of [...this.world.dynamic.keys()]) if (!seen.has(id)) this.world.dynamic.delete(id);
+    // Map force fields (TA team blockers, SunStar's flag shields) stand while the generator powering them does.
+    if (this.map.blockers) {
+      const gens = s.assets.filter((a) => ASSET_TYPES[a.type] === 'generator');
+      const up = [0, 1].map((t) => { const g = gens.filter((a) => a.team === t); return !g.length || g.some((a) => (a.flags & AF.DESTROYED) === 0); });
+      this.map.blockers.forEach((b, i) => {
+        const on = b.gate === undefined || !!up[b.gate];
+        const f = this.world.blockers[i];
+        if (f) f.off = !on;
+        this.view.setBlockerUp(i, on);
+      });
+    }
   }
 
   private pinfo(id: number) { return this.session.players.get(id); }
@@ -476,6 +539,10 @@ export class GameClient {
           this.stats.kill(kind, !!victim && !(victim.flags & PF.ON_GROUND) && !!ITEMS[m.item]?.projectile, !!mine && !!(mine.flags & PF.IN_VEHICLE));
         }
         if (m.victim === this.session.myId) { audio.play('hurt'); audio.sting('death'); this.stats.death(); }
+        else {
+          const vp = this.session.latest?.players.find((p) => p.id === m.victim);
+          if (vp) audio.playKey('death', vp.pos, 0.8);
+        }
         if (m.assist === this.session.myId) this.stats.assist();
         break;
       }
@@ -533,14 +600,16 @@ export class GameClient {
       const key = mine ? `flag_${verb}_you` : verb === 'return' ? `flag_return_${team === myTeam ? 'ours' : 'theirs'}` : `flag_${verb}_${ours ? 'ours' : 'theirs'}`;
       void audio.announcer(key);
       if (mine && verb !== 'drop') this.stats.flag(verb as 'cap' | 'return' | 'grab', Math.hypot(this.pred.state.vel.x, this.pred.state.vel.y, this.pred.state.vel.z) * 3.6);
-      if (verb === 'cap' && ours) audio.sting('sting_capture');
-      else if (verb === 'grab' && ours) audio.sting('sting_grab');
-      else if (verb === 'return' && team === myTeam) audio.sting('sting_return');
+      // TA's CTF stingers play for every grab, capture and return, whichever team.
+      if (verb === 'cap') audio.sting('sting_capture');
+      else if (verb === 'grab') audio.sting('sting_grab');
+      else if (verb === 'return') audio.sting('sting_return');
     }
+    const stung = settings.musicVolume > 0 && audio.hasMusic('sting_grab');
     switch (kind) {
-      case 'flag_grab': audio.play(team === myTeam ? 'denied' : 'flag_grab'); this.hud.announce(text, col); break;
-      case 'flag_cap': audio.play('flag_cap'); this.hud.announce(text, col); break;
-      case 'flag_return': audio.play('flag_return'); this.hud.toast(text); break;
+      case 'flag_grab': if (!stung) audio.play(team === myTeam ? 'denied' : 'flag_grab'); this.hud.announce(text, col); break;
+      case 'flag_cap': if (!stung) audio.play('flag_cap'); this.hud.announce(text, col); break;
+      case 'flag_return': if (!stung) audio.play('flag_return'); this.hud.toast(text); break;
       case 'flag_drop': audio.play('flag_drop'); this.hud.toast(text); break;
       case 'gen_down': audio.play('gen_down'); this.hud.announce(text, col); break;
       case 'match_start': audio.play('match_start'); this.hud.announce(text); break;
@@ -552,6 +621,7 @@ export class GameClient {
 
   private onFx(m: Extract<S2C, { t: 'fx' }>) {
     const item = m.item ?? '';
+    if ((m.kind === 'fire' || m.kind === 'tracer') && m.player !== undefined) this.players.get(m.player)?.model.fire();
     switch (m.kind) {
       case 'explode': {
         const def = projDef(item);
@@ -559,16 +629,37 @@ export class GameClient {
         audio.playExplosion(item, m.pos, Math.min(1.4, (m.radius ?? 5) / 6));
         break;
       }
-      case 'tracer': this.fx.tracer(m.pos, m.to ?? m.pos, item === 'light_turret' ? 0xff8060 : 0xfff0a0); if (m.player !== this.session.myId) audio.playWeapon(item, m.pos, 0.6); break;
+      case 'tracer': {
+        this.fx.tracer(m.pos, m.to ?? m.pos, item === 'light_turret' ? 0xff8060 : 0xfff0a0);
+        const owner = m.player ?? -1;
+        if (m.player !== this.session.myId || item.startsWith('veh_')) audio.fire(owner, item, m.pos, 0.6);
+        if (m.to) audio.impact(owner, m.to);
+        break;
+      }
       case 'lance': this.fx.beam(m.pos, m.to ?? m.pos, 0x9fe8ff, 0.15, 0.05); if (m.player !== this.session.myId) audio.play('lance', m.pos); break;
-      case 'fire': if (m.player !== this.session.myId) { audio.playWeapon(item, m.pos); this.fx.muzzle(m.pos, projDef(item)?.color ?? 0xffd890); } break;
+      case 'fire':
+        // Vehicle and turret shots are not predicted locally, so their sound comes from here for everyone.
+        if (m.player !== this.session.myId || item.startsWith('veh_')) audio.fire(m.player ?? -2, item, m.pos);
+        if (m.player !== this.session.myId) this.fx.muzzle(m.pos, projDef(item)?.color ?? 0xffd890);
+        break;
       case 'melee': audio.play('melee', m.pos); break;
       case 'repair': this.fx.beam(m.pos, m.to ?? m.pos, 0x60ff90, 0.12, 0.03); if (Math.random() < 0.3) audio.play('repair', m.pos, 0.5); break;
-      case 'deploy': audio.play('deploy', m.pos); break;
-      case 'station': audio.play('spawn', m.pos); break;
-      case 'jump': audio.play('jump', m.pos); break;
-      case 'strike_warn': this.strikes.push({ pos: m.pos, until: performance.now() / 1000 + 6, kind: item }); audio.play('strike_warn', m.pos, 1.2); break;
-      case 'strike': this.fx.explosion(m.pos, (m.radius ?? 10) * 0.8, 0xffe0a0); this.fx.beam({ ...m.pos, y: m.pos.y + 400 }, m.pos, 0xfff0c0, 0.8, (m.radius ?? 10) * 0.2); audio.play('explode', m.pos, 2); break;
+      case 'deploy': {
+        const key = /claymore/.test(item) ? 'claymore' : /^(motion_)?mine$/.test(item) ? 'mine' : item;
+        if (!audio.playKey(`deploy_${key}`, m.pos)) audio.play('deploy', m.pos);
+        break;
+      }
+      case 'station': if (!audio.playKey('inv_station', m.pos)) audio.play('spawn', m.pos); break;
+      case 'jump': if (!(item === 'thrust_pack' && audio.playKey('thrust', m.pos))) audio.play('jump', m.pos); break;
+      case 'strike_warn':
+        this.strikes.push({ pos: m.pos, until: performance.now() / 1000 + 6, kind: item });
+        if (!audio.playKey(`alarm_${item === 'orbital_strike' ? item : 'tactical_strike'}`, m.pos, 1.2)) audio.play('strike_warn', m.pos, 1.2);
+        break;
+      case 'strike':
+        this.fx.explosion(m.pos, (m.radius ?? 10) * 0.8, 0xffe0a0);
+        this.fx.beam({ ...m.pos, y: m.pos.y + 400 }, m.pos, 0xfff0c0, 0.8, (m.radius ?? 10) * 0.2);
+        if (!audio.playKey(`boom_${item}`, m.pos, 2)) audio.play('explode', m.pos, 2);
+        break;
     }
   }
 
@@ -580,7 +671,9 @@ export class GameClient {
     const out: { p: PlayerSnap; pos: Vec3; yaw: number; pitch: number }[] = [];
     const prev = new Map(br.a.snap.players.map((p) => [p.id, p]));
     for (const b of br.b.snap.players) {
-      const a = prev.get(b.id) ?? b;
+      let a = prev.get(b.id) ?? b;
+      // A respawn (or any teleport) must not be interpolated: the body would slide from the death spot through the terrain.
+      if (!(a.flags & PF.ALIVE) || ((a.flags ^ b.flags) & PF.IN_VEHICLE) || Math.hypot(b.pos.x - a.pos.x, b.pos.y - a.pos.y, b.pos.z - a.pos.z) > 40) a = b;
       const k = br.k;
       const pos = k <= 1
         ? { x: a.pos.x + (b.pos.x - a.pos.x) * k, y: a.pos.y + (b.pos.y - a.pos.y) * k, z: a.pos.z + (b.pos.z - a.pos.z) * k }
@@ -624,7 +717,7 @@ export class GameClient {
       v.model.root.position.set(rp.x, rp.y, rp.z);
       const flags = isMe ? (p.flags & ~(PF.JETTING | PF.SKIING | PF.ON_GROUND)) | (this.pred.state.jetting ? PF.JETTING : 0) | (this.pred.state.skiing ? PF.SKIING : 0) | (this.pred.state.onGround ? PF.ON_GROUND : 0) : p.flags;
       const speed = isMe ? Math.hypot(this.pred.state.vel.x, this.pred.state.vel.z) : Math.hypot(p.vel.x, p.vel.z);
-      v.model.update(dt, isMe ? this.input.yaw : yaw, isMe ? this.input.pitch : pitch, flags, speed, flagCarried ? flagCarried.team : null);
+      v.model.update(dt, isMe ? this.input.yaw : yaw, isMe ? this.input.pitch : pitch, flags, speed, flagCarried ? flagCarried.team : null, isMe ? this.pred.state.vel : p.vel);
       v.model.setWeapon(isMe ? (this.slot === 1 ? this.loadout.secondary : this.loadout.primary) : ITEM_IDS[p.item] ?? '');
       v.model.root.visible = !isMe || this.thirdPerson;
       if ((flags & PF.JETTING) && Math.random() < 0.7 * settings.particles) this.fx.jetPuff({ x: rp.x, y: rp.y + 0.9, z: rp.z }, isMe ? this.pred.state.vel : p.vel, teamColor(p.team));
@@ -678,7 +771,7 @@ export class GameClient {
         if (pr.owner === myId) {
           const age = (this.session.serverNow() - snap.tick / 60);
           const tt = Math.min(0.4, lead + Math.max(0, age));
-          pos = { x: pr.pos.x + pr.vel.x * tt, y: pr.pos.y + pr.vel.y * tt - 0.5 * GRAVITY * (def?.gravity ?? 0) * tt * tt, z: pr.pos.z + pr.vel.z * tt };
+          pos = { x: pr.pos.x + pr.vel.x * tt, y: pr.pos.y + pr.vel.y * tt - 0.5 * GRAVITY * this.world.gravityScale * (def?.gravity ?? 0) * tt * tt, z: pr.pos.z + pr.vel.z * tt };
         } else if (pb) {
           const a = pb.a.snap.projectiles.find((x) => x.id === pr.id), b = pb.b.snap.projectiles.find((x) => x.id === pr.id);
           if (a && b) pos = { x: a.pos.x + (b.pos.x - a.pos.x) * Math.min(1, pb.k), y: a.pos.y + (b.pos.y - a.pos.y) * Math.min(1, pb.k), z: a.pos.z + (b.pos.z - a.pos.z) * Math.min(1, pb.k) };
@@ -752,6 +845,15 @@ export class GameClient {
     if (this.viewModel.visible) {
       this.syncViewModel();
       spinViewModel(this.viewModel, this.session.latest?.self?.spin ?? 0, dt);
+      const self = this.session.latest?.self, fp = this.fp;
+      if (fp) {
+        const rl = self?.reload ?? 0;
+        if (rl > 0 && this.lastReload === 0) fp.player.play('reload', false, 0.1);
+        this.lastReload = rl;
+        const am = self?.ammo[this.slot];
+        fp.update(dt, am?.[0] ?? 0, am?.[1] ?? 0);
+      }
+      setViewModelStealth(this.viewModel, !!me && (me.flags & PF.STEALTH) !== 0, performance.now() / 1000);
     }
 
     // --- audio
@@ -764,6 +866,19 @@ export class GameClient {
     audio.setLoop('spin', alive && (this.session.latest?.self?.spin ?? 0) > 0.05 ? 0.12 : 0, 900 + (this.session.latest?.self?.spin ?? 0) * 1800);
     if (alive && this.pred.state.onGround && !this.wasOnGround && performance.now() - this.landSoundAt > 300) { audio.play('land', undefined, 0.5); this.landSoundAt = performance.now(); }
     this.wasOnGround = this.pred.state.onGround;
+    // Weapon draw and reload parts (original samples).
+    const wid = this.slot === 1 ? this.loadout.secondary : this.loadout.primary;
+    if (alive && !inVehicle) {
+      const rl = this.session.latest?.self?.reload ?? 0;
+      if (rl > 0 && this.reloadSnd === 0) audio.reload(wid, ITEMS[wid]?.reload ?? rl);
+      this.reloadSnd = rl;
+      if (wid !== this.drawnWeapon) { if (this.drawnWeapon) audio.retrieve(wid); this.drawnWeapon = wid; }
+    } else { this.reloadSnd = 0; this.drawnWeapon = ''; }
+    audio.tick((snap?.vehicles ?? []).map((v) => {
+      const type = VEHICLE_TYPES[v.type];
+      const p = this.vehViews.get(v.id)?.root.position ?? v.pos;
+      return { id: v.id, type, pos: { x: p.x, y: p.y, z: p.z }, speed: Math.hypot(v.vel.x, v.vel.y, v.vel.z), maxSpeed: VEHICLES[type]?.maxSpeed ?? 40, driven: v.driver !== 255 };
+    }));
 
     this.view.update(cam, dt, focus);
     this.fx.update(dt, this.r.height);
@@ -817,6 +932,8 @@ export class GameClient {
     if (this.showMarkers && snap) {
       const rel = (t: number) => (t === myTeam ? FRIEND : t <= 1 ? ENEMY : '#dddddd');
       for (const f of snap.flags) {
+        // The carrier never sees his own flag icon and name: they would sit on (and lag behind) his camera.
+        if (f.state === 1 && f.carrier === this.session.myId) continue;
         const pt = this.project({ ...f.pos, y: f.pos.y + 1.5 });
         const carrier = f.carrier !== 255 ? this.pinfo(f.carrier) : undefined;
         if (pt) markers.push({ ...pt, kind: 'flag', color: rel(f.team), icon: f.state === 1 ? 'hud_items_custom_generic_flag_carried_medium' : f.state === 2 ? 'hud_items_custom_generic_flag_dropped' : 'hud_items_custom_generic_flag_post', label: f.state === 1 ? (carrier?.name ?? 'Carried') : f.state === 2 ? 'DROPPED' : '', dist: Math.hypot(f.pos.x - cam.x, f.pos.y - cam.y, f.pos.z - cam.z) });
@@ -874,6 +991,7 @@ export class GameClient {
       gens: [0, 1].map((t) => { const g = snap?.assets.filter((a) => ASSET_TYPES[a.type] === 'generator' && a.team === t) ?? []; return g.length ? g.some((a) => !(a.flags & AF.DESTROYED)) : null; }),
       armor: CLASSES.find((c) => c.id === this.cls)?.armor ?? 'light',
       waiting: this.phase === PHASE.WARMUP,
+      spawnQueued: (this.spawnQueued &&= !this.pred.alive),
     };
     const net = settings.showNetStats ? [
       `transport  ${this.session.transport.kind}${this.fellBack ? ' (fallback)' : ''}`,
@@ -895,6 +1013,7 @@ export class GameClient {
 
   graphicsChanged() {
     this.r.configure();
+    this.view.applyGraphics();
   }
 
   dispose() {
@@ -916,10 +1035,14 @@ export class GameClient {
     this.overlayRoot.remove();
     this.vgs.el.remove();
     this.socialOff?.();
+    this.lockOff?.();
+    this.session.inputSeq = this.pred.seq;
     this.input.capture = null;
+    this.input.clickThrough = null;
     this.input.gameActive = false;
     this.input.unlock();
     for (const l of ['jet', 'ski', 'wind', 'spin'] as const) audio.setLoop(l, 0);
+    audio.stopGameplayLoops();
   }
 }
 

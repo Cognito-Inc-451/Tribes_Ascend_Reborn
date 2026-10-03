@@ -2,10 +2,12 @@ import type { ModeId } from '../data/modes.js';
 import { ByteReader, ByteWriter } from '../net/bytes.js';
 import type { OBB } from '../sim/collision.js';
 import { Heightfield } from '../sim/terrain.js';
-import type { EntityKind, MapData, MapEntity, MeshAsset, MeshInstance } from './spec.js';
+import type { EntityKind, MapBlocker, MapBoost, MapData, MapEntity, MapVolume, MeshAsset, MeshFx, MeshInstance } from './spec.js';
 import type { ThemeId } from './themes.js';
 
 const MAGIC = 0x4152_4d33; // "ARM3"
+/** Per-group fx byte (0 = none). */
+const FX_CODES: (MeshFx | undefined)[] = [undefined, 'lava', 'water', 'additive', 'translucent', 'modulate'];
 
 /** Compact binary form used to stream server-hosted (original) maps to clients. */
 export function encodeMapData(m: MapData): Uint8Array {
@@ -67,6 +69,50 @@ export function encodeMapData(m: MapData): Uint8Array {
   w.u32(splat ? splat.length : 0);
   if (splat) w.bytes(splat);
   w.str(m.env ? JSON.stringify(m.env) : '');
+  const vols = m.volumes ?? [];
+  w.u16(vols.length);
+  for (const v of vols) {
+    w.u8(v.kind === 'kill' ? 1 : 2).f32(v.dps).f32(v.min.x).f32(v.min.y).f32(v.min.z).f32(v.max.x).f32(v.max.y).f32(v.max.z);
+    w.u16(v.planes.length / 4);
+    for (const x of v.planes) w.f32(x);
+  }
+  // Per-group extras (normal maps, liquids) for meshes that have any.
+  const extras: [number, number, number, number][] = [];
+  (m.meshes ?? []).forEach((me, mi) => me.groups?.forEach((g, gi) => {
+    if ((g.ntex ?? -1) >= 0 || g.fx) extras.push([mi, gi, g.ntex ?? -1, g.fx ? FX_CODES.indexOf(g.fx) : 0]);
+  }));
+  w.u32(extras.length);
+  for (const [mi, gi, nt, fx] of extras) w.u32(mi).u16(gi).i32(nt).u8(fx);
+  const blockers = m.blockers ?? [];
+  w.u16(blockers.length);
+  for (const b of blockers) w.u32(b.instance).u8(b.team).u8(b.gate ?? 255);
+  const boosts = m.boosts ?? [];
+  w.u16(boosts.length);
+  for (const b of boosts) {
+    w.f32(b.min.x).f32(b.min.y).f32(b.min.z).f32(b.max.x).f32(b.max.y).f32(b.max.z);
+    w.u16(b.planes.length / 4);
+    for (const x of b.planes) w.f32(x);
+    w.f32(b.vel.x).f32(b.vel.y).f32(b.vel.z).u8(b.team).f32(b.scale ?? 0);
+    w.u8(b.cond ? 1 + ['x', 'y', 'z'].indexOf(b.cond.axis) + (b.cond.gt ? 4 : 0) : 0).f32(b.cond?.value ?? 0);
+  }
+  // Baked lighting: lightmap UVs per mesh, then lightmap atlas + rect + scale per instance.
+  const uv2 = (m.meshes ?? []).map((me, i) => [i, me.uv2] as const).filter(([, u]) => !!u);
+  w.u32(uv2.length);
+  for (const [i, u] of uv2) { w.u32(i).u32(u!.length); for (const x of u!) w.f32(x); }
+  const lms = (m.instances ?? []).map((it, i) => [i, it.lm] as const).filter(([, l]) => !!l);
+  w.u32(lms.length);
+  for (const [i, l] of lms) {
+    w.u32(i).i32(l!.tex);
+    for (const x of l!.st) w.f32(x);
+    for (const x of l!.scale) w.f32(x);
+  }
+  // Specular maps per material group, then normal/specular maps per terrain layer.
+  const spec: [number, number, number][] = [];
+  (m.meshes ?? []).forEach((me, mi) => me.groups?.forEach((g, gi) => { if ((g.stex ?? -1) >= 0) spec.push([mi, gi, g.stex!]); }));
+  w.u32(spec.length);
+  for (const [mi, gi, st] of spec) w.u32(mi).u16(gi).i32(st);
+  w.u8(layers.length);
+  for (const l of layers) w.i32(l.ntex ?? -1).i32(l.stex ?? -1);
   return w.finish();
 }
 
@@ -146,9 +192,84 @@ export function decodeMapData(data: Uint8Array): MapData {
   const envStr = r.str();
   let env: MapData['env'];
   try { env = envStr ? JSON.parse(envStr) : undefined; } catch { env = undefined; }
+  // Older blobs end here.
+  const volumes: MapVolume[] = [];
+  if (r.remaining >= 2) {
+    const nv = r.u16();
+    for (let i = 0; i < nv; i++) {
+      const kind = r.u8() === 1 ? 'kill' : 'pain', dps = r.f32();
+      const min = { x: r.f32(), y: r.f32(), z: r.f32() }, max = { x: r.f32(), y: r.f32(), z: r.f32() };
+      const planes = new Float32Array(r.u16() * 4);
+      for (let k = 0; k < planes.length; k++) planes[k] = r.f32();
+      volumes.push({ kind, dps, min, max, planes });
+    }
+  }
+  if (r.remaining >= 4) {
+    const n = r.u32();
+    for (let i = 0; i < n; i++) {
+      const mi = r.u32(), gi = r.u16(), nt = r.i32(), fx = r.u8();
+      const g = meshes[mi]?.groups?.[gi];
+      if (!g) continue;
+      if (nt >= 0) g.ntex = nt;
+      if (fx) g.fx = FX_CODES[fx] ?? undefined;
+    }
+  }
+  const blockers: MapBlocker[] = [];
+  if (r.remaining >= 2) {
+    const n = r.u16();
+    for (let i = 0; i < n; i++) { const instance = r.u32(), team = r.u8(), gate = r.u8(); blockers.push({ instance, team, gate: gate === 255 ? undefined : gate }); }
+  }
+  const boosts: MapBoost[] = [];
+  if (r.remaining >= 2) {
+    const n = r.u16();
+    for (let i = 0; i < n; i++) {
+      const min = { x: r.f32(), y: r.f32(), z: r.f32() }, max = { x: r.f32(), y: r.f32(), z: r.f32() };
+      const planes = new Float32Array(r.u16() * 4);
+      for (let k = 0; k < planes.length; k++) planes[k] = r.f32();
+      const vel = { x: r.f32(), y: r.f32(), z: r.f32() }, team = r.u8(), scale = r.f32(), cf = r.u8(), cv = r.f32();
+      const cond = cf ? { axis: (['x', 'y', 'z'] as const)[(cf & 3) - 1], gt: (cf & 4) !== 0, value: cv } : undefined;
+      boosts.push({ min, max, planes, vel, team, scale: scale > 0 ? scale : undefined, cond });
+    }
+  }
+  if (r.remaining >= 4) {
+    const n = r.u32();
+    for (let i = 0; i < n; i++) {
+      const mi = r.u32(), len = r.u32();
+      const u = new Float32Array(len);
+      for (let k = 0; k < len; k++) u[k] = r.f32();
+      if (meshes[mi]) meshes[mi].uv2 = u;
+    }
+  }
+  if (r.remaining >= 4) {
+    const n = r.u32();
+    for (let i = 0; i < n; i++) {
+      const ii = r.u32(), tex = r.i32();
+      const st: [number, number, number, number] = [r.f32(), r.f32(), r.f32(), r.f32()];
+      const scale: [number, number, number] = [r.f32(), r.f32(), r.f32()];
+      if (instances[ii]) instances[ii].lm = { tex, st, scale };
+    }
+  }
+  if (r.remaining >= 4) {
+    const n = r.u32();
+    for (let i = 0; i < n; i++) {
+      const mi = r.u32(), gi = r.u16(), st = r.i32();
+      const g = meshes[mi]?.groups?.[gi];
+      if (g) g.stex = st;
+    }
+  }
+  if (r.remaining >= 1) {
+    const n = r.u8();
+    for (let i = 0; i < n; i++) {
+      const nt = r.i32(), st = r.i32();
+      const l = terrainLayers[i];
+      if (l && nt >= 0) l.ntex = nt;
+      if (l && st >= 0) l.stex = st;
+    }
+  }
   return {
     id, name, theme, source, modes, terrain, boxes, entities, meshes, instances, killZ: killZ > -1e8 ? killZ : undefined,
     textures: nt ? textures : undefined, terrainLayers: nl ? terrainLayers : undefined, terrainSplat, env,
+    volumes: volumes.length ? volumes : undefined, boosts: boosts.length ? boosts : undefined, blockers: blockers.length ? blockers : undefined,
   };
 }
 

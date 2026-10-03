@@ -17,6 +17,8 @@ import { startWsServer } from './transport/ws.js';
 import { startWtServer, type WtHandle } from './transport/wt.js';
 
 const SNAPSHOT_EVERY = TICK_RATE / 30;
+/** Player slots bots always leave open for humans. */
+const BOT_FREE_SLOTS = 2;
 const ADMIN_HASH = process.env.ADMIN_PASSWORD ? createHash('sha256').update(process.env.ADMIN_PASSWORD).digest() : null;
 
 function sanitizeText(s: unknown, max: number): string {
@@ -132,7 +134,10 @@ export class GameServer {
       onMatchOver: () => this.onMatchOver(),
     });
     for (const p of previous) {
-      Object.assign(p, { alive: false, flag: null, vehicle: null, inputs: [], kills: 0, deaths: 0, assists: 0, caps: 0, returns: 0, score: 0, modeScore: 0, credits: 0, respawnAt: 0, determination: 0 });
+      Object.assign(p, { alive: false, flag: null, vehicle: null, inputs: [], kills: 0, deaths: 0, assists: 0, caps: 0, returns: 0, score: 0, modeScore: 0, credits: 0, respawnAt: 0, spawnQueued: false, determination: 0 });
+      // Timers are in match time, which restarts at 0 on the new map.
+      Object.assign(p, { lastHurt: -999, diedAt: 0, switchUntil: 0, beltNext: 0, packNext: 0, meleeNext: 0, packActive: false, invulnUntil: 0, lastFire: -99, spottedUntil: 0, rageUntil: 0, lastVgsReply: 0, history: [], chatTimes: [], vgsTimes: [] });
+      p.damagers.clear();
       if (!p.isBot) p.ready = false;
       this.match.addPlayer(p);
       if (p.brain) p.brain.chooseRole(this.match, p);
@@ -214,9 +219,9 @@ export class GameServer {
     if (humans) this.lastHuman = Date.now();
     const bots = [...this.match.players.values()].filter((p) => p.isBot);
     const fixed = this.cfg.options?.botsPerTeam;
-    // Bots fill the teams up to the target and leave one by one as humans join.
-    const target = (fixed !== undefined ? fixed * (MODES[this.cfg.mode].teams ? 2 : 1) : this.cfg.bots.fillTo) - humans;
-    const want = Math.max(0, Math.min(target, this.cfg.maxPlayers - humans));
+    // Bots keep their numbers and only give up slots as the server nears full, keeping room for joining humans.
+    const target = fixed !== undefined ? fixed * (MODES[this.cfg.mode].teams ? 2 : 1) : this.cfg.bots.fillTo;
+    const want = Math.max(0, Math.min(target, this.cfg.maxPlayers - humans - BOT_FREE_SLOTS));
     if (bots.length < want) this.addBot();
     else if (bots.length > want) {
       const counts = [0, 1].map((t) => [...this.match.players.values()].filter((p) => p.team === t).length);
@@ -346,13 +351,16 @@ export class GameServer {
         const team = Number(msg.team);
         if (team === 255) m.setTeam(p, 255);
         else if (team === 0 || team === 1) m.setTeam(p, team);
-        else m.setTeam(p, m.autoTeam());
+        else m.setTeam(p, m.autoTeam(p));
+        // Picking a side from the team screen deploys as soon as the respawn delay allows.
+        if (msg.spawn && !p.alive && !p.spectator) p.spawnQueued = true;
         this.broadcastPlayers();
         break;
       }
       case 'class':
         if (typeof msg.cls === 'string') m.setClass(p, msg.cls, typeof msg.loadout === 'object' && msg.loadout ? msg.loadout : {});
         if (p.alive && p.pending) this.send(p, { t: 'toast', text: 'Loadout will apply at an inventory station or on respawn' });
+        if (msg.spawn && !p.alive && !p.spectator) p.spawnQueued = true;
         break;
       case 'chat': {
         const text = sanitizeText(msg.text, 160);

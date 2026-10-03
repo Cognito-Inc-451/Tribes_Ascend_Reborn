@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
 import { UU_PER_METER } from '@ar/shared';
-import { Resolver, resolveDiffuse, type ObjRef } from './material.js';
+import { readAnimSet, type AnimSetData } from './anim.js';
+import { Resolver, resolveDiffuse, resolveNormal, type ObjRef } from './material.js';
 import { extractSkeletalMesh, type SkelMeshData } from './skel.js';
 import { UPackage } from './upk.js';
 
@@ -50,6 +51,52 @@ const MODELS: Record<string, string> = {
   wep_mortar: 'WEP_MortarLauncher_3p.Models.SKL_WEP_MortarLauncher_3p', wep_mirv: 'WEP_MortarLauncher_3p.ALT_Mirv.SKL_WEP_Mirv_3p',
   wep_lmg: 'WEP_LMG_3p.Models.SKL_WEP_LMG_3p', wep_chaingun: 'WEP_Chaingun_3p.Models.SKL_WEP_Chaingun_3p',
   wep_rocket_launcher: 'WEP_RocketLauncher_3p.Models.SKL_WEP_RocketLauncher_3p', wep_throwing_knives: 'WEP_ThrowingKnives_3p.Models.SKL_WEP_ThrowingKnives_3p',
+  // First person: arms per armour/team and the 1P weapon meshes (both skinned to the same 1P skeleton and animation).
+  hands_light_0: 'PC_BloodEagle_Light.Models.SKL_Hands', hands_light_1: 'PC_DiamondSword_Light.Models.SKL_Hands',
+  hands_medium_0: 'PC_BloodEagle_Medium.Models.SKL_Hands', hands_medium_1: 'PC_DiamondSword_Medium.Models.SKL_Hands',
+  hands_heavy_0: 'PC_BloodEagle_Heavy.Models.SKL_Hands', hands_heavy_1: 'PC_DiamondSword_Heavy.Models.SKL_Hands',
+  wep_light_spinfusor_1p: 'WEP_LightSpinfusor_1p.Models.SKL_WEP_LightSpinFusor_1p', wep_spinfusor_1p: 'WEP_Spinfusor_1p.Models.SKL_WEP_Spinfusor_1p',
+  wep_heavy_spinfusor_1p: 'WEP_HeavySpinfusor_1p.Models.SKL_WEP_HeavySpinFusor_1p', wep_twinfusor_1p: 'WEP_Twinfusor_1p.Medium.SKL_WEP_TwinFusor_1p',
+  wep_bolt_launcher_1p: 'WEP_BoltLauncher_1p.Models.SKL_WEP_BoltLauncher_1p', wep_heavy_bolt_launcher_1p: 'WEP_HeavyBoltLauncher_1p.Models.SKL_WEP_HeavyBoltLauncher_1p',
+  wep_shotgun_1p: 'WEP_Shotgun_1p.Models.SKL_WEP_Shotgun_1p', wep_auto_shotgun_1p: 'WEP_Shotgun_1p.ALT_AUTO.SKL_WEP_AutoShotgun_1p',
+  wep_sawed_off_1p: 'WEP_Shotgun_1p.ALT_SAWED.SKL_WEP_ShotgunSawedOff_1p', wep_assault_rifle_1p: 'WEP_AssaultRifle_1p.Models.SKL_WEP_AssaultRifle_1p',
+  wep_lar_1p: 'WEP_AssaultRifle_1p.ALT_LAR.SKL_WEP_LAR_1p', wep_shocklance_1p: 'WEP_ShockLance_1p.Models.SKL_WEP_ShockLance_1p',
+  wep_sniper_1p: 'WEP_SniperRifle_1p.Models.SKL_WEP_SniperRifle_1p', wep_phase_rifle_1p: 'WEP_EnergySniperRifle_1p.Models.SKL_WEP_EnergySniperRifle_1p',
+  wep_sap20_1p: 'WEP_EnergySniperRifle_1p.ALT_SAP20.SKL_WEP_SAP20_1p', wep_nova_blaster_1p: 'WEP_NovaColt_1p.Blaster.SKL_WEP_Blaster_1p',
+  wep_nova_colt_1p: 'WEP_NovaColt_1p.Models.SKL_WEP_NovaColt_1p', wep_falcon_1p: 'WEP_Pistol02_1p.ALT_Falcon.SKL_WEP_Falcon_1p',
+  wep_sn7_1p: 'WEP_Pistol01_1p.ALT_SN7.SKL_WEP_SN7_1p', wep_pistol_1p: 'WEP_Pistol01_1p.Models.SKL_WEP_Pistol01_1p',
+  wep_rhino_smg_1p: 'wep_smg_1p.ALT_SIL290.SKL_WEP_SIL290_1p', wep_tcn4_1p: 'wep_smg_1p.ALT_TCN4.SKL_WEP_TCN4_1p',
+  wep_nj4_1p: 'WEP_NJ4_1p.Models.SKL_WEP_NJ4_1p', wep_nj5_1p: 'WEP_NJ4_1p.ALT_NJ5.SKL_WEP_NJ5_1p',
+  wep_jackal_1p: 'WEP_ArxBuster_1p.ALT_REMOTE.SKL_WEP_ArxBusterRemote_1p', wep_arx_buster_1p: 'WEP_ArxBuster_1p.Models.SKL_WEP_ArxBuster_1p',
+  wep_thumper_1p: 'WEP_Thumper_1p.Models.SKL_WEP_Thumper_1p', wep_thumper_d_1p: 'WEP_Thumper_1p.ALT_D.SKL_WEP_ThumperD_1p',
+  wep_repair_tool_1p: 'WEP_RepairPack_1p.Models.SKL_WEP_RepairTool_1p', wep_grenade_launcher_1p: 'WEP_GrenadeLauncher_1p.Models.SKL_WEP_GrenadeLauncher_1p',
+  wep_plasma_gun_1p: 'WEP_PlasmaGun_1p.Models.SKL_WEP_PlasmaGun_1p', wep_plasma_cannon_1p: 'WEP_PlasmaCannon_1p.Models.SKL_WEP_PlasmaCannon_1p',
+  wep_mortar_1p: 'WEP_MortarLauncher_1p.Models.SKL_WEP_MortarLauncher_1p', wep_mirv_1p: 'WEP_MortarLauncher_1p.ALT_Mirv.SKL_WEP_Mirv_1p',
+  wep_lmg_1p: 'WEP_LMG_1p.Models.SKL_WEP_LMG_1p', wep_chaingun_1p: 'WEP_Chaingun_1p.Models.SKL_WEP_Chaingun_1p',
+  wep_rocket_launcher_1p: 'WEP_RocketLauncher_1p.Models.SKL_WEP_RocketLauncher_1p', wep_throwing_knives_1p: 'WEP_ThrowingKnives_1p.Models.SKL_WEP_ThrowingKnives_1p',
+};
+
+/** First-person animation sets (arms + weapon bones), keyed like the 1P weapon models. */
+export const ANIMS_1P: Record<string, string> = {
+  wep_light_spinfusor_1p: 'WEP_LightSpinfusor_1p.Anims.AS_WEP_LightSpinfusor_1p', wep_spinfusor_1p: 'WEP_Spinfusor_1p.AnimSets.AS_WEP_Spinfusor_1p',
+  wep_heavy_spinfusor_1p: 'WEP_HeavySpinfusor_1p.Anims.AS_WEP_HeavySpinfusor_1p', wep_twinfusor_1p: 'WEP_Twinfusor_1p.Anim.AS_WEP_Twinfusor_Medium',
+  wep_bolt_launcher_1p: 'WEP_BoltLauncher_1p.Anims.AS_WEP_BoltLauncher_1p', wep_heavy_bolt_launcher_1p: 'WEP_HeavyBoltLauncher_1p.Anims.AS_WEP_HeavyBoltLauncher_1p',
+  wep_shotgun_1p: 'WEP_Shotgun_1p.AnimSets.ANIM_WEP_Shotgun_1p', wep_auto_shotgun_1p: 'WEP_Shotgun_1p.AnimSets.AS_WEP_AutoShotgun_1p',
+  wep_sawed_off_1p: 'WEP_Shotgun_1p.ALT_SAWED.AS_WEP_ShotgunSawedOff_1p1', wep_assault_rifle_1p: 'WEP_AssaultRifle_1p.Anims.ANIM_WEP_AssaultRifle_1p',
+  wep_lar_1p: 'WEP_AssaultRifle_1p.ALT_LAR.AS_WEP_AssaultRifle_LAR_1p', wep_shocklance_1p: 'WEP_ShockLance_1p.AnimSets.ANIM_Wep_ShockLance_1p',
+  wep_sniper_1p: 'WEP_SniperRifle_1p.AnimSets.ANIM_WEP_SniperRifle_1p', wep_phase_rifle_1p: 'WEP_EnergySniperRifle_1p.Anims.AS_EnergySniperRifle',
+  wep_sap20_1p: 'WEP_EnergySniperRifle_1p.Anims.AS_SAP20', wep_nova_colt_1p: 'WEP_NovaColt_1p.Anims.AS_WEP_NovaColt_1p',
+  wep_nova_blaster_1p: 'WEP_NovaColt_1p.Anims.AS_WEP_NovaColt_1p', wep_falcon_1p: 'WEP_Pistol02_1p.Anims.AS_WEP_Pistol02_Falcon_1p',
+  wep_sn7_1p: 'WEP_Pistol01_1p.Anims.ANIM_WEP_Pistol01_1p', wep_pistol_1p: 'WEP_Pistol01_1p.Anims.ANIM_WEP_Pistol01_1p',
+  wep_rhino_smg_1p: 'wep_smg_1p.Anims.AS_WEP_SMG_1pSIL290', wep_tcn4_1p: 'wep_smg_1p.Anims.AS_WEP_SMG_TCN4_1p',
+  wep_nj4_1p: 'WEP_NJ4_1p.Anims.AS_WEP_NJ4_1p', wep_nj5_1p: 'WEP_NJ4_1p.Anims.AS_WEP_NJ5_1p',
+  wep_jackal_1p: 'WEP_ArxBuster_1p.Anims.AS_WEP_ArxBuster_1p_Remote', wep_arx_buster_1p: 'WEP_ArxBuster_1p.Anims.AS_WEP_ArxBuster_1p',
+  wep_thumper_1p: 'WEP_Thumper_1p.Anims.AS_WEP_Thumper_1p', wep_thumper_d_1p: 'WEP_Thumper_1p.Anims.AS_WEP_Thumper_1p',
+  wep_repair_tool_1p: 'WEP_RepairPack_1p.Anims.AS_WEP_RepairPack_1p', wep_grenade_launcher_1p: 'WEP_GrenadeLauncher_1p.AnimSets.ANIM_WEP_GrenadeLauncher_1p',
+  wep_plasma_gun_1p: 'WEP_PlasmaGun_1p.Anim.AS_WEP_PlasmaGun_1p', wep_plasma_cannon_1p: 'WEP_PlasmaCannon_1p.Anims.AS_PlasmaCannon_1p',
+  wep_mortar_1p: 'WEP_MortarLauncher_1p.Anims.AS_WEP_MortarLauncher_1p', wep_mirv_1p: 'WEP_MortarLauncher_1p.Anims.AS_WEP_MirvLauncher_1p',
+  wep_lmg_1p: 'WEP_LMG_1p.Anims.AS_WEP_LMG_1p', wep_chaingun_1p: 'WEP_Chaingun_1p.Anims.AS_WEP_ChainGun_1P',
+  wep_rocket_launcher_1p: 'WEP_RocketLauncher_1p.Anims.AS_WEP_RocketLauncher_1p', wep_throwing_knives_1p: 'WEP_ThrowingKnives_1p.Anims.AS_WEP_ThrowingKnives_1p',
 };
 
 const S = 1 / UU_PER_METER;
@@ -62,7 +109,7 @@ const S = 1 / UU_PER_METER;
 function encodeModel(m: SkelMeshData, tex: (string | null)[]): Buffer {
   const enc = new TextEncoder();
   const names = m.bones.map((b) => enc.encode(b.name.slice(0, 60)));
-  const secNames = m.sections.map((s) => enc.encode((tex[s.material] ?? '').slice(0, 120)));
+  const secNames = m.sections.map((s) => enc.encode((tex[s.material] ?? '').slice(0, 250)));
   const n = m.positions.length / 3;
   const size = 16 + names.reduce((a, b) => a + 1 + b.length + 2 + 28, 0) + n * (12 + 8 + 8 + 4) + m.indices.length * 4 + secNames.reduce((a, b) => a + 9 + b.length, 0);
   const buf = Buffer.alloc(size);
@@ -94,8 +141,8 @@ function encodeModel(m: SkelMeshData, tex: (string | null)[]): Buffer {
 
 function skeletalIndex(cooked: string, cacheFile: string): Map<string, string> {
   const out = existsSync(cacheFile) ? new Map(Object.entries(JSON.parse(readFileSync(cacheFile, 'utf8')) as Record<string, string>)) : new Map<string, string>();
-  // Rescan only when the model table asks for meshes the cache does not know yet.
-  const wanted = new Set(Object.values(MODELS).filter((p) => !out.has(p)));
+  // Rescan only when the model/animation tables ask for objects the cache does not know yet.
+  const wanted = new Set([...Object.values(MODELS), ...Object.values(ANIMS_1P)].filter((p) => !out.has(p)));
   if (!wanted.size) return out;
   const walk = (d: string) => {
     for (const f of readdirSync(d)) {
@@ -105,7 +152,8 @@ function skeletalIndex(cooked: string, cacheFile: string): Map<string, string> {
       try {
         const pkg = new UPackage(p);
         for (let i = 0; i < pkg.exports.length; i++) {
-          if (pkg.className(pkg.exports[i]) !== 'SkeletalMesh') continue;
+          const cls = pkg.className(pkg.exports[i]);
+          if (cls !== 'SkeletalMesh' && cls !== 'AnimSet') continue;
           const path = pkg.refPath(i + 1);
           if (wanted.has(path) && !out.has(path)) out.set(path, p);
         }
@@ -117,9 +165,9 @@ function skeletalIndex(cooked: string, cacheFile: string): Map<string, string> {
   return out;
 }
 
-/** Exports characters, weapons, vehicles, stations, flags and deployables to outDir/models (+ manifest.json). */
+/** Exports characters, weapons, vehicles, stations, flags and deployables to outDir/models (+ manifest.json). Returns 1P anim loaders. */
 export function exportModels(cooked: string, outDir: string, resolver: Resolver, load: (path: string) => UPackage,
-  onTexture: ((t: ObjRef) => string | null) | undefined, log: (s: string) => void) {
+  onTexture: ((t: ObjRef) => string | null) | undefined, log: (s: string) => void): Record<string, () => AnimSetData | null> {
   const dir = join(outDir, 'models');
   mkdirSync(dir, { recursive: true });
   const index = skeletalIndex(cooked, join(dir, '.skeletal-index.json'));
@@ -132,10 +180,13 @@ export function exportModels(cooked: string, outDir: string, resolver: Resolver,
     const i = pkg.exports.findIndex((_, k) => pkg.refPath(k + 1) === path);
     try {
       const m = extractSkeletalMesh(pkg, pkg.exports[i]);
+      // Section texture field: "diffuse|normal" (either may be empty).
       const tex = m.materials.map((ref) => {
         const mat = resolver.get(pkg, ref);
-        const t = mat ? resolveDiffuse(resolver, mat) : null;
-        return t && onTexture ? onTexture(t) : null;
+        if (!mat || !onTexture) return null;
+        const d = resolveDiffuse(resolver, mat), n = resolveNormal(resolver, mat);
+        const dn = d ? onTexture(d) : null, nn = n ? onTexture(n) : null;
+        return dn || nn ? `${dn ?? ''}${nn ? `|${nn}` : ''}` : null;
       });
       writeFileSync(join(dir, `${key}.amdl`), encodeModel(m, tex));
       manifest[key] = { file: `${key}.amdl`, bones: m.bones.length, verts: m.positions.length / 3 };
@@ -146,4 +197,15 @@ export function exportModels(cooked: string, outDir: string, resolver: Resolver,
   }
   writeFileSync(join(dir, 'manifest.json'), JSON.stringify({ models: manifest }, null, 1));
   log(`models: ${Object.keys(manifest).length} exported${failed ? `, ${failed} missing` : ''}`);
+  const anims: Record<string, () => AnimSetData | null> = {};
+  for (const [key, path] of Object.entries(ANIMS_1P)) {
+    anims[key] = () => {
+      const file = index.get(path);
+      if (!file) return null;
+      const pkg = load(file);
+      const i = pkg.exports.findIndex((_, k) => pkg.refPath(k + 1) === path);
+      return i >= 0 ? readAnimSet(pkg, i) : null;
+    };
+  }
+  return anims;
 }

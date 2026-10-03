@@ -57,9 +57,9 @@ export function forceFieldMaterial(color: number, instanced = false, strength = 
         float hex = hexEdge(uv + vec2(0.0, uTime * 0.15));
         float band = 0.5 + 0.5 * sin(vWorld.y * 3.0 - uTime * 2.2 + sin(vWorld.x * 0.7 + uTime) * 0.8);
         float flicker = 0.92 + 0.08 * sin(uTime * 17.0 + vWorld.x * 3.1);
-        float a = (0.07 + fres * 0.55 + hex * 0.16 + band * 0.06) * flicker * uStrength;
+        float a = (0.025 + fres * 0.45 + hex * 0.09 + band * 0.035) * flicker * uStrength;
         vec3 col = uColor * vTint;
-        gl_FragColor = vec4(col * a * 1.6, a);
+        gl_FragColor = vec4(col * a * 1.25, a);
         #ifdef USE_FOG
           #ifdef FOG_EXP2
             float fogFactor = 1.0 - exp(-fogDensity * fogDensity * vFogDepth * vFogDepth);

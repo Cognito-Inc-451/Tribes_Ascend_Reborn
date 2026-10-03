@@ -12,8 +12,12 @@ const SFX_ALIAS: Record<string, string> = { blinksfusor: 'light_spinfusor', lr_r
 
 /** Synth sound -> imported original sample key. */
 const SAMPLE_FOR: Partial<Record<SoundName, string>> = {
-  explode: 'explode', hit: 'hit', blueplate: 'blueplate', melee: 'melee', click: 'click', denied: 'denied', land: 'step', gen_down: 'gen_explode',
+  explode: 'explode', hit: 'hit', blueplate: 'blueplate', melee: 'melee', click: 'click', denied: 'denied', land: 'step', gen_down: 'gen_powerdown',
+  kill: 'kill_confirm', flag_drop: 'flag_drop',
 };
+
+interface FireLoop { item: string; src: AudioBufferSourceNode | null; gain: GainNode; panner: PannerNode | null; last: number; hold: number; vol: number }
+interface Engine { type: string; srcs: AudioBufferSourceNode[]; idle: GainNode; fast: GainNode; panner: PannerNode }
 
 /** Procedural WebAudio sound engine: all effects are synthesised (no game assets). */
 export class AudioEngine {
@@ -34,6 +38,171 @@ export class AudioEngine {
   /** Imported original sound effects: key -> number of variants. */
   private sfx: Record<string, number> = {};
   private vgsBy = new Map<number, AudioBufferSourceNode>();
+  private fireLoops = new Map<number, FireLoop>();
+  private lastShot = new Map<number, { item: string; at: number }>();
+  private lastImpact = new Map<number, number>();
+  private engines = new Map<number, Engine>();
+
+  /** Whether an original sample was imported for `key`. */
+  has(key: string): boolean { return !!this.sfx[key]; }
+
+  /** Plays an original sample by key (random variant); false when there is none. */
+  playKey(key: string, pos?: Vec3, vol = 1): boolean { return this.playSample(key, pos, vol); }
+
+  /** Plays variant `n` (1-based) of a sample after `delay` seconds. */
+  private playVariant(key: string, n: number, delay: number, vol = 1) {
+    if (!this.ctx || !this.sfx[key]) return;
+    const o = this.out(undefined, vol);
+    if (!o) return;
+    void this.loadVoice(`sfx/${key}_${n}`).then((buf) => {
+      if (!buf || !this.ctx) return;
+      const src = this.ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(o);
+      src.start(this.ctx.currentTime + delay);
+    });
+  }
+
+  /** The weapon's original reload parts (mag out, mag in, ...) spread over the reload. */
+  reload(item: string, seconds: number) {
+    const n = this.sfx[`reload_${item}`] ?? 0;
+    for (let k = 0; k < n; k++) this.playVariant(`reload_${item}`, k + 1, (k / n) * Math.max(0.3, seconds) * 0.85, 0.7);
+  }
+
+  /** Weapon draw sound. */
+  retrieve(item: string) { this.playSample(`retrieve_${item}`, undefined, 0.6); }
+
+  private panner(pos: Vec3): PannerNode {
+    const p = this.ctx!.createPanner();
+    p.panningModel = 'equalpower';
+    p.distanceModel = 'inverse';
+    p.refDistance = 12;
+    p.rolloffFactor = 1.1;
+    p.positionX.value = pos.x; p.positionY.value = pos.y; p.positionZ.value = pos.z;
+    return p;
+  }
+
+  private far(pos: Vec3 | undefined, d: number): boolean {
+    return !!pos && Math.hypot(pos.x - this.listenerPos.x, pos.y - this.listenerPos.y, pos.z - this.listenerPos.z) > d;
+  }
+
+  /**
+   * A shot by `owner` (player id, or a negative id for turrets). Automatic weapons with an original fire loop play
+   * TA's attack transient, hold the loop while shots keep coming and end with the tail; others play one sample per
+   * shot (shotgun pellets and duplicate tracers of the same shot are merged).
+   */
+  fire(owner: number, item: string, pos?: Vec3, vol = 1) {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const prev = this.lastShot.get(owner);
+    if (prev && prev.item === item && now - prev.at < 0.03) return;
+    this.lastShot.set(owner, { item, at: now });
+    const key = this.sfx[`fireloop_${item}`] ? item : SFX_ALIAS[item] && this.sfx[`fireloop_${SFX_ALIAS[item]}`] ? SFX_ALIAS[item] : null;
+    if (!key) { this.playWeapon(item, pos, vol); return; }
+    let l = this.fireLoops.get(owner);
+    if (l && l.item !== key) { this.endFireLoop(owner); l = undefined; }
+    if (!l) {
+      if (this.far(pos, 700)) return;
+      const gain = this.ctx.createGain();
+      gain.gain.value = vol;
+      const panner = pos ? this.panner(pos) : null;
+      if (panner) gain.connect(panner).connect(this.fx); else gain.connect(this.fx);
+      // Network shots arrive in bursts, so remote loops wait a little longer before ending.
+      const entry: FireLoop = { item: key, src: null, gain, panner, last: now, hold: pos ? 0.3 : 0.2, vol };
+      this.fireLoops.set(owner, entry);
+      this.playSample(`fire_${key}`, pos, vol);
+      void this.sample(`fireloop_${key}`).then((buf) => {
+        if (!buf || !this.ctx || this.fireLoops.get(owner) !== entry) return;
+        const src = this.ctx.createBufferSource();
+        src.buffer = buf;
+        src.loop = true;
+        src.connect(gain);
+        src.start();
+        entry.src = src;
+      });
+      l = entry;
+    }
+    l.last = now;
+    if (pos && l.panner) {
+      l.panner.positionX.setValueAtTime(pos.x, now); l.panner.positionY.setValueAtTime(pos.y, now); l.panner.positionZ.setValueAtTime(pos.z, now);
+    }
+  }
+
+  private endFireLoop(owner: number) {
+    const l = this.fireLoops.get(owner);
+    if (!l || !this.ctx) return;
+    this.fireLoops.delete(owner);
+    const t = this.ctx.currentTime;
+    l.gain.gain.setTargetAtTime(0, t, 0.025);
+    try { l.src?.stop(t + 0.15); } catch { /* not started */ }
+    setTimeout(() => l.gain.disconnect(), 400);
+    const pos = l.panner ? { x: l.panner.positionX.value, y: l.panner.positionY.value, z: l.panner.positionZ.value } : undefined;
+    this.playSample(`firetail_${l.item}`, pos, l.vol);
+  }
+
+  /** Bullet impact where a hitscan shot ended (once per shot). */
+  impact(owner: number, pos: Vec3) {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    if (now - (this.lastImpact.get(owner) ?? -1) < 0.06) return;
+    this.lastImpact.set(owner, now);
+    this.playSample('impact', pos, 0.35);
+  }
+
+  /**
+   * Per-frame upkeep: ends fire loops whose owner stopped shooting, and runs each vehicle's engine (idle and fast
+   * loops crossfaded by speed; silent when nobody drives it).
+   */
+  tick(vehicles: { id: number; type: string; pos: Vec3; speed: number; maxSpeed: number; driven: boolean }[]) {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    for (const [owner, l] of this.fireLoops) if (now - l.last > l.hold) this.endFireLoop(owner);
+    const seen = new Set<number>();
+    for (const v of vehicles) {
+      if (!this.sfx[`veh_${v.type}_idle`] || this.far(v.pos, 450)) continue;
+      seen.add(v.id);
+      let e = this.engines.get(v.id);
+      if (!e) {
+        const panner = this.panner(v.pos);
+        const idle = this.ctx.createGain(), fast = this.ctx.createGain();
+        idle.gain.value = 0; fast.gain.value = 0;
+        idle.connect(panner); fast.connect(panner);
+        panner.connect(this.fx);
+        const eng: Engine = { type: v.type, srcs: [], idle, fast, panner };
+        e = eng;
+        this.engines.set(v.id, eng);
+        for (const [key, g] of [[`veh_${v.type}_idle`, idle], [`veh_${v.type}_fast`, fast]] as const) {
+          void this.sample(key).then((buf) => {
+            if (!buf || !this.ctx || this.engines.get(v.id) !== eng) return;
+            const src = this.ctx.createBufferSource();
+            src.buffer = buf;
+            src.loop = true;
+            src.connect(g);
+            src.start(0, Math.random() * buf.duration);
+            eng.srcs.push(src);
+          });
+        }
+        if (v.driven) this.playSample(`veh_${v.type}_start`, v.pos, 0.7);
+      }
+      const k = Math.min(1, v.speed / Math.max(1, v.maxSpeed));
+      const on = v.driven ? 1 : 0;
+      e.idle.gain.setTargetAtTime(on * (1 - k * 0.7) * 0.45, now, 0.15);
+      e.fast.gain.setTargetAtTime(on * k * 0.6, now, 0.15);
+      e.panner.positionX.setValueAtTime(v.pos.x, now); e.panner.positionY.setValueAtTime(v.pos.y, now); e.panner.positionZ.setValueAtTime(v.pos.z, now);
+    }
+    for (const [id, e] of this.engines) {
+      if (seen.has(id)) continue;
+      this.engines.delete(id);
+      for (const s of e.srcs) { try { s.stop(); } catch { /* ended */ } }
+      e.panner.disconnect();
+    }
+  }
+
+  /** Silences every loop owned by gameplay (fire loops, engines), e.g. when leaving a match. */
+  stopGameplayLoops() {
+    for (const owner of [...this.fireLoops.keys()]) this.endFireLoop(owner);
+    this.tick([]);
+  }
 
   private sample(key: string): Promise<AudioBuffer | null> {
     const n = this.sfx[key] ?? 0;
@@ -109,6 +278,9 @@ export class AudioEngine {
     void tr.el.play().catch(() => { /* autoplay blocked until a user gesture */ });
     this.track = { key, ...tr };
   }
+
+  /** Whether an original music track / stinger was imported. */
+  hasMusic(key: string): boolean { return !!this.musicKeys?.has(key); }
 
   /** One-shot musical stinger; ducks the current loop while it plays. */
   sting(key: string) {

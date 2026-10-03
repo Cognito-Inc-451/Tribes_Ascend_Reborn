@@ -1,11 +1,10 @@
 import * as THREE from 'three';
-import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
-import { OutputPass } from 'three/examples/jsm/postprocessing/OutputPass.js';
-import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
-import { settings } from '../settings.js';
+import { settings, type ColorGrade } from '../settings.js';
+import { installHeightFog } from './fog.js';
+import { PostPipeline } from './post.js';
+
+installHeightFog();
 
 const envCache = new WeakMap<THREE.WebGLRenderer, THREE.Texture>();
 /** Neutral prefiltered environment: gives PBR materials ambient specular/diffuse so unlit sides are not black. */
@@ -20,52 +19,40 @@ export function studioEnvironment(r: THREE.WebGLRenderer): THREE.Texture {
   return t;
 }
 
-/** Replaces NaN/Inf pixels (they turn into growing black blocks in the bloom mip chain) and clamps fireflies. */
-const SanitizeShader = {
-  uniforms: { tDiffuse: { value: null } },
-  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-  fragmentShader: `uniform sampler2D tDiffuse; varying vec2 vUv;
-    void main(){ vec4 c = texture2D(tDiffuse, vUv);
-      if (any(isnan(c)) || any(isinf(c))) c = vec4(0.0, 0.0, 0.0, 1.0);
-      gl_FragColor = vec4(clamp(c.rgb, 0.0, 24.0), 1.0); }`,
+/** Lift / gamma / gain looks applied in display space after tone mapping. */
+const GRADES: Record<ColorGrade, { lift: [number, number, number]; gamma: [number, number, number]; gain: [number, number, number]; vibrance?: number }> = {
+  neutral: { lift: [0, 0, 0], gamma: [1, 1, 1], gain: [1, 1, 1] },
+  // Slightly cool shadows, warm highlights: close to TA's own colour treatment.
+  ascend: { lift: [0, 0.004, 0.014], gamma: [1, 1, 1], gain: [1.03, 1.0, 0.97] },
+  cinematic: { lift: [0, 0.016, 0.03], gamma: [1.0, 1.0, 0.97], gain: [1.07, 0.99, 0.9] },
+  vivid: { lift: [0, 0, 0], gamma: [1.02, 1.02, 1.02], gain: [1.03, 1.03, 1.03], vibrance: 0.3 },
+  bleach: { lift: [0.01, 0.01, 0.01], gamma: [1.08, 1.08, 1.08], gain: [1.04, 1.04, 1.04], vibrance: -0.35 },
 };
 
-/** Lightweight display-space grade: contrast, saturation, vignette and an optional sharpen ("full"). */
-const GradeShader = {
-  uniforms: { tDiffuse: { value: null }, uTexel: { value: new THREE.Vector2(1, 1) }, uSharpen: { value: 0 }, uVignette: { value: 0.28 }, uContrast: { value: 1.06 }, uSaturation: { value: 1.08 } },
-  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-  fragmentShader: `uniform sampler2D tDiffuse; uniform vec2 uTexel; uniform float uSharpen, uVignette, uContrast, uSaturation; varying vec2 vUv;
-    void main(){ vec3 c = texture2D(tDiffuse, vUv).rgb;
-      if (uSharpen > 0.0) {
-        vec3 n = texture2D(tDiffuse, vUv + vec2(uTexel.x, 0.0)).rgb + texture2D(tDiffuse, vUv - vec2(uTexel.x, 0.0)).rgb
-          + texture2D(tDiffuse, vUv + vec2(0.0, uTexel.y)).rgb + texture2D(tDiffuse, vUv - vec2(0.0, uTexel.y)).rgb;
-        c = c + (c - n * 0.25) * uSharpen;
-      }
-      float l = dot(c, vec3(0.299, 0.587, 0.114));
-      c = mix(vec3(l), c, uSaturation);
-      c = (c - 0.5) * uContrast + 0.5;
-      vec2 d = vUv - 0.5;
-      c *= 1.0 - uVignette * smoothstep(0.35, 0.85, length(d * vec2(1.0, 0.8)) * 1.25);
-      gl_FragColor = vec4(clamp(c, 0.0, 1.0), 1.0); }`,
+const TONE: Record<typeof settings.toneMapping, THREE.ToneMapping> = {
+  aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping, neutral: THREE.NeutralToneMapping, cineon: THREE.CineonToneMapping,
 };
+
+/** Shadow map size per quality step. */
+export const SHADOW_RES: Record<typeof settings.shadowQuality, number> = { off: 0, low: 1024, medium: 2048, high: 2048, ultra: 4096 };
 
 export class Renderer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
   readonly camera: THREE.PerspectiveCamera;
-  private composer: EffectComposer | null = null;
-  private bloom: UnrealBloomPass | null = null;
-  private grade: ShaderPass | null = null;
+  private post: PostPipeline | null = null;
+  private lastFrame = performance.now();
   width = 1;
   height = 1;
 
   constructor(private container: HTMLElement) {
-    this.renderer = new THREE.WebGLRenderer({ antialias: settings.antialias && !settings.bloom, powerPreference: 'high-performance', stencil: false });
+    // MSAA happens in the post chain's render target when post-processing is on.
+    this.renderer = new THREE.WebGLRenderer({ antialias: settings.antialias && settings.post === 'off', powerPreference: 'high-performance', stencil: false });
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMapping = TONE[settings.toneMapping] ?? THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05;
     this.renderer.shadowMap.enabled = settings.shadows;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = settings.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
     container.appendChild(this.renderer.domElement);
     this.camera = new THREE.PerspectiveCamera(70, 1, 0.1, 6000);
     this.scene.add(this.camera);
@@ -80,33 +67,40 @@ export class Renderer {
 
   /** Rebuild post-processing after a settings change. */
   configure() {
+    settings.shadows = settings.shadowQuality !== 'off';
     this.renderer.shadowMap.enabled = settings.shadows;
+    const shadowType = settings.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    if (this.renderer.shadowMap.type !== shadowType) { this.renderer.shadowMap.type = shadowType; this.renderer.shadowMap.needsUpdate = true; }
+    this.renderer.toneMapping = TONE[settings.toneMapping] ?? THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05 * settings.brightness;
-    this.composer?.dispose();
-    this.composer = null;
-    this.bloom = null;
-    this.grade = null;
-    if (settings.bloom || settings.post !== 'off') {
-      const rt = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, samples: settings.antialias ? 4 : 0 });
-      this.composer = new EffectComposer(this.renderer, rt);
-      this.composer.addPass(new RenderPass(this.scene, this.camera));
-      if (settings.bloom) {
-        this.composer.addPass(new ShaderPass(SanitizeShader));
-        this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.45, 0.4, 0.9);
-        this.composer.addPass(this.bloom);
-      }
-      this.composer.addPass(new OutputPass());
-      if (settings.post !== 'off') {
-        this.grade = new ShaderPass(GradeShader);
-        this.grade.uniforms.uSharpen.value = settings.post === 'full' ? 0.35 : 0;
-        this.grade.uniforms.uVignette.value = settings.post === 'full' ? 0.32 : 0.22;
-        this.composer.addPass(this.grade);
-      }
+    this.post?.dispose();
+    this.post = null;
+    if (settings.post !== 'off') {
+      const g = GRADES[settings.grade] ?? GRADES.neutral;
+      this.post = new PostPipeline(this.renderer, {
+        hdr: settings.hdr, msaa: settings.antialias ? 4 : 0, bloom: settings.bloom ? settings.bloomStrength : 0,
+        ao: settings.ao === 'high' ? 2 : settings.ao === 'low' ? 1 : 0, godrays: settings.godrays ? 0.4 : 0, dof: settings.dof,
+        motionBlur: settings.motionBlur, ssr: settings.ssr, exposure: 1, contrast: settings.contrast, saturation: settings.saturation,
+        vibrance: settings.vibrance + (g.vibrance ?? 0), temperature: settings.temperature, tint: settings.tint,
+        lift: new THREE.Vector3(...g.lift), gamma: new THREE.Vector3(...g.gamma), gain: new THREE.Vector3(...g.gain),
+        vignette: settings.vignette, grain: settings.filmGrain, chromatic: settings.chromatic, sharpen: settings.post === 'full' ? Math.max(0.35, settings.sharpen) : settings.sharpen,
+      });
+      this.post.sunDir.copy(this.sunDir);
     }
     this.applySaturation();
     this.camera.far = Math.max(1500, settings.viewDistance * 2.5);
     this.resize();
   }
+
+  private sunDir = new THREE.Vector3(0, 1, 0);
+  /** Direction towards the sun (god rays). */
+  setSun(dir: THREE.Vector3) {
+    this.sunDir.copy(dir).normalize();
+    this.post?.sunDir.copy(this.sunDir);
+  }
+
+  /** Scoped zoom focus distance for depth of field (0 = none). */
+  setFocus(m: number) { if (this.post) this.post.focus = m; }
 
   private sat = 1;
   /** 1 = normal colour, 0 = greyscale (TA greys the world while dead or waiting for players). */
@@ -117,8 +111,8 @@ export class Renderer {
   }
 
   private applySaturation() {
-    if (this.grade) this.grade.uniforms.uSaturation.value = 1.08 * this.sat;
-    this.canvas.style.filter = !this.grade && this.sat < 0.99 ? `grayscale(${(1 - this.sat).toFixed(2)})` : '';
+    this.post?.setSaturation(this.sat);
+    this.canvas.style.filter = !this.post && this.sat < 0.99 ? `grayscale(${(1 - this.sat).toFixed(2)})` : '';
   }
 
   resize() {
@@ -127,10 +121,7 @@ export class Renderer {
     const pr = Math.max(0.25, Math.min(2.5, settings.renderScale));
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h);
-    this.composer?.setPixelRatio(pr);
-    this.composer?.setSize(w, h);
-    this.bloom?.setSize(w * pr, h * pr);
-    this.grade?.uniforms.uTexel.value.set(1 / (w * pr), 1 / (h * pr));
+    this.post?.setSize(w * pr, h * pr);
     this.setFov(settings.fov);
   }
 
@@ -146,7 +137,9 @@ export class Renderer {
   }
 
   render() {
-    if (this.composer) this.composer.render();
-    else this.renderer.render(this.scene, this.camera);
+    const now = performance.now(), dt = Math.min(0.1, (now - this.lastFrame) / 1000);
+    this.lastFrame = now;
+    if (this.post) this.post.render(this.scene, this.camera, dt);
+    else { this.renderer.setRenderTarget(null); this.renderer.render(this.scene, this.camera); }
   }
 }
