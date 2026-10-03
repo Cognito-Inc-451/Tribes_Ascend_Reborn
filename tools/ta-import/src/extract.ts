@@ -3,11 +3,13 @@ import { basename, dirname, extname, join } from 'node:path';
 import { buildCollisionWorld, Heightfield, isForceFieldMesh, UU_PER_METER, type MapBlocker, type MapBoost, type MapData, type MapEntity, type MapEnv, type MapVolume, type MeshAsset, type MeshFx, type MeshInstance, type ModeId, type TerrainLayer, type ThemeId, type EntityKind } from '@ar/shared';
 import { packLightmaps, type LightmapSource } from './lightmaps.js';
 import type { TextureData } from './texture.js';
-import { materialBlend, materialFx, resolveDiffuse, resolveNormal, resolveSpecular, Resolver, type ObjRef } from './material.js';
+import { diffuseParams, materialBlend, materialFx, resolveDiffuse, resolveNormal, resolveSpecular, Resolver, type ObjRef } from './material.js';
 import { extractStaticMesh } from './mesh.js';
 import { extractModel, type ModelPolys } from './model.js';
 import { isRaw, isRef, isRot, isVec, parseObject, parseStructArray, type PropValue, type Rot, type Vec } from './props.js';
 import { UPackage, type ExportEntry } from './upk.js';
+
+interface MatInfo { tex: number; ntex: number; stex: number; fx?: MeshFx; tile?: number; tint?: [number, number, number] }
 
 const S = 1 / UU_PER_METER;
 const ROT = (Math.PI * 2) / 65536;
@@ -259,20 +261,22 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
     if (ti < 0) { ti = textures.length; textures.push(name); texIndex.set(name, ti); }
     return ti;
   };
-  const infoCache = new Map<string, { tex: number; ntex: number; stex: number; fx?: MeshFx }>();
-  /** Diffuse + normal + specular map and liquid / blend tag of a material reference. */
-  const matInfo = (pkg: UPackage, ref: number): { tex: number; ntex: number; stex: number; fx?: MeshFx } => {
+  const infoCache = new Map<string, MatInfo>();
+  /** Diffuse + normal + specular map, diffuse tiling / tint and liquid / blend tag of a material reference. */
+  const matInfo = (pkg: UPackage, ref: number): MatInfo => {
     if (!ref || !opts.onTexture) return { tex: -1, ntex: -1, stex: -1 };
     const key = `${pkg.path}:${ref}`;
     const hit = infoCache.get(key);
     if (hit) return hit;
     const mat = R.get(pkg, ref);
-    const info = mat
-      ? { tex: texIndexOf(resolveDiffuse(R, mat)), ntex: texIndexOf(resolveNormal(R, mat)), stex: texIndexOf(resolveSpecular(R, mat)), fx: materialFx(R, mat) ?? materialBlend(R, mat) }
+    const dif = mat ? resolveDiffuse(R, mat) : null;
+    const info: MatInfo = mat
+      ? { tex: texIndexOf(dif), ntex: texIndexOf(resolveNormal(R, mat)), stex: texIndexOf(resolveSpecular(R, mat)), fx: materialFx(R, mat) ?? materialBlend(R, mat), ...diffuseParams(R, mat, dif) }
       : { tex: -1, ntex: -1, stex: -1 };
     infoCache.set(key, info);
     return info;
   };
+  const groupOf = (mi: MatInfo) => ({ tex: mi.tex, ntex: mi.ntex >= 0 ? mi.ntex : undefined, stex: mi.stex >= 0 ? mi.stex : undefined, fx: mi.fx, tile: mi.tile, tint: mi.tint });
 
   const resolveMesh = (pkg: UPackage, ref: number, overrides: number[] = []): number => {
     let owner = pkg, exp: ExportEntry | undefined;
@@ -287,7 +291,7 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
       const groups = base.groups?.map((g, k) => {
         if (!overrides[k]) return g;
         const mi = matInfo(pkg, overrides[k]);
-        return { ...g, tex: mi.tex, ntex: mi.ntex >= 0 ? mi.ntex : undefined, stex: mi.stex >= 0 ? mi.stex : undefined, fx: mi.fx };
+        return { ...g, ...groupOf(mi) };
       });
       if (!groups || groups.every((g, k) => g === base.groups![k])) { meshIndex.set(ovKey, bi); return bi; }
       meshes.push({ ...base, groups });
@@ -323,7 +327,7 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
     const hidden = HIDDEN_MESH.test(md.name);
     const groups = md.sections.length && md.uvs ? md.sections.map((s) => {
       const mi = matInfo(owner, s.material);
-      return { start: s.firstIndex, count: s.numTriangles * 3, tex: mi.tex, ntex: mi.ntex >= 0 ? mi.ntex : undefined, stex: mi.stex >= 0 ? mi.stex : undefined, fx: mi.fx };
+      return { start: s.firstIndex, count: s.numTriangles * 3, ...groupOf(mi) };
     }) : undefined;
     meshes.push({
       name: md.name, positions, indices, mat: meshMaterial(md.name), collide: hidden || !noCollide(md.name), hidden: hidden || undefined,
@@ -535,7 +539,7 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
         for (let i = 1; i + 1 < poly.length; i++) idx.push(first, first + i + 1, first + i);
       }
       const mi = matInfo(pkg, ref);
-      groups.push({ start, count: idx.length - start, tex: mi.tex, ntex: mi.ntex >= 0 ? mi.ntex : undefined, stex: mi.stex >= 0 ? mi.stex : undefined, fx: mi.fx });
+      groups.push({ start, count: idx.length - start, ...groupOf(mi) });
     }
     const textured = groups.some((g) => g.tex >= 0 || g.fx);
     meshes.push({

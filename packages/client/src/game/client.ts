@@ -100,7 +100,8 @@ export class GameClient {
     this.minimap = new Minimap(map, () => this.view.roof);
     this.hud.root.append(this.minimap.mini, this.minimap.big);
     this.overlayRoot = h('div', { class: 'passthrough', style: 'position:absolute;inset:0' });
-    ui.append(this.overlayRoot, this.vgs.el);
+    ui.append(this.overlayRoot);
+    this.hud.vgsSlot.append(this.vgs.el);
     this.viewModel = new THREE.Group();
     r.camera.add(this.viewModel);
     session.onSnapshot = (s) => this.onSnapshot(s);

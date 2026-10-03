@@ -11,7 +11,13 @@ export class Resolver {
   get(pkg: UPackage, ref: number): ObjRef | null {
     if (ref > 0) return pkg.exports[ref - 1] ? { pkg, exp: pkg.exports[ref - 1], index: ref } : null;
     if (ref === 0 || !pkg.imports[-ref - 1]) return null;
-    const [pkgName, ...rest] = pkg.refPath(ref).split('.');
+    const full = pkg.refPath(ref);
+    const [pkgName, ...rest] = full.split('.');
+    // Content packages that only exist cooked into TribesGame.upk keep their own name in import paths.
+    return this.find(pkgName, rest.join('.')) ?? this.find('tribesgame', full);
+  }
+
+  private find(pkgName: string, objPath: string): ObjRef | null {
     const path = this.idx.get(pkgName.toLowerCase());
     if (!path) return null;
     const owner = this.load(path);
@@ -21,7 +27,7 @@ export class Resolver {
       for (let i = 0; i < owner.exports.length; i++) byPath.set(owner.refPath(i + 1), i + 1);
       this.exportCache.set(owner, byPath);
     }
-    const i = byPath.get(rest.join('.'));
+    const i = byPath.get(objPath);
     return i ? { pkg: owner, exp: owner.exports[i - 1], index: i } : null;
   }
 
@@ -49,6 +55,9 @@ function scoreParam(p: string | undefined): number {
 }
 
 const sampleScore = (s: Sample) => scoreTextureName(s.tex?.exp.objectName ?? 'x') + scoreParam(s.param);
+
+/** Expression inputs with A first: a lerp's A is its base layer (B is blended over it by the mask), so it wins ties. */
+const baseFirst = (P: Map<string, PropValue>) => [...P].sort((a, b) => (a[0] === 'A' ? 0 : a[0] === 'B' ? 1 : 2) - (b[0] === 'A' ? 0 : b[0] === 'B' ? 1 : 2));
 
 /** Texture parameter overrides along a MIC chain (the most derived instance wins), and the base Material. */
 function micChain(r: Resolver, mat: ObjRef): { overrides: Map<string, ObjRef>; base: ObjRef | null } {
@@ -88,9 +97,9 @@ export function resolveDiffuse(r: Resolver, mat: ObjRef, depth = 0): ObjRef | nu
       for (const input of ['DiffuseColor', 'EmissiveColor']) {
         const ex = parseStruct(base.pkg, BP?.get(input))?.get('Expression');
         if (!isRef(ex)) continue;
-        const found = samplesFrom(r, base.pkg, ex.ref).map((s) => ({ tex: (s.param && overrides.get(s.param)) || s.tex, param: s.param }));
+        const found = samplesFrom(r, base.pkg, ex.ref).map((s) => ({ tex: (s.param && overrides.get(s.param)) || s.tex, param: s.param })).filter((s) => s.tex);
         found.sort((a, b) => sampleScore(b) - sampleScore(a));
-        if (found[0]?.tex && sampleScore(found[0]) >= 0) return found[0].tex;
+        if (found[0] && sampleScore(found[0]) >= 0) return found[0].tex;
       }
     }
     return bestByName([...overrides.values()]) ?? (base ? findDiffuseSample(r, base, depth + 1)?.tex ?? null : null);
@@ -157,12 +166,12 @@ function walkExpressions(r: Resolver, pkg: UPackage, start: number): Sample | nu
     if (cls === 'Material' || cls.startsWith('MaterialInstance')) continue;
     if (/^MaterialExpressionTextureSample/.test(cls)) {
       const s = sampleOf(r, o);
-      if (s && (s.tex || s.param)) found.push(s);
+      if (s?.tex) found.push(s);
       continue;
     }
     const P = r.props(o);
     if (!P) continue;
-    for (const [, v] of P) {
+    for (const [, v] of baseFirst(P)) {
       if (isRef(v)) { if (v.ref !== 0) queue.push({ pkg: o.pkg, ref: v.ref }); continue; }
       if (!isRaw(v)) continue;
       const s = parseStruct(o.pkg, v);
@@ -203,7 +212,7 @@ function samplesFrom(r: Resolver, pkg: UPackage, start: number): Sample[] {
     if (/^MaterialExpressionTextureSample/.test(cls)) { const s = sampleOf(r, o); if (s && (s.tex || s.param)) found.push(s); continue; }
     const P = r.props(o);
     if (!P) continue;
-    for (const [, v] of P) {
+    for (const [, v] of baseFirst(P)) {
       if (isRef(v)) { if (v.ref !== 0) queue.push({ pkg: o.pkg, ref: v.ref }); continue; }
       if (!isRaw(v)) continue;
       const e = parseStruct(o.pkg, v)?.get('Expression');
@@ -261,6 +270,78 @@ export function resolveNormal(r: Resolver, mat: ObjRef, depth = 0): ObjRef | nul
 
 const SPEC_NAME = /(_|^)(s|spc|spec|specular)(_?\d*)$|_spc|_spec/i;
 
+const rawFloats = (v: PropValue | undefined): number[] | null => {
+  if (!isRaw(v) || v.raw.length < 16) return null;
+  const f = new Float32Array(v.raw.slice(0, 16).buffer);
+  return [...f].every(Number.isFinite) ? [...f] : null;
+};
+
+/**
+ * Vector parameters of a material's diffuse graph that matter for its look: the UV tiling of the diffuse texture
+ * ("DifTile", "TexTile") and a colour multiplier ("DIFMult", "DiffuseTint"); MIC overrides win over defaults.
+ */
+export function diffuseParams(r: Resolver, mat: ObjRef, dif: ObjRef | null): { tile?: number; tint?: [number, number, number] } {
+  const texOverrides = micChain(r, mat).overrides;
+  const vectors = new Map<string, number[]>();
+  let cur: ObjRef | null = mat, base: ObjRef | null = null;
+  for (let d = 0; d < 8 && cur; d++) {
+    const cls = r.className(cur);
+    if (cls === 'Material') { base = cur; break; }
+    if (!cls.startsWith('MaterialInstance')) break;
+    const P = r.props(cur);
+    for (const el of parseStructArray(cur.pkg, P?.get('VectorParameterValues'))) {
+      const name = el.get('ParameterName'), val = rawFloats(el.get('ParameterValue'));
+      if (typeof name === 'string' && val && !vectors.has(name)) vectors.set(name, val);
+    }
+    const parent = P?.get('Parent');
+    cur = isRef(parent) ? r.get(cur.pkg, parent.ref) : null;
+  }
+  if (!base) return {};
+  const ex = parseStruct(base.pkg, r.props(base)?.get('DiffuseColor'))?.get('Expression');
+  if (!isRef(ex)) return {};
+  // Vector parameters under DiffuseColor; tiling only counts inside the UVs of the sample supplying the diffuse texture.
+  // `mul`: reached from DiffuseColor through multiplies only (a colour parameter there tints the whole diffuse).
+  const queue: { ref: number; uvOf?: boolean; mul: boolean }[] = [{ ref: ex.ref, mul: true }];
+  const seen = new Set<number>();
+  const out: { tile?: number; tint?: [number, number, number] } = {};
+  while (queue.length && seen.size < 64) {
+    const { ref, uvOf, mul } = queue.shift()!;
+    if (seen.has(ref)) continue;
+    seen.add(ref);
+    const o = r.get(base.pkg, ref);
+    if (!o || o.pkg !== base.pkg || !r.className(o).startsWith('MaterialExpression')) continue;
+    const P = r.props(o);
+    if (!P) continue;
+    const cls = r.className(o);
+    if (cls === 'MaterialExpressionVectorParameter') {
+      const name = P.get('ParameterName');
+      if (typeof name !== 'string') continue;
+      const v = vectors.get(name) ?? rawFloats(P.get('DefaultValue'));
+      if (!v) continue;
+      if (uvOf !== undefined) {
+        if (uvOf && /til(e|ing)/i.test(name) && v[0] > 0.05 && v[0] < 64 && Math.abs(v[0] - 1) > 0.01) out.tile = v[0];
+      } else if (mul && /^(colou?r|tint|(dif|diffuse|base)_?(mult|tint|colou?r)(_?add)?|colou?r_?(tint|mult))$/i.test(name) && v.slice(0, 3).every((c) => c >= 0 && c < 4)) out.tint = [v[0], v[1], v[2]];
+      continue;
+    }
+    if (/^MaterialExpressionTextureSample/.test(cls)) {
+      const param = P.get('ParameterName'), t = P.get('Texture');
+      const tex = (typeof param === 'string' && texOverrides.get(param)) || (isRef(t) ? r.get(base.pkg, t.ref) : null);
+      const mine = !!dif && !!tex && tex.exp.objectName === dif.exp.objectName;
+      const c = parseStruct(o.pkg, P.get('Coordinates'))?.get('Expression');
+      if (isRef(c) && c.ref) queue.push({ ref: c.ref, uvOf: uvOf ?? mine, mul: false });
+      continue;
+    }
+    const keepMul = mul && cls === 'MaterialExpressionMultiply';
+    for (const [, v] of P) {
+      if (isRef(v)) { if (v.ref) queue.push({ ref: v.ref, uvOf, mul: keepMul }); continue; }
+      if (!isRaw(v)) continue;
+      const e = parseStruct(o.pkg, v)?.get('Expression');
+      if (isRef(e) && e.ref) queue.push({ ref: e.ref, uvOf, mul: keepMul });
+    }
+  }
+  return out;
+}
+
 /** Specular map of a material: the sample feeding the base Material's SpecularColor, with MIC overrides swapped in. */
 export function resolveSpecular(r: Resolver, mat: ObjRef): ObjRef | null {
   const { overrides, base } = micChain(r, mat);
@@ -269,8 +350,8 @@ export function resolveSpecular(r: Resolver, mat: ObjRef): ObjRef | null {
   if (!isRef(ex)) return null;
   const found = samplesFrom(r, base.pkg, ex.ref).map((s) => ({ tex: (s.param && overrides.get(s.param)) || s.tex, param: s.param }));
   const pick = found.find((s) => s.tex && (SPEC_NAME.test(s.tex.exp.objectName) || /spec|spc/i.test(s.param ?? ''))) ?? found[0];
-  // Flat white/black masks carry no detail.
-  if (!pick?.tex || /white|black|grey|gray/i.test(pick.tex.exp.objectName)) return null;
+  // Flat white/black masks carry no detail; channel-packed masks are not specular colours.
+  if (!pick?.tex || /white|black|grey|gray|_msk|mask/i.test(pick.tex.exp.objectName)) return null;
   return pick.tex;
 }
 
@@ -279,7 +360,11 @@ export function materialFx(r: Resolver, mat: ObjRef): 'lava' | 'water' | undefin
   let cur: ObjRef | null = mat;
   for (let d = 0; d < 6 && cur; d++) {
     const n = cur.exp.objectName;
-    if (/lava|magma|molten/i.test(n) && !/rock|cliff|clift|stone|miner|harvest|particle/i.test(n)) return 'lava';
+    if (/lava|magma|molten/i.test(n)) {
+      // Crusted lava fields, flows and lava-arena level meshes are rock with glowing cracks, not liquid lava.
+      if (/rock|cliff|clift|stone|miner|harvest|particle|scape|lavaend|roping|lavafall|noemi|lavarena|crater/i.test(n)) return undefined;
+      return 'lava';
+    }
     if (/water|ocean|river|puddle|lake|waterfall/i.test(n) && !/plant|aqueduct|tank|crate|wall|bottle|drop/i.test(n)) return 'water';
     const P = r.props(cur);
     const parent = P?.get('Parent');

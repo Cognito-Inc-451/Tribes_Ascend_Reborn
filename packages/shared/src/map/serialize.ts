@@ -113,6 +113,11 @@ export function encodeMapData(m: MapData): Uint8Array {
   for (const [mi, gi, st] of spec) w.u32(mi).u16(gi).i32(st);
   w.u8(layers.length);
   for (const l of layers) w.i32(l.ntex ?? -1).i32(l.stex ?? -1);
+  // Diffuse tiling and tint per material group.
+  const look: [number, number, number, [number, number, number]][] = [];
+  (m.meshes ?? []).forEach((me, mi) => me.groups?.forEach((g, gi) => { if (g.tile || g.tint) look.push([mi, gi, g.tile ?? 1, g.tint ?? [1, 1, 1]]); }));
+  w.u32(look.length);
+  for (const [mi, gi, tile, tint] of look) w.u32(mi).u16(gi).f32(tile).f32(tint[0]).f32(tint[1]).f32(tint[2]);
   return w.finish();
 }
 
@@ -264,6 +269,16 @@ export function decodeMapData(data: Uint8Array): MapData {
       const l = terrainLayers[i];
       if (l && nt >= 0) l.ntex = nt;
       if (l && st >= 0) l.stex = st;
+    }
+  }
+  if (r.remaining >= 4) {
+    const n = r.u32();
+    for (let i = 0; i < n; i++) {
+      const mi = r.u32(), gi = r.u16(), tile = r.f32(), tint: [number, number, number] = [r.f32(), r.f32(), r.f32()];
+      const g = meshes[mi]?.groups?.[gi];
+      if (!g) continue;
+      if (tile !== 1) g.tile = tile;
+      if (tint.some((c) => c !== 1)) g.tint = tint;
     }
   }
   return {

@@ -70,6 +70,9 @@ export class Hud {
   private compassStrip: HTMLElement;
   private feed: HTMLElement;
   readonly chat: HTMLElement;
+  /** Where the client mounts the VGS menu (left column, above the VGS history). */
+  readonly vgsSlot: HTMLElement;
+  private vgsLog: HTMLElement;
   private toasts: HTMLElement;
   private markers: HTMLElement;
   private crosshair: HTMLElement;
@@ -111,6 +114,8 @@ export class Hud {
     for (let r = 0; r < 3; r++) for (let i = 0; i < 24; i++) this.compassStrip.append(h('span', { style: 'display:inline-block;width:30px;text-align:center' }, i % 3 === 0 ? dirs[i / 3] : '·'));
     this.feed = h('div', { class: 'feed' });
     this.chat = h('div', { class: 'chat' });
+    this.vgsLog = h('div', { class: 'vgslog' });
+    this.vgsSlot = h('div', { class: 'vgsslot' });
     this.toasts = h('div', { class: 'toasts' });
     this.markers = h('div', { class: 'markers' });
     this.crosshair = h('div', { class: 'crosshair' });
@@ -121,8 +126,10 @@ export class Hud {
     this.net = h('div', { class: 'netstats hidden' });
     this.pill = h('div', { class: 'transport-pill' });
     this.spec = h('div', { class: 'spec-hud hidden' });
+    // Left column, top to bottom: net stats (F10), VGS menu, VGS history, chat; stacked so nothing overlaps.
+    const left = h('div', { class: 'leftcol' }, this.net, this.vgsSlot, this.vgsLog, h('div', { style: 'flex:1' }), this.chat);
     this.root = h('div', { class: 'hud' }, this.vignette, this.markers, this.crosshair, this.hitmarker, this.dmg, this.reloadEl, this.vitals, speed,
-      this.weaponsEl, this.topbar, this.flagsEl, this.compass, this.feed, this.chat, this.toasts, this.respawn, this.net, this.pill, this.spec, this.spawnEl, this.waitEl);
+      this.weaponsEl, this.topbar, this.flagsEl, this.compass, this.feed, left, this.toasts, this.respawn, this.pill, this.spec, this.spawnEl, this.waitEl);
     parent.append(this.root);
   }
 
@@ -132,7 +139,7 @@ export class Hud {
     if (kind === this.lastCrossKind) return;
     this.lastCrossKind = kind;
     clear(this.crosshair);
-    const c = /^#[0-9a-f]{6}$/i.test(settings.crosshairColor) ? settings.crosshairColor : '#9fe8ff';
+    const c = /^#[0-9a-f]{6}$/i.test(settings.crosshairColor) ? settings.crosshairColor : '#ff3b30';
     const s = settings.crosshairScale;
     const svg = (inner: string) => {
       const el = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
@@ -251,10 +258,17 @@ export class Hud {
     const row = h('div', { class: `m ${team ? 'team' : ''} ${vgs ? 'vgs' : ''}` },
       h('span', { class: 'ch' }, team ? '[TEAM] ' : ''), bot ? h('span', { class: 'tag bot', style: 'font-size:9px;margin-right:4px' }, 'BOT') : null,
       h('span', { class: 'nm', style: `color:${teamCss(t)}` }, bot ? name.replace(BOT_TAG, '').trim() : name), ': ', h('span', { class: 'tx' }, text));
-    this.addChat(row);
+    if (vgs) this.addVgs(row); else this.addChat(row);
   }
 
-  /** Newest lines only, so the chat never grows into the VGS menu or the vitals. */
+  /** Last few VGS lines, in their own box above the chat. */
+  private addVgs(row: HTMLElement) {
+    this.vgsLog.append(row);
+    row.addEventListener('animationend', () => row.remove());
+    while (this.vgsLog.children.length > 5) this.vgsLog.firstChild?.remove();
+  }
+
+  /** Last 10 chat lines; they stay ~30 s (all of them while typing). */
   private addChat(row: HTMLElement) {
     const input = this.chat.querySelector('input');
     if (input) this.chat.insertBefore(row, input); else this.chat.append(row);

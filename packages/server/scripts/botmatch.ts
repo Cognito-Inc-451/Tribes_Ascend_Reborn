@@ -96,6 +96,13 @@ for (let i = 0; i < ticks; i++) {
       const key = `${Math.round(cur.x / 10)},${Math.round(cur.z / 10)}`;
       stuckSpots.set(key, (stuckSpots.get(key) ?? 0) + 1);
       console.log(`t=${m.now.toFixed(0)} STUCK ${p.name} t${p.team} ${p.brain!.role} pos(${cur.x.toFixed(1)},${cur.y.toFixed(1)},${cur.z.toFixed(1)}) moved ${moved.toFixed(1)} g=${p.move.onGround} inside=${inside} terrain=${map.world.terrain.heightAt(cur.x, cur.z).toFixed(1)} w0=${p.weapons[0]?.clip}/${p.weapons[0]?.ammo}`);
+      if (process.env.STUCK === 'route') {
+        const b = p.brain as unknown as { routeKey: string; routeIdx: number; indoor: boolean; exitPath: { x: number; y: number; z: number }[] | null; exitIdx: number; charging: boolean };
+        const [x, y, z] = b.routeKey.split(',').map(Number);
+        const r = b.routeKey ? m.nav.route({ x, y, z }, p.team) : null;
+        const ex = b.exitPath ? b.exitPath[b.exitIdx] : null;
+        console.log(`   key ${b.routeKey} routeIdx ${b.routeIdx} indoor ${b.indoor} charging ${b.charging} exit ${ex ? `${b.exitIdx}(${ex.x.toFixed(1)},${ex.y.toFixed(1)},${ex.z.toFixed(1)})` : '-'} sky ${m.nav.openSky(p.move.pos)} e=${(p.move.energy / p.maxEnergy).toFixed(2)} vel(${p.move.vel.x.toFixed(1)},${p.move.vel.y.toFixed(1)},${p.move.vel.z.toFixed(1)}) cmd f${p.lastCmd.fwd.toFixed(1)} s${p.lastCmd.strafe.toFixed(1)} b${p.lastCmd.buttons} route ${r ? r.map((w) => `(${w.x.toFixed(1)},${w.y.toFixed(1)},${w.z.toFixed(1)})`).join(' ') : r}`);
+      }
       if (process.env.STUCK === 'route' && p.brain!.role === 'offense') {
         const gen = m.assets.find((a) => a.type === 'generator' && a.team !== p.team);
         const r = gen ? m.nav.route(gen.pos) : null;

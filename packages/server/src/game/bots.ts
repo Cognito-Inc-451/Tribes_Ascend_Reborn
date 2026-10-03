@@ -60,6 +60,12 @@ export class BotBrain {
   private indoor = false;
   private routeKey = '';
   private routeIdx = 0;
+  /** Waiting at the bottom of an indoor shaft for enough energy to jet all the way up. */
+  private charging = false;
+  /** Indoors with an outdoor goal: a known indoor route walked backwards to its entrance. */
+  private exitPath: Vec3[] | null = null;
+  private exitIdx = 0;
+  private nextIndoorCheck = 0;
   /** Indoor objectives this bot keeps getting stuck on: goal key -> time until it tries again. */
   private abandoned = new Map<string, number>();
   private stuckHits = 0;
@@ -70,7 +76,8 @@ export class BotBrain {
   /** Steering target for a fixed objective: the route's entrance first, then its waypoints into the building. */
   private viaRoute(m: Match, p: Player, goal: Vec3): Vec3 {
     this.indoor = false;
-    if (!this.staticGoal) return goal;
+    if (!this.staticGoal) return this.leave(m, p, goal) ?? goal;
+    this.exitPath = null;
     const key = BotBrain.key(goal);
     if (key !== this.routeKey) { this.routeKey = key; this.routeIdx = 0; this.stuckHits = 0; }
     const route = m.nav.route(goal, p.team);
@@ -96,6 +103,30 @@ export class BotBrain {
     }
     this.indoor = true;
     return route[this.routeIdx];
+  }
+
+  /** Inside a base (spawned or restocked there) with an outdoor goal: follow the nearest indoor route back out. */
+  private leave(m: Match, p: Player, goal: Vec3): Vec3 | null {
+    const pos = p.move.pos;
+    const d3 = (a: Vec3) => Math.hypot(a.x - pos.x, a.y + 0.05 - pos.y, a.z - pos.z);
+    if (m.now >= this.nextIndoorCheck) {
+      this.nextIndoorCheck = m.now + 1;
+      if (m.nav.openSky(pos) || Math.hypot(goal.x - pos.x, goal.z - pos.z) < 15 || !m.world.raycast(p.eye(), { x: goal.x, y: goal.y + 1, z: goal.z }, undefined, false)) this.exitPath = null;
+      else if (!this.exitPath) {
+        const eye = p.eye();
+        let bd = 15;
+        for (const r of m.nav.all()) r.forEach((w, i) => {
+          const d = d3(w);
+          if (d < bd && !m.world.raycast(eye, { x: w.x, y: w.y + 1, z: w.z }, undefined, false)) { bd = d; this.exitPath = r; this.exitIdx = i; }
+        });
+      }
+    }
+    if (!this.exitPath) return null;
+    if (d3(this.exitPath[this.exitIdx]) > 25) { this.exitPath = null; return null; }
+    while (this.exitIdx > 0 && d3(this.exitPath[this.exitIdx]) < 2.4) this.exitIdx--;
+    if (this.exitIdx === 0 && d3(this.exitPath[0]) < 2.4) { this.exitPath = null; return null; }
+    this.indoor = true;
+    return this.exitPath[this.exitIdx];
   }
 
   constructor(readonly difficulty: BotDifficulty, seed: number) {
@@ -386,7 +417,8 @@ export class BotBrain {
     let goalYaw = this.steer(m, p, goal, Math.atan2(-dx, -dz), dist);
     // Near a flag, steer the velocity rather than the heading so sideways drift is cancelled instead of orbiting the stand.
     if ((this.flagGoal || this.indoor) && dist < 45 && dist > 0.5) {
-      const want = this.indoor ? Math.max(5, Math.min(14, dist * 1.5)) : Math.max(6, Math.min(40, dist * 1.2));
+      const shaft = this.indoor && goal.y - pos.y > 2;
+      const want = this.indoor ? Math.max(shaft ? 0 : 5, Math.min(14, dist * 1.5)) : Math.max(6, Math.min(40, dist * 1.2));
       const ex = (dx / dist) * want - p.move.vel.x, ez = (dz / dist) * want - p.move.vel.z;
       if (Math.hypot(ex, ez) > 1) goalYaw = Math.atan2(-ex, -ez);
     }
@@ -397,7 +429,7 @@ export class BotBrain {
     if (now > this.stuckCheck) {
       const moved = Math.hypot(pos.x - this.lastPos.x, pos.z - this.lastPos.z);
       // Indoors the next waypoint can be straight up a shaft: judge progress in 3D there.
-      const stalled = this.indoor ? Math.hypot(moved, pos.y - this.lastPos.y) < 1.5 && Math.hypot(dx, goal.y - pos.y, dz) > 2.5 : moved < 2 && dist > 8;
+      const stalled = this.charging ? false : this.indoor ? Math.hypot(moved, pos.y - this.lastPos.y) < 1.5 && Math.hypot(dx, goal.y - pos.y, dz) > 2.5 : moved < 2 && Math.hypot(dist, goal.y - pos.y) > 8;
       if (stalled) {
         this.unstickUntil = now + 1.5;
         this.unstickDir = this.rnd() < 0.5 ? -1 : 1;
@@ -445,6 +477,13 @@ export class BotBrain {
     else if (p.move.onGround && climb && energyFrac > Math.max(minEnergy, 0.1) + 0.1) buttons |= BTN.JET;
     else if (!p.move.onGround && energyFrac > minEnergy && (climb || (!this.flagGoal && dist > 80 && speed < 25))) buttons |= BTN.JET;
     else if (p.move.jetting && energyFrac > 0.1 && goal.y - pos.y > 2) buttons |= BTN.JET;
+    // Indoor shafts: wait at the bottom for a near-full tank, then jet the whole way up.
+    if (this.indoor && goal.y - pos.y > 2.5 && dist < 3 && now >= this.unstickUntil) {
+      if (p.move.onGround && energyFrac < 0.6) this.charging = true;
+      if (energyFrac > 0.9) this.charging = false;
+      if (this.charging) { buttons &= ~BTN.JET; fwd *= 0.2; strafe *= 0.2; }
+      else if (energyFrac > 0.02) buttons |= BTN.JET;
+    } else this.charging = false;
     if (brake) { fwd = -Math.cos(goalYaw - cmd.yaw) * 0.7; strafe = Math.sin(goalYaw - cmd.yaw) * 0.7; }
     // Brake a hard landing with jets when fall damage would apply.
     const vy = p.move.vel.y;

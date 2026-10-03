@@ -21,10 +21,10 @@ const HIDDEN_INSTANCE = new THREE.Matrix4().makeScale(0, 0, 0);
  * Baked lighting balance, shared by every lightmapped program: how much of the dynamic ambient (hemisphere + sky IBL)
  * remains on top of the lightmap, and how much dynamic sun reaches lightmapped surfaces (0 when the map bakes its sun).
  */
-export const LM_UNIFORMS = { lmAmbient: { value: 0.3 }, lmDirect: { value: 1 }, lmGain: { value: 0.25 }, lmSpec: { value: 1 } };
+export const LM_UNIFORMS = { lmAmbient: { value: 0.3 }, lmDirect: { value: 1 }, lmGain: { value: 0.11 }, lmSpec: { value: 1 }, lmSat: { value: 0.9 } };
 
 /** TA specular maps: their colour sets the reflectance, bright texels turn glossy (UE3 Phong spec, roughly). */
-const SPEC_UNIFORMS = { specGain: { value: 0.35 }, specRough: { value: 0.32 } };
+const SPEC_UNIFORMS = { specGain: { value: 0.18 }, specRough: { value: 0.55 } };
 
 /** Shader hooks for imported surface materials: height fog, channel-packed diffuse, specular map, TA lightmap with per-instance atlas rect. */
 function setMaterialHooks(mm: THREE.MeshStandardMaterial) {
@@ -39,15 +39,15 @@ function setMaterialHooks(mm: THREE.MeshStandardMaterial) {
     if (spec) {
       Object.assign(sh.uniforms, SPEC_UNIFORMS, { specMap: spec });
       sh.fragmentShader = 'uniform sampler2D specMap;\nuniform float specGain;\nuniform float specRough;\n' + sh.fragmentShader.replace('#include <lights_physical_fragment>',
-        '#include <lights_physical_fragment>\n#ifdef USE_MAP\n  vec3 spc = texture2D(specMap, vMapUv).rgb;\n  material.specularColor = max(material.specularColor, spc * specGain);\n  material.roughness = mix(material.roughness, specRough, clamp(dot(spc, vec3(0.6)), 0.0, 1.0));\n#endif');
+        '#include <lights_physical_fragment>\n#ifdef USE_MAP\n  vec3 spc = vec3(dot(texture2D(specMap, vMapUv).rgb, vec3(0.299, 0.587, 0.114)));\n  material.specularColor = max(material.specularColor, spc * specGain);\n  material.roughness = mix(material.roughness, specRough, clamp(dot(spc, vec3(0.6)), 0.0, 1.0));\n#endif');
     }
     if (lm) {
       Object.assign(sh.uniforms, LM_UNIFORMS);
       sh.vertexShader = 'attribute vec4 lmST;\nattribute vec3 lmScale;\nvarying vec3 vLmScale;\n' + sh.vertexShader.replace('#include <uv_vertex>',
         '#include <uv_vertex>\n#ifdef USE_LIGHTMAP\n  vLightMapUv = vLightMapUv * lmST.xy + lmST.zw;\n#endif\n  vLmScale = lmScale;');
-      // A baked sun replaces the dynamic sun's diffuse; its (shadow-mapped) highlights stay.
-      sh.fragmentShader = 'uniform float lmAmbient;\nuniform float lmDirect;\nuniform float lmGain;\nuniform float lmSpec;\nvarying vec3 vLmScale;\n' + sh.fragmentShader.replace('#include <lights_fragment_maps>',
-        THREE.ShaderChunk.lights_fragment_maps.replace('irradiance += lightMapIrradiance;', 'irradiance = irradiance * lmAmbient + lightMapIrradiance * vLmScale * lmGain;') +
+      // A baked sun replaces the dynamic sun's diffuse; its (shadow-mapped) highlights stay. Saturation is eased a little.
+      sh.fragmentShader = 'uniform float lmAmbient;\nuniform float lmDirect;\nuniform float lmGain;\nuniform float lmSpec;\nuniform float lmSat;\nvarying vec3 vLmScale;\n' + sh.fragmentShader.replace('#include <lights_fragment_maps>',
+        THREE.ShaderChunk.lights_fragment_maps.replace('irradiance += lightMapIrradiance;', 'vec3 lmc = lightMapIrradiance * vLmScale * lmGain;\n\t\tlmc = mix(vec3(dot(lmc, vec3(0.2126, 0.7152, 0.0722))), lmc, lmSat);\n\t\tirradiance = irradiance * lmAmbient + lmc;') +
         '\n#ifdef USE_LIGHTMAP\n  iblIrradiance *= lmAmbient;\n  reflectedLight.directDiffuse *= lmDirect;\n  reflectedLight.directSpecular *= max(lmDirect, lmSpec);\n#endif');
     }
   };
@@ -121,7 +121,9 @@ export class WorldView {
     for (const m of this.buildMeshes()) this.group.add(m);
     if (t.hazard && map.source === 'reborn') this.buildHazard(t.hazard.kind, t.hazard.level);
     this.roof = this.buildRoofGrid();
-    const weather = map.source === 'original' ? (env?.snow ? 'snow' : t.weather) : t.weather;
+    // TA's weather volumes carry no type: snow on icy maps, embers/ash on volcanic ones, none in arenas, rain elsewhere.
+    const volumeWeather = /ice|alpine|snow/.test(map.theme) ? 'snow' : /hell|lava|volcan/.test(map.theme) ? 'ash' : /arena/.test(map.theme) ? 'none' : 'rain';
+    const weather = map.source === 'original' ? (env?.snow ? volumeWeather : t.weather) : t.weather;
     if (settings.weather && weather && weather !== 'none') this.buildWeather(weather);
     scene.add(this.group);
   }
@@ -222,7 +224,7 @@ export class WorldView {
   private buildTerrain(): THREE.Mesh {
     const T = this.map.terrain, t = this.theme;
     const textured = !!this.textures && !!this.map.terrainLayers?.some((l) => l.tex >= 0);
-    const snowy = !!this.map.env?.snow;
+    const snowy = !!this.map.env?.snow && /ice|alpine|snow/.test(this.map.theme);
     // Render at the collision resolution: a decimated mesh would let players sink into (or float over) slopes.
     const step = T.resX * T.resZ > 1_100_000 ? 2 : 1;
     const nx = Math.floor((T.resX - 1) / step) + 1, nz = Math.floor((T.resZ - 1) / step) + 1;
@@ -349,7 +351,7 @@ export class WorldView {
           {
             vec3 tn = vec3(0.0, 0.0, 1.0);
             ${nblend}
-            tn.xy *= 0.9 * (1.0 - 0.6 * far);
+            tn.xy *= 0.65 * (1.0 - 0.6 * far);
             vec3 tv = normalize((viewMatrix * vec4(1.0, 0.0, 0.0, 0.0)).xyz);
             vec3 bv = normalize((viewMatrix * vec4(0.0, 0.0, 1.0, 0.0)).xyz);
             tv = normalize(tv - normal * dot(normal, tv));
@@ -425,8 +427,8 @@ export class WorldView {
   }
 
   /** One shared material per imported texture (+ normal map, + baked lightmap page); textures stream in after the world is visible. */
-  private texMaterial(tex: number, tint: string, ntex = -1, masked = false, lm = -1, stex = -1): THREE.MeshStandardMaterial {
-    const key = `${tex}|${ntex}|${masked}|${lm}|${stex}`;
+  private texMaterial(tex: number, tint: string, ntex = -1, masked = false, lm = -1, stex = -1, tile = 1, mult?: [number, number, number]): THREE.MeshStandardMaterial {
+    const key = `${tex}|${ntex}|${masked}|${lm}|${stex}|${tile}|${mult?.join(',') ?? ''}`;
     let m = this.texMats.get(key);
     if (m) return m;
     const mm = new THREE.MeshStandardMaterial({ color: 0x9a9a9a, roughness: 0.86, metalness: 0.04, side: THREE.DoubleSide });
@@ -453,9 +455,10 @@ export class WorldView {
       });
     }
     if (lname && this.textures) {
-      void this.textures.get(lname).then((tx) => {
+      void this.textures.get(lname, true).then((tx) => {
         if (!tx) return;
-        // TA lightmaps: sRGB texels times the per-instance scale (UE3 BasePassPixelShader SIMPLE_TEXTURE_LIGHTMAP).
+        // TA lightmaps hold linear texels times the per-instance scale: sampled as sRGB their colour is squared into a
+        // heavy orange/red cast (the raw texel hue matches the level's sun + sky colour).
         tx.channel = 1;
         tx.wrapS = tx.wrapT = THREE.ClampToEdgeWrapping;
         mm.lightMap = tx;
@@ -468,13 +471,22 @@ export class WorldView {
     if (name && this.textures) {
       void this.textures.get(name).then((tx) => {
         if (!tx) return;
+        if (tile !== 1) {
+          // The material repeats its diffuse over the UVs (normal map and lightmap keep theirs).
+          const rep = tx.clone();
+          rep.wrapS = rep.wrapT = THREE.RepeatWrapping;
+          rep.repeat.set(tile, tile);
+          rep.needsUpdate = true;
+          tx = rep;
+        }
         mm.map = tx;
         if (tx.userData.packed) {
           // Channel-packed mask: use its luminance as detail over the surface colour.
           mm.color.set(matFor(tint).color).multiplyScalar(1.5);
           mm.userData.packed = true;
           setMaterialHooks(mm);
-        } else mm.color.setRGB(1, 1, 1);
+        } else if (mult) mm.color.setRGB(mult[0], mult[1], mult[2]);
+        else mm.color.setRGB(1, 1, 1);
         mm.needsUpdate = true;
       });
     }
@@ -519,8 +531,11 @@ export class WorldView {
       fallback.side = THREE.DoubleSide;
       const textured = !!(me.uvs && me.groups?.length && this.textures);
       if (textured) g.setAttribute('uv', new THREE.BufferAttribute(me.uvs!, 2));
-      // Glows, glass and decals draw after the opaque world without shadows or depth writes.
-      const blended = me.groups?.filter((gr) => isBlendFx(gr.fx)) ?? [];
+      // Glows, glass and decals draw after the opaque world without shadows or depth writes. Translucent planet shells
+      // (an atmosphere rim in TA) would read as a flat glassy disc across the sky, so they are left out.
+      const skyGlass = (gr: { fx?: string }) => gr.fx === 'translucent' && /planet|moon/i.test(me.name);
+      const blended = me.groups?.filter((gr) => isBlendFx(gr.fx) && !skyGlass(gr)) ?? [];
+      const allBlend = !!me.groups?.length && me.groups.every((gr) => isBlendFx(gr.fx));
       if (blended.length) {
         const bg = new THREE.BufferGeometry();
         for (const [k, a] of Object.entries(g.attributes)) bg.setAttribute(k, a);
@@ -537,8 +552,8 @@ export class WorldView {
         im.renderOrder = 2;
         im.computeBoundingSphere();
         out.push(im);
-        if (blended.length === me.groups!.length) continue;
       }
+      if (allBlend) continue;
       // Instances with TA baked lighting draw per packed lightmap page; the rest use the dynamic lighting only.
       const lmUv = me.uv2 ?? me.uvs;
       const byPage = new Map<number, number[]>();
@@ -563,12 +578,12 @@ export class WorldView {
           geo.boundingSphere = g.boundingSphere;
         }
         let material: THREE.Material | THREE.Material[] = fallback;
-        if (me.groups?.length && (textured || blended.length)) {
+        if (me.groups?.length && (textured || me.groups.some((gr) => isBlendFx(gr.fx)))) {
           const mats: THREE.Material[] = [];
           for (const grp of me.groups) {
             if (isBlendFx(grp.fx)) continue;
             geo.addGroup(grp.start, grp.count, mats.length);
-            mats.push(!textured ? fallback : grp.fx === 'lava' ? lavaMaterial() : grp.fx === 'water' ? waterMaterial(this.skyEnv) : grp.tex >= 0 ? this.texMaterial(grp.tex, me.mat, grp.ntex ?? -1, FOLIAGE.test(me.name), page, grp.stex ?? -1) : fallback);
+            mats.push(!textured ? fallback : grp.fx === 'lava' ? lavaMaterial() : grp.fx === 'water' ? waterMaterial(this.skyEnv) : grp.tex >= 0 ? this.texMaterial(grp.tex, me.mat, grp.ntex ?? -1, FOLIAGE.test(me.name), page, grp.stex ?? -1, grp.tile ?? 1, grp.tint) : fallback);
           }
           material = mats;
         }

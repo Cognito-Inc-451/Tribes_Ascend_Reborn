@@ -83,7 +83,7 @@ export class Renderer {
         motionBlur: settings.motionBlur, ssr: settings.ssr, exposure: 1, contrast: settings.contrast, saturation: settings.saturation,
         vibrance: settings.vibrance + (g.vibrance ?? 0), temperature: settings.temperature, tint: settings.tint,
         lift: new THREE.Vector3(...g.lift), gamma: new THREE.Vector3(...g.gamma), gain: new THREE.Vector3(...g.gain),
-        vignette: settings.vignette, grain: settings.filmGrain, chromatic: settings.chromatic, sharpen: settings.post === 'full' ? Math.max(0.35, settings.sharpen) : settings.sharpen,
+        vignette: settings.vignette, grain: settings.filmGrain, chromatic: settings.chromatic, sharpen: settings.sharpen,
       });
       this.post.sunDir.copy(this.sunDir);
     }

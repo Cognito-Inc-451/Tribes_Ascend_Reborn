@@ -59,6 +59,8 @@ export interface Settings {
   hudScale: number;
   showSpeed: boolean;
   showNetStats: boolean;
+  /** Revision of the default look a save was migrated to. */
+  defaultsRev?: number;
   forceDefaultSkins: boolean;
   masterVolume: number;
   effectsVolume: number;
@@ -105,21 +107,21 @@ const DEFAULTS: Settings = {
   post: 'full',
   softShadows: true,
   bakedLighting: true,
-  bloomStrength: 1,
+  bloomStrength: 0.7,
   toneMapping: 'neutral',
   dof: false,
-  motionBlur: 0.1,
-  contrast: 1.4,
-  saturation: 1.6,
-  vibrance: 0.8,
-  temperature: 0.6,
+  motionBlur: 0,
+  contrast: 1.06,
+  saturation: 1.08,
+  vibrance: 0.12,
+  temperature: 0,
   tint: 0,
   grade: 'ascend',
-  vignette: 0,
-  filmGrain: 0.13,
-  chromatic: 0.08,
-  sharpen: 0.12,
-  brightness: 1.6,
+  vignette: 0.15,
+  filmGrain: 0.02,
+  chromatic: 0,
+  sharpen: 0.15,
+  brightness: 1.12,
   tracers: true,
   minimap: true,
   minimapZoom: 1,
@@ -129,11 +131,12 @@ const DEFAULTS: Settings = {
   invertY: false,
   rawInput: true,
   toggleZoom: false,
-  crosshairColor: '#9fe8ff',
-  crosshairScale: 1,
+  crosshairColor: '#ff3b30',
+  crosshairScale: 1.4,
   hudScale: 1,
   showSpeed: true,
   showNetStats: false,
+  defaultsRev: 2,
   forceDefaultSkins: false,
   masterVolume: 0.8,
   effectsVolume: 0.9,
@@ -147,6 +150,9 @@ const DEFAULTS: Settings = {
 };
 
 const KEY = 'ascend-reborn:settings:v1';
+const DEFAULTS_REV = 2;
+const LOOK_KEYS = ['bloomStrength', 'toneMapping', 'motionBlur', 'contrast', 'saturation', 'vibrance', 'temperature', 'tint', 'grade', 'vignette',
+  'filmGrain', 'chromatic', 'sharpen', 'brightness', 'crosshairColor', 'crosshairScale'] as const;
 
 function load(): Settings {
   try {
@@ -158,6 +164,11 @@ function load(): Settings {
     // Older saves only had an on/off shadow switch.
     if (raw.shadowQuality === undefined && raw.shadows === false) s.shadowQuality = 'off';
     s.shadows = s.shadowQuality !== 'off';
+    // New default look (colour grading, crosshair): applied once to saves made with the previous defaults.
+    if ((raw.defaultsRev ?? 0) < DEFAULTS_REV) {
+      for (const k of LOOK_KEYS) (s as unknown as Record<string, unknown>)[k] = DEFAULTS[k];
+      s.defaultsRev = DEFAULTS_REV;
+    }
     return s;
   } catch {
     return structuredClone(DEFAULTS);

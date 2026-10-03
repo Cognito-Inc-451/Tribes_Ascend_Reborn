@@ -31,6 +31,11 @@ export class IndoorRoutes {
     return this.done.get(k) ?? null;
   }
 
+  /** Every prepared indoor route (team-neutral variants). */
+  all(): Vec3[][] {
+    return [...this.done].filter(([k, r]) => r && !k.includes('|')).map(([, r]) => r!);
+  }
+
   /** Whether `team` faces standing enemy force fields. */
   fieldsUp(team: number): boolean {
     return this.world.blockers.some((b) => !b.off && b.passTeam !== undefined && b.passTeam !== team);

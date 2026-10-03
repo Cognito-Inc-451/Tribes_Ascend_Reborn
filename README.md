@@ -32,15 +32,18 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
   vehicles (Grav Cycle, Beowulf, Shrike), deployables and call-ins (tactical strike, supply drop, orbital strike).
 - Bots (Recruit to Godlike, Adept by default) with roles (cappers, chasers, defenders, offense, farmers, roamers).
   They route into base interiors (generator rooms, CaH points) around enemy force fields, shell the enemy generator,
-  restock at their inventory stations, and roamers keep human players company (escorting or hunting them). Servers
-  keep their bot count and only drop bots when the server is nearly full, to make room for players.
+  restock at an inventory station they can actually reach, climb base shafts on a full energy tank, walk known
+  routes back out of a base after spawning or restocking inside, and roamers keep human players company (escorting
+  or hunting them). Servers keep their bot count and only drop bots when the server is nearly full, to make room for
+  players.
 - Host options: bots per team (10 by default), bot skill, time/score limits, infinite ammo, infinite energy, no fall
   damage, **infinite call-ins**, **vehicles** on/off, a **credit multiplier** and **gravity** (50%–200% of TA's, for
   players, projectiles, flags and vehicles).
 
 **With your Tribes: Ascend data imported (`npm run install-ta` or `npm run ta-import -- --all`)**
 - The original maps (geometry, terrain with its layer normal maps, textured BSP brushes, textures with normal and
-  specular maps, TA's translucent/additive materials such as light beams and glass, prefab interiors, lava/water, kill
+  specular maps plus each material's diffuse tiling and colour tint, TA's translucent/additive materials such as light
+  beams and glass, prefab interiors, lava/water, kill
   and pain volumes such as Lava Arena's lava and Blueshift's space), player/weapon/vehicle/station models, TA's class
   skins (team armour and the Mercenary sets), sounds (weapons with looping automatic fire, reloads and draws,
   vehicles' engines and weapons, stations, generators, turrets, deployables, call-ins, deaths, impacts, CTF
@@ -52,7 +55,7 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
   last one used and any with an enemy in sight; maps without team starts are split in two halves so each team
   spawns on its own side).
 - TA's baked (Lightmass) lighting on map meshes, packed into a few atlas pages per map (Settings → Video → Baked
-  Lighting).
+  Lighting). The lightmap texels are linear, so their colour matches each level's sun and sky.
 - TA's own animations: third-person locomotion blended like TA's AnimTree (8-way run and ski, flight, landing,
   per-weapon sets, aim offsets, fire/reload/weapon-switch on the upper body) and the first-person arms + weapon
   meshes playing their 1P animations (idle, fire, reload, retrieve), with an ammo readout on the weapon.
@@ -60,6 +63,8 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 **Client**
 - TA-style front end: login, server browser, host game, class/loadout editor with a live model preview,
   team and class screens, scoreboard, career stats, TA HUD, VGS menu, minimap, kill feed, chat.
+- HUD left column, top to bottom: net stats (F10), the VGS menu and the last VGS lines, then chat (the last 10
+  messages stay for 30 s; all of them while typing). The crosshair is red and slightly larger by default.
 - Loading screen laid out like TA's (next map, game type, rules of engagement over a map screenshot, gameplay tip);
   the screenshot is captured on your first visit to a map.
 - Graphics (Settings → Video, with Low/Medium/High/Ultra presets that only touch performance options):
@@ -215,7 +220,8 @@ config            server configuration
 
 - Lightmaps are imported for static meshes only; terrain and BSP surfaces still use dynamic lighting, and lightmaps
   are stored at reduced resolution to keep map downloads small. Materials use one diffuse, normal and specular map
-  each (TA's colour parameters, panners and emissive layers are not reproduced).
+  each, with the material's diffuse tiling and tint (TA's detail/overlay layers, panners and emissive layers such as
+  glowing lava cracks are not reproduced).
 - Map force fields stop players but not shots, and Sunstar's flag shields let their own team through (TA blocks
   everyone) so flags stay capturable.
 - HDR is internal (16-bit rendering, tone-mapped to the display); browsers do not expose HDR output for WebGL.

@@ -64,13 +64,14 @@ export class Match {
     // Bots need routes into base interiors (generator rooms, CaH points, roofed flag stands).
     for (const a of this.assets) if (a.type === 'generator' || a.type === 'cap_point') this.nav.prepare(a.pos);
     for (const f of this.flags) this.nav.prepare(f.home);
-    // Where bots restock: each team's inventory station closest to its flag.
+    // Where bots restock: the team's inventory station closest to its flag that bots can find a way into.
     for (const t of [0, 1]) {
       const home = this.flags.find((f) => f.team === t)?.home;
       const st = this.assets.filter((a) => a.type === 'inventory' && a.team === t);
       if (home) st.sort((a, b) => distSq(a.pos, home) - distSq(b.pos, home));
-      this.restock[t] = st.slice(0, 1).map((a) => a.pos);
-      for (const p of this.restock[t]) this.nav.prepare(p);
+      // Indoor stations need a route in; outdoor ones (no route needed) come next.
+      const pick = st.find((a) => { this.nav.prepare(a.pos); return this.nav.route(a.pos); }) ?? st.find((a) => this.nav.openSky(a.pos));
+      if (pick) this.restock[t] = [pick.pos];
     }
     this.phase = PHASE.WARMUP;
     this.phaseEnd = this.mode.id === 'training' ? Infinity : 10;
@@ -484,10 +485,12 @@ export class Match {
   /** Like TA: walking into a friendly powered inventory station restocks and applies a pending loadout. */
   private checkStationTouch(p: Player) {
     if (p.vehicle || (this.stationUsed.get(p.id) ?? 0) > this.now) return;
+    // Bots steer less precisely than players walk in, so they get a little more reach.
+    const reach = p.isBot ? 3.5 : 1.6;
     for (const a of this.assets) {
       if (a.type !== 'inventory' || a.destroyed || (a.team !== p.team && a.team !== 255)) continue;
       const dy = p.move.pos.y - a.pos.y;
-      if (dy < -0.5 || dy > 2 || Math.hypot(a.pos.x - p.move.pos.x, a.pos.z - p.move.pos.z) > 1.6) continue;
+      if (dy < (p.isBot ? -1.5 : -0.5) || dy > 2 || Math.hypot(a.pos.x - p.move.pos.x, a.pos.z - p.move.pos.z) > reach) continue;
       if (!this.isPowered(a)) return;
       this.stationUsed.set(p.id, this.now + 4);
       this.useStation(p);

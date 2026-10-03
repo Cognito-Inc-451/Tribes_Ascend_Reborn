@@ -391,11 +391,19 @@ input[type=checkbox] { accent-color: var(--amber); width: 18px; height: 18px; }
 .feed .k { background: rgba(8, 11, 15, .72); padding: .25em .7em; animation: fadeOut 6s forwards; }
 .feed .t0 { color: #ff8a78; } .feed .t1 { color: #7cb8ff; } .feed .tn { color: #ddd; }
 @keyframes fadeOut { 0%, 80% { opacity: 1; } 100% { opacity: 0; } }
-.chat { position: absolute; left: 18px; bottom: calc(150px * var(--hud-scale)); width: 480px; max-height: 15em; overflow: hidden; font-family: var(--body); font-size: 15px; display: flex; flex-direction: column; justify-content: flex-end; gap: 2px; transition: opacity .2s; }
+.leftcol { position: absolute; left: 18px; top: calc(236px * var(--hud-scale)); bottom: calc(150px * var(--hud-scale)); width: 480px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
+.leftcol > * { flex-shrink: 0; }
+.leftcol .vgs { position: static; align-self: flex-start; }
+.vgslog { display: flex; flex-direction: column; gap: 2px; font-family: var(--body); font-size: 14px; flex-shrink: 1 !important; overflow: hidden; }
+.vgslog .m { text-shadow: 0 1px 2px #000, 0 0 6px rgba(0,0,0,.6); animation: fadeOut 15s forwards; }
+.vgslog .m .nm { font-weight: 600; }
+.vgslog .m .tx { color: #ffe39a; }
+.vgslog .m.team .ch { color: var(--good); }
+.chat { max-height: 16em; overflow: hidden; font-family: var(--body); font-size: 15px; display: flex; flex-direction: column; justify-content: flex-end; gap: 2px; }
 .chat .m.gone { display: none; }
 .chat.open .m.gone { display: block; }
-body:has(.vgs:not(.hidden)) .chat:not(.open) { opacity: 0; }
-.chat .m { text-shadow: 0 1px 2px #000, 0 0 6px rgba(0,0,0,.6); animation: fadeOut 12s forwards; }
+.chat .m { text-shadow: 0 1px 2px #000, 0 0 6px rgba(0,0,0,.6); animation: fadeOut 30s forwards; }
+.chat.open { background: rgba(4, 7, 10, .45); padding: 4px 6px; }
 .chat.open .m { animation: none; opacity: 1; }
 .chat .m .nm { font-weight: 600; }
 .chat .m.team .ch { color: var(--good); }
@@ -420,7 +428,7 @@ body:has(.vgs:not(.hidden)) .chat:not(.open) { opacity: 0; }
 .damage-dir.show { animation: dmg .6s ease-out; }
 @keyframes dmg { 0% { opacity: 1; } 100% { opacity: 0; } }
 .vignette { position: absolute; inset: 0; box-shadow: inset 0 0 140px rgba(200, 20, 10, 0); transition: box-shadow .2s; }
-.netstats { position: absolute; left: 12px; top: calc(230px * var(--hud-scale)); font: 12px/1.45 ui-monospace, Consolas, monospace; background: rgba(0,0,0,.55); padding: .5em .8em; white-space: pre; }
+.netstats { font: 12px/1.45 ui-monospace, Consolas, monospace; background: rgba(0,0,0,.55); padding: .5em .8em; white-space: pre; align-self: flex-start; }
 .minimap { position: absolute; left: calc(16px * var(--hud-scale)); top: calc(16px * var(--hud-scale)); border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.6), 0 4px 18px rgba(0,0,0,.45); }
 .bigmap { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: rgba(4, 6, 9, .72); }
 .bigmap canvas { border: 1px solid var(--line-strong); box-shadow: 0 10px 40px rgba(0,0,0,.6); }

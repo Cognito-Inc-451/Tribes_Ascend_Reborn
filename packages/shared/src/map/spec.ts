@@ -80,9 +80,10 @@ export interface MeshAsset {
   uv2?: Float32Array;
   /**
    * Index ranges per material; `tex` indexes MapData.textures (-1 = untextured), `ntex` the normal map, `fx` liquids or
-   * the blend of TA's non-opaque materials (light beams, glows, glass, grime decals).
+   * the blend of TA's non-opaque materials (light beams, glows, glass, grime decals). `tile` repeats the diffuse texture
+   * over the UVs and `tint` multiplies it (the material's diffuse tiling / colour parameters).
    */
-  groups?: { start: number; count: number; tex: number; ntex?: number; stex?: number; fx?: MeshFx }[];
+  groups?: { start: number; count: number; tex: number; ntex?: number; stex?: number; fx?: MeshFx; tile?: number; tint?: [number, number, number] }[];
 }
 
 export type MeshFx = 'lava' | 'water' | 'additive' | 'translucent' | 'modulate';
