@@ -66,6 +66,9 @@ export class BotBrain {
   private exitPath: Vec3[] | null = null;
   private exitIdx = 0;
   private nextIndoorCheck = 0;
+  /** Just left a building: a point beyond its entrance to reach before steering at the goal again. */
+  private clearOut: Vec3 | null = null;
+  private clearUntil = 0;
   /** Indoor objectives this bot keeps getting stuck on: goal key -> time until it tries again. */
   private abandoned = new Map<string, number>();
   private stuckHits = 0;
@@ -109,6 +112,10 @@ export class BotBrain {
   private leave(m: Match, p: Player, goal: Vec3): Vec3 | null {
     const pos = p.move.pos;
     const d3 = (a: Vec3) => Math.hypot(a.x - pos.x, a.y + 0.05 - pos.y, a.z - pos.z);
+    if (this.clearOut) {
+      if (m.now < this.clearUntil && d3(this.clearOut) > 3) return this.clearOut;
+      this.clearOut = null;
+    }
     if (m.now >= this.nextIndoorCheck) {
       this.nextIndoorCheck = m.now + 1;
       if (m.nav.openSky(pos) || Math.hypot(goal.x - pos.x, goal.z - pos.z) < 15 || !m.world.raycast(p.eye(), { x: goal.x, y: goal.y + 1, z: goal.z }, undefined, false)) this.exitPath = null;
@@ -122,9 +129,20 @@ export class BotBrain {
       }
     }
     if (!this.exitPath) return null;
-    if (d3(this.exitPath[this.exitIdx]) > 25) { this.exitPath = null; return null; }
+    // Knocked off the path (distance to the segment being walked; waypoints can be 25+ m apart).
+    const from = this.exitPath[Math.min(this.exitIdx + 1, this.exitPath.length - 1)], to = this.exitPath[this.exitIdx];
+    const sx = to.x - from.x, sy = to.y - from.y, sz = to.z - from.z;
+    const t = clamp(((pos.x - from.x) * sx + (pos.y - from.y) * sy + (pos.z - from.z) * sz) / Math.max(1e-6, sx * sx + sy * sy + sz * sz), 0, 1);
+    if (Math.hypot(from.x + sx * t - pos.x, from.y + sy * t - pos.y, from.z + sz * t - pos.z) > 12) { this.exitPath = null; return null; }
     while (this.exitIdx > 0 && d3(this.exitPath[this.exitIdx]) < 2.4) this.exitIdx--;
-    if (this.exitIdx === 0 && d3(this.exitPath[0]) < 2.4) { this.exitPath = null; return null; }
+    if (this.exitIdx === 0 && d3(this.exitPath[0]) < 2.4) {
+      // Out: carry on past the entrance and up, or the goal direction can lead straight back inside.
+      const [a, b = a] = this.exitPath, dx = a.x - b.x, dz = a.z - b.z, l = Math.hypot(dx, dz) || 1;
+      this.clearOut = { x: a.x + (dx / l) * 14, y: a.y + 6, z: a.z + (dz / l) * 14 };
+      this.clearUntil = m.now + 4;
+      this.exitPath = null;
+      return this.clearOut;
+    }
     this.indoor = true;
     return this.exitPath[this.exitIdx];
   }
@@ -132,6 +150,15 @@ export class BotBrain {
   constructor(readonly difficulty: BotDifficulty, seed: number) {
     this.skill = SKILL[difficulty];
     this.rnd = mulberry32(seed);
+  }
+
+  /** New map: forget targets, routes and every timer (match time restarts at 0, so old deadlines would freeze the bot). */
+  newMatch() {
+    Object.assign(this, {
+      target: null, targetSince: 0, nextScan: 0, stuckCheck: 0, unstickUntil: 0, nextVgs: 0, nextSteer: 0, wander: null, voidBelow: false,
+      routeKey: '', routeIdx: 0, charging: false, exitPath: null, exitIdx: 0, nextIndoorCheck: 0, stuckHits: 0, clearOut: null, clearUntil: 0,
+    });
+    this.abandoned.clear();
   }
 
   chooseRole(m: Match, p: Player) {
@@ -283,7 +310,8 @@ export class BotBrain {
     // Main weapon dry: restock at one of our inventory stations (unless carrying a flag).
     const w0 = p.weapons[0];
     if (!p.flag && w0 && w0.def.kind !== 'repair' && w0.clip === 0 && w0.ammo === 0 && p.team <= 1) {
-      const st = m.restock[p.team].filter((s) => !this.gaveUp(m, s)).sort((a, b) => distSq(a, p.move.pos) - distSq(b, p.move.pos))[0];
+      const usable = (s: Vec3) => m.assets.some((a) => a.type === 'inventory' && a.pos === s && !a.destroyed && m.isPowered(a));
+      const st = m.restock[p.team].filter((s) => !this.gaveUp(m, s) && usable(s)).sort((a, b) => distSq(a, p.move.pos) - distSq(b, p.move.pos))[0];
       if (st) { this.staticGoal = true; return st; }
     }
     if (mode === 'ctf' || mode === 'blitz') {
@@ -376,7 +404,10 @@ export class BotBrain {
     if (!this.wander || distSq(this.wander, center) > radius * radius * 1.5 || distSq(this.wander, center) < 1) {
       const a = this.rnd() * Math.PI * 2, r = radius * (0.3 + this.rnd() * 0.7);
       const x = center.x + Math.cos(a) * r, z = center.z + Math.sin(a) * r;
-      this.wander = { x, y: m.world.terrain.heightAt(x, z), z };
+      // The top surface, not the terrain: a terrain point under a base sends bots inside it.
+      const ground = m.world.terrain.heightAt(x, z);
+      const hit = m.world.raycast({ x, y: Math.max(ground, center.y) + 120, z }, { x, y: ground - 1, z }, undefined, false);
+      this.wander = { x, y: hit ? hit.point.y + 0.5 : ground, z };
     }
     return this.wander;
   }

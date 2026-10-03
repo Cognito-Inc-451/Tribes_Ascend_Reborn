@@ -28,6 +28,8 @@ export interface HistoryEntry { t: number; x: number; y: number; z: number }
 export class Player {
   team = 255;
   spectator = true;
+  /** Picked SPECTATE on the team screen (kept across map changes). */
+  chosenSpectator = false;
   follow = -1;
   cls: ClassDef = CLASSES[0];
   loadout: Loadout = CLASSES[0].defaultLoadout;

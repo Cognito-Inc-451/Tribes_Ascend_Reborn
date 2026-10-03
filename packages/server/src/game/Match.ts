@@ -18,7 +18,7 @@ export interface MatchIO {
   onMatchOver(winner: number): void;
 }
 
-interface LiveProj extends ProjState { def: ProjectileDef; prev: Vec3; explosive: boolean; isDisc: boolean }
+interface LiveProj extends ProjState { def: ProjectileDef; prev: Vec3; explosive: boolean; isDisc: boolean; fractal?: { t: number; base: Vec3; next: number } }
 
 const SELF_DAMAGE = 0.5;
 const INTERP_DELAY = 0.1;
@@ -711,6 +711,7 @@ export class Match {
   private stepProjectiles() {
     for (const pr of this.projectiles.values()) {
       pr.prev = { ...pr.pos };
+      if (pr.fractal) { this.stepFractal(pr); continue; }
       let homingPos: Vec3 | undefined;
       if (pr.homingTarget >= 1000) homingPos = this.vehicles.find((v) => v.id === pr.homingTarget - 1000)?.pos;
       else if (pr.homingTarget >= 0) { const t = this.players.get(pr.homingTarget); if (t?.alive) homingPos = t.move.pos; }
@@ -782,13 +783,44 @@ export class Match {
     return null;
   }
 
-  explode(pr: LiveProj, direct: Player | null) {
-    this.projectiles.delete(pr.id);
+  /** Fractal grenade after its fuse: rises, fires shards around it, then blows up itself. */
+  private stepFractal(pr: LiveProj) {
+    const f = pr.def.fractal!, s = pr.fractal!;
+    s.t += DT;
+    const up = Math.min(1, s.t / f.ascentTime);
+    pr.pos = { x: s.base.x, y: s.base.y + f.ascent * (1 - (1 - up) * (1 - up)), z: s.base.z };
+    pr.vel = { x: 0, y: 0, z: 0 };
+    const end = f.ascentTime + f.duration;
+    while (s.t >= s.next && s.next < end) {
+      s.next += f.interval;
+      const a = this.rng() * Math.PI * 2, r = f.reach * Math.sqrt(this.rng());
+      const to = { x: pr.pos.x + Math.cos(a) * r, y: pr.pos.y - this.rng() * f.reachY * 2, z: pr.pos.z + Math.sin(a) * r };
+      const hit = this.world.raycast(pr.pos, to);
+      const at = hit ? hit.point : to;
+      this.io.broadcast({ t: 'fx', kind: 'fractal', pos: pr.pos, to: at, item: pr.item });
+      const shard: LiveProj = {
+        ...pr, id: -1, pos: at, fractal: undefined, def: { ...pr.def, fractal: undefined, impulse: 20000 },
+        dmgOverride: { direct: f.damage, splashMax: f.damage, splashMin: f.damage * 0.3, radius: f.radius },
+      };
+      this.explode(shard, null, { silent: true });
+    }
+    if (s.t >= end) this.explode(pr, null, { final: true });
+  }
+
+  explode(pr: LiveProj, direct: Player | null, opts: { final?: boolean; silent?: boolean } = {}) {
     const d = pr.def;
+    if (d.fractal && !opts.final && !pr.fractal) {
+      // TA: the grenade only starts its fractal phase here; damage comes from the shards and the last blast.
+      pr.fractal = { t: 0, base: { ...pr.pos }, next: d.fractal.ascentTime };
+      pr.vel = { x: 0, y: 0, z: 0 };
+      pr.stuck = true;
+      return;
+    }
+    this.projectiles.delete(pr.id);
     const owner = this.players.get(pr.owner) ?? null;
     const radius = pr.dmgOverride?.radius ?? d.radius;
     const sMax = pr.dmgOverride?.splashMax ?? d.splashMax, sMin = pr.dmgOverride?.splashMin ?? d.splashMin;
-    this.io.broadcast({ t: 'fx', kind: 'explode', pos: pr.pos, item: pr.item, radius });
+    if (!opts.silent) this.io.broadcast({ t: 'fx', kind: 'explode', pos: pr.pos, item: pr.item, radius });
     if (pr.item === 'emp_grenade' || pr.item === 'emp_xl') this.empBlast(pr.pos, radius, pr.team);
     if (d.split) {
       for (let i = 0; i < d.split.count; i++) {

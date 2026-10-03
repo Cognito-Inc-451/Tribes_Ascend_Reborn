@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { projDef, ITEM_IDS, type ProjSnap, type Vec3 } from '@ar/shared';
 import { settings } from '../settings.js';
+import { TaParticles, type FxHandle } from './tafx.js';
 
 const MAX_PARTICLES = 4000;
 
@@ -117,7 +118,9 @@ export class Effects {
   readonly particles = new Particles();
   /** Normal-blended particles so smoke darkens instead of glowing. */
   readonly smoke = new Particles(THREE.NormalBlending);
-  private projMeshes = new Map<number, { mesh: THREE.Mesh; halo: THREE.Sprite; last: THREE.Vector3 | null; model: string; color: THREE.Color }>();
+  /** TA's own weapon effects when imported (trails, explosions, fractal shards). */
+  readonly ta = new TaParticles();
+  private projMeshes = new Map<number, { mesh: THREE.Mesh; halo: THREE.Sprite; last: THREE.Vector3 | null; model: string; color: THREE.Color; trail: FxHandle | null }>();
   private matCache = new Map<number, THREE.MeshBasicMaterial>();
   private transients: Transient[] = [];
   private lights: THREE.PointLight[] = [];
@@ -126,7 +129,8 @@ export class Effects {
   constructor() {
     GLOW ??= spriteTex('glow');
     RING ??= spriteTex('ring');
-    this.group.add(this.smoke.points, this.particles.points);
+    this.group.add(this.smoke.points, this.particles.points, this.ta.group);
+    void this.ta.load();
     const nLights = settings.quality === 'low' ? 1 : 4;
     for (let i = 0; i < nLights; i++) {
       const l = new THREE.PointLight(0xffaa66, 0, 40, 2);
@@ -151,21 +155,22 @@ export class Effects {
       const def = projDef(item);
       if (!e) {
         const model = def?.model ?? 'grenade';
-        const color = new THREE.Color(def?.color ?? 0xffffff);
+        const color = new THREE.Color(this.ta.item(item)?.light ?? def?.color ?? 0xffffff);
         const mesh = new THREE.Mesh(PROJ_GEOMS[model] ?? PROJ_GEOMS.grenade, this.glowMat(def?.color ?? 0xffffff));
         const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: GLOW, color, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false, opacity: 0.8 }));
         halo.scale.setScalar(HALO_SIZE[model] ?? 0.8);
         this.group.add(mesh, halo);
-        e = { mesh, halo, last: null, model, color };
+        e = { mesh, halo, last: null, model, color, trail: this.ta.play(this.ta.item(item)?.trail, pos, { trail: true }) };
         this.projMeshes.set(snap.id, e);
       }
+      if (e.trail) e.trail.pos = { ...pos };
       e.mesh.position.set(pos.x, pos.y, pos.z);
       e.halo.position.copy(e.mesh.position);
       const v = snap.vel;
       if (e.model === 'disc' || e.model === 'mine') e.mesh.rotation.y += dt * 20;
       else if (Math.hypot(v.x, v.y, v.z) > 0.1) e.mesh.lookAt(pos.x + v.x, pos.y + v.y, pos.z + v.z);
       if (e.model === 'rocket' || e.model === 'saber') e.mesh.rotateX(Math.PI / 2);
-      const tr = TRAIL[e.model];
+      const tr = e.trail ? undefined : TRAIL[e.model];
       if (tr && e.last) {
         // Glowing particle trail along the path travelled this frame (smoke behind rockets and mortars).
         for (let i = 0; i < tr.per; i++) {
@@ -181,8 +186,24 @@ export class Effects {
       if (seen.has(id)) continue;
       this.group.remove(e.mesh, e.halo);
       e.halo.material.dispose();
+      e.trail?.stop();
       this.projMeshes.delete(id);
     }
+  }
+
+  /** TA's explosion for `item` (with its light) if imported; false to fall back to the generic one. */
+  taExplosion(item: string, pos: Vec3, radius: number): boolean {
+    const f = this.ta.item(item);
+    if (!this.ta.play(f?.explode, pos)) return false;
+    this.flash(pos, f?.boomLight ?? f?.light ?? 0xffaa66, 60 + radius * 20, 0.35);
+    return true;
+  }
+
+  /** A fractal grenade shard: TA's tracer colour from the orb to the hit, and its small blast there. */
+  fractalShot(item: string, from: Vec3, to: Vec3) {
+    const f = this.ta.item(item);
+    this.beam(from, to, f?.light ?? 0x7dff3a, 0.18, 0.05);
+    if (!this.ta.play(f?.shard, to, { scale: 0.6, gain: 0.4 })) this.explosion(to, 1.5, f?.light ?? 0x7dff3a);
   }
 
   /** Additive camera-facing sprite that animates over its life. */
@@ -303,6 +324,7 @@ export class Effects {
   update(dt: number, viewportH: number) {
     this.particles.update(dt, viewportH);
     this.smoke.update(dt, viewportH);
+    this.ta.update(dt);
     for (const tr of [...this.transients]) {
       tr.t += dt;
       const k = Math.min(1, tr.t / tr.life);
@@ -318,8 +340,9 @@ export class Effects {
   }
 
   clear() {
-    for (const e of this.projMeshes.values()) { this.group.remove(e.mesh, e.halo); e.halo.material.dispose(); }
+    for (const e of this.projMeshes.values()) { this.group.remove(e.mesh, e.halo); e.halo.material.dispose(); e.trail?.stop(); }
     this.projMeshes.clear();
+    this.ta.clear();
   }
 }
 

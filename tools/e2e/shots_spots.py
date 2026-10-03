@@ -50,5 +50,9 @@ with sync_playwright() as p:
     for i, (x, y, z, yaw, pitch) in enumerate(spots):
         page.evaluate("([x, y, z, yaw, pitch]) => { const c = window.__ar.client(); c.spec.free = true; c.spec.pos.set(x, y, z); c.spec.yaw = yaw; c.spec.pitch = pitch; c.input.yaw = yaw; c.input.pitch = pitch; }", [x, y, z, yaw, pitch])
         time.sleep(4)
+        # Optional JS per spot just before the capture (e.g. play an effect in front of the camera).
+        if os.environ.get('AR_EACH'):
+            page.evaluate("(s) => (0, eval)(s)", os.environ['AR_EACH'])
+            time.sleep(float(os.environ.get('AR_EACH_WAIT', '1.5')))
         page.screenshot(path=os.path.join(out, f'55_spot_{map_id}{tag}_{i}.png'))
     browser.close()

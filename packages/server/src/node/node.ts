@@ -105,6 +105,7 @@ export class LocalNode {
     m = /^\/assets\/voices\/([a-z0-9_]{1,48})\/([A-Za-z0-9_]{1,80})\.ogg$/.exec(p);
     if (m) return this.file(res, join(this.o.assetsDir, 'voices', m[1], `${m[2]}.ogg`), true);
     if (p === '/assets/models/manifest.json') return this.file(res, join(this.o.assetsDir, 'models', 'manifest.json'), false);
+    if (p === '/assets/fx/manifest.json') return this.file(res, join(this.o.assetsDir, 'fx', 'manifest.json'), false);
     m = /^\/assets\/ui\/([a-z0-9_]{1,120})\.png$/.exec(p);
     if (m) return this.file(res, join(this.o.assetsDir, 'ui', `${m[1]}.png`), true);
     m = /^\/assets\/models\/([a-z0-9_]{1,48})\.amdl$/.exec(p);

@@ -243,7 +243,7 @@ export type C2S =
   | { t: 'admin'; password: string; cmd: string; arg?: string }
   | { t: 'mapready' };
 
-export type FxKind = 'explode' | 'tracer' | 'fire' | 'melee' | 'lance' | 'repair' | 'deploy' | 'impact' | 'strike_warn' | 'strike' | 'jump' | 'station';
+export type FxKind = 'explode' | 'tracer' | 'fire' | 'melee' | 'lance' | 'repair' | 'deploy' | 'impact' | 'strike_warn' | 'strike' | 'jump' | 'station' | 'fractal';
 
 export interface MapRef { source: 'reborn' | 'original'; id: string; hash?: string; bytes?: number; file?: string }
 

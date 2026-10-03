@@ -8,6 +8,7 @@ import { exportAnims } from './anim.js';
 import { importMap, indexCooked, loadPackage, modeFromFile } from './extract.js';
 import { Resolver } from './material.js';
 import { exportModels } from './models.js';
+import { exportWeaponFx } from './particles.js';
 import { extractMusic, extractSfx, extractVoices } from './sound.js';
 import { exportUi } from './ui.js';
 import { encodeTexture, extractTexture, type TextureData } from './texture.js';
@@ -121,9 +122,14 @@ if (withVoices && (all || !only || assetsOnly)) {
 
 if (onTexture && (all || !only || assetsOnly)) {
   console.log('Exporting models (characters, weapons, vehicles, stations) ...');
-  const anims1p = exportModels(cooked, outDir, new Resolver(indexCooked(cooked), loadPackage), loadPackage, onTexture, (s) => console.log(`  ${s}`));
+  const resolver = new Resolver(indexCooked(cooked), loadPackage);
+  const anims1p = exportModels(cooked, outDir, resolver, loadPackage, onTexture, (s) => console.log(`  ${s}`));
   const gameU = join(cooked, 'TribesGame.u');
-  if (existsSync(gameU)) exportAnims(loadPackage(gameU), outDir, (s) => console.log(`  ${s}`), anims1p);
+  if (existsSync(gameU)) {
+    exportAnims(loadPackage(gameU), outDir, (s) => console.log(`  ${s}`), anims1p);
+    console.log('Exporting weapon effects (particle systems) ...');
+    exportWeaponFx(resolver, loadPackage(gameU), ITEMS, onTexture, outDir, (s) => console.log(`  ${s}`));
+  }
 }
 if (assetsOnly) process.exit(0);
 

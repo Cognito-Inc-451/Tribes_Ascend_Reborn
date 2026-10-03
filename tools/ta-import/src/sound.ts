@@ -16,7 +16,14 @@ const MUSIC: Record<string, string> = {
 
 // Our weapon ids -> AUD_WEP_* sound group (first match wins).
 const WEAPON_GROUP: [RegExp, string][] = [
-  [/^light_spinfusor$/, 'Spinfusor_Light'], [/^heavy_spinfusor$|^gladiator$/, 'Spinfusor_Heavy'], [/twinfusor/, 'Twinfusor_Light'], [/spinfusor/, 'Spinfusor'],
+  // Belt items (explosions only; throwing uses the shared grenade throw).
+  [/^(impact|compact)_nitron$/, 'ImpactGrenade'], [/^explosive_nitron$/, 'ImpactGrenade_Heavy'], [/^t5_grenade$/, 'Grenade_T5'],
+  [/^light_sticky$/, 'StickyGrenade_Light'], [/^sticky_/, 'StickyGrenade'], [/^smoke_grenade$/, 'NinjaSmoke'], [/^frag_xl$/, 'Grenade_XL'],
+  [/^heavy_ap/, 'APGrenade_Heavy'], [/^ap_grenade$/, 'AP_Grenade'], [/^proximity_grenade$/, 'Proximity_Grenade'], [/^emp_/, 'EMPGrenade'],
+  [/^cluster_grenade$/, 'Grenade_MIRV'], [/^whiteout_grenade$/, 'WhiteOutGrenade'], [/fractal$|^fractal_grenade$/, 'FractalGrenade'],
+  [/^spinfusor_disc$/, 'DiskToss'], [/frag|^tcng/, 'Grenade'], [/claymore/, 'Claymore'], [/^prism_mines$/, 'Prism_Mine'], [/^motion_mine$/, 'APMine'], [/^mines$/, 'Mine'],
+  [/^throwing_knives$/, 'ThrowingKnives'], [/repair_tool$/, 'RepairGun'],
+  [/^light_spinfusor$/, 'Spinfusor_Light'], [/^stealth_spinfusor$/, 'Spinfusor_Stealth'], [/^heavy_spinfusor$|^gladiator$/, 'Spinfusor_Heavy'], [/twinfusor/, 'Twinfusor_Light'], [/spinfusor/, 'Spinfusor'],
   [/^heavy_bolt/, 'BoltLauncher_Heavy'], [/^bolt_launcher$/, 'BoltLauncher'], [/^auto_shotgun$/, 'Shotgun_Auto'], [/^sawed_off$/, 'Shotgun_SawedOff'],
   [/shotgun|the_hammer/, 'Shotgun'], [/assault_rifle|gasts_rifle/, 'AssaultRifle'], [/^shocklance$/, 'ShockLance'], [/^bxt1/, 'LaserRifle'],
   [/^phase_rifle$/, 'PhaseRifle'], [/^sap20$/, 'SAP20'], [/^nova_blaster/, 'NovaBlaster'], [/^nova_colt$/, 'NovaColt'], [/^falcon$/, 'Falcon_Auto_Pistol'],
@@ -29,7 +36,7 @@ const WEAPON_GROUP: [RegExp, string][] = [
 const VEHICLE_GROUP: Record<string, string> = { gravcycle: 'AUD_VEH_GravBike', beowulf: 'AUD_VEH_Beowulf', shrike: 'AUD_VEH_Shrike' };
 // Generic effects: key -> [group.subgroup prefix, wave-name filter].
 const GENERIC: Record<string, [string, RegExp]> = {
-  explode: ['AUD_WEP_Grenade.Explosion', /./], gen_explode: ['AUD_ENV_PowerGenerator.Explosion', /./], jet: ['AUD_PC_JetPack.Loop', /3P_LP/],
+  explode: ['AUD_WEP_Grenade.Explosion', /./], throw: ['AUD_WEP_Grenade.Grenade_Throw', /./], fractal_shot: ['AUD_WEP_FractalGrenade.Fire', /./], gen_explode: ['AUD_ENV_PowerGenerator.Explosion', /./], jet: ['AUD_PC_JetPack.Loop', /3P_LP/],
   ski: ['AUD_PC_Movement.Skiing', /Skiing_Fast$/], wind: ['AUD_PC_Movement.Speed', /./], step: ['AUD_PC_Movement.Footstep', /Dirt_Run_0[1-4]$/],
   fall: ['AUD_PC_Notifications.Fall_Damage', /./], hit: ['AUD_PC_Notifications.Impact__Notify', /./], blueplate: ['AUD_PC_Notifications.Headshot', /ImpactOnPawnNotify_Headshot$/],
   melee: ['AUD_WEP_MercMelee.Swing', /MercPunch_Swing_\d$/], melee_hit: ['AUD_WEP_MercMelee.Melee_Impact', /./], click: ['Aud_menu.Loadout_Menu', /ButtonPress/],
@@ -104,16 +111,18 @@ export function extractSfx(pkg: UPackage, itemIds: string[], outDir: string, log
     // Automatic weapons in TA: an attack transient, a loop while the trigger is held, a tail on release.
     const loops = pref3P(fireW.filter((w) => /_LP(_\d+)?$|Loop_\d+$/i.test(leaf(w)) && !/Spin|Scifi|Tech/i.test(leaf(w))));
     const tails = pref3P(fireW.filter((w) => /Tail/i.test(leaf(w))));
-    const shots = fireW.filter((w) => /^Fire$/i.test(sub(w)) && !/_LP|Loop|Foley|Tail|Spin|BulletEject|Reload|Clip|Mech/i.test(leaf(w)));
+    const shots = fireW.filter((w) => /^Fire$/i.test(sub(w)) && !/_LP|Loop|Foley|Tail|Spin(?!fusor)|BulletEject|Reload|Clip|Mech/i.test(leaf(w)));
     const attacks = pref3P(shots.filter((w) => /Attack/i.test(leaf(w))));
     const full = pref3P(shots.filter((w) => !/Attack/i.test(leaf(w))));
     const auto = (ITEMS[id]?.refire ?? 1) < 0.2;
-    if (auto && loops.length) {
+    // Belt items are thrown (shared grenade throw), so only their explosion is their own.
+    const belt = ITEMS[id]?.slot === 'belt';
+    if (!belt && auto && loops.length) {
       save(`fire_${id}`, attacks.length ? attacks : full, 2);
       save(`fireloop_${id}`, loops, 1);
       save(`firetail_${id}`, tails, 1);
-    } else save(`fire_${id}`, auto && attacks.length ? attacks : full.length ? full : attacks, 3);
-    save(`boom_${id}`, inGroup.filter((w) => /Explosion/i.test(sub(w))), 3);
+    } else if (!belt) save(`fire_${id}`, auto && attacks.length ? attacks : full.length ? full : attacks, 3);
+    save(`boom_${id}`, inGroup.filter((w) => /Explosion/i.test(sub(w)) && !/Second/i.test(leaf(w))), 3);
     // Reload parts in order (mag out, mag in, ...), and the draw sound.
     save(`reload_${id}`, inGroup.filter((w) => /^reload$/i.test(sub(w))).sort((a, b) => leaf(a).localeCompare(leaf(b))), 4);
     save(`retrieve_${id}`, inGroup.filter((w) => /^Retrieve$/i.test(sub(w))), 2);

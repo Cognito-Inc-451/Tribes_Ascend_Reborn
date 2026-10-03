@@ -1,4 +1,4 @@
-import { ORIGINAL_VOICE, VOICE_PACKS, VGS_BY_ID, type Vec3 } from '@ar/shared';
+import { ITEMS, ORIGINAL_VOICE, VOICE_PACKS, VGS_BY_ID, type Vec3 } from '@ar/shared';
 import { NODE_URL, voiceManifest } from '../net/node.js';
 import { settings } from '../settings.js';
 
@@ -10,10 +10,13 @@ type SoundName =
 /** Items without their own imported samples borrow a close relative's. */
 const SFX_ALIAS: Record<string, string> = { blinksfusor: 'light_spinfusor', lr_repair_tool: 'repair_tool' };
 
-/** Synth sound -> imported original sample key. */
+/** Synth sound -> imported original sample key (weapon families borrow a representative TA weapon). */
 const SAMPLE_FOR: Partial<Record<SoundName, string>> = {
   explode: 'explode', hit: 'hit', blueplate: 'blueplate', melee: 'melee', click: 'click', denied: 'denied', land: 'step', gen_down: 'gen_powerdown',
   kill: 'kill_confirm', flag_drop: 'flag_drop',
+  disc: 'fire_spinfusor', bolt: 'fire_bolt_launcher', bullet: 'fire_assault_rifle', rifle: 'fire_bxt1', shotgun: 'fire_shotgun', grenade: 'throw',
+  plasma: 'fire_plasma_gun', mortar: 'fire_fusion_mortar', lance: 'fire_shocklance', turret: 'fire_light_turret', repair: 'fire_repair_tool',
+  deploy: 'deploy_mine', spawn: 'respawn',
 };
 
 interface FireLoop { item: string; src: AudioBufferSourceNode | null; gain: GainNode; panner: PannerNode | null; last: number; hold: number; vol: number }
@@ -509,6 +512,7 @@ export class AudioEngine {
 
   playWeapon(item: string, pos?: Vec3, vol = 1) {
     if (this.playSample(`fire_${item}`, pos, vol) || (SFX_ALIAS[item] && this.playSample(`fire_${SFX_ALIAS[item]}`, pos, vol))) return;
+    if (ITEMS[item]?.slot === 'belt' && this.playSample('throw', pos, vol)) return;
     if (/spinfusor|twinfusor|disc|gladiator/.test(item)) this.play('disc', pos, vol);
     else if (/bolt/.test(item)) this.play('bolt', pos, vol);
     else if (/mortar|mirv|beowulf/.test(item)) this.play('mortar', pos, vol);

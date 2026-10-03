@@ -81,6 +81,20 @@ for (let i = 0; i < ticks; i++) {
       console.log(`t=${m.now.toFixed(0)} ${p.name} ${p.brain!.role} pos(${p.move.pos.x.toFixed(0)},${p.move.pos.y.toFixed(0)},${p.move.pos.z.toFixed(0)}) dFlag=${d.toFixed(0)} dy=${ef ? (ef.pos.y - p.move.pos.y).toFixed(0) : ''} v=${(Math.hypot(p.move.vel.x, p.move.vel.z) * 3.6).toFixed(0)} e=${p.move.energy.toFixed(0)} g=${p.move.onGround} hp=${p.health.toFixed(0)}`);
     }
   }
+  if (process.env.INDOOR && i % 600 === 0 && m.now > 20) {
+    // Bots under a roof (inside bases): how many, and where they cluster.
+    const inside = [...m.players.values()].filter((p) => p.alive && !m.nav.openSky(p.move.pos));
+    const cells = new Map<string, string[]>();
+    for (const p of inside) {
+      const k = `${Math.round(p.move.pos.x / 10)},${Math.round(p.move.pos.z / 10)}`;
+      cells.set(k, [...(cells.get(k) ?? []), `${p.name}/${p.brain!.role}`]);
+    }
+    console.log(`t=${m.now.toFixed(0)} indoors ${inside.length}/${[...m.players.values()].filter((p) => p.alive).length}`, JSON.stringify(Object.fromEntries(cells)));
+    if (process.env.INDOOR === 'v') for (const p of inside) {
+      const b = p.brain as unknown as { exitPath: unknown[] | null; exitIdx: number; routeKey: string; indoor: boolean; target: Player | null; wander: unknown; staticGoal: boolean };
+      console.log(`   ${p.name} ${p.brain!.role} pos(${p.move.pos.x.toFixed(0)},${p.move.pos.y.toFixed(0)},${p.move.pos.z.toFixed(0)}) exit ${b.exitPath ? b.exitIdx : '-'} key ${b.routeKey} indoor ${b.indoor} static ${b.staticGoal} target ${b.target?.name ?? '-'} wander ${JSON.stringify(b.wander)} w0=${p.weapons[0]?.clip}/${p.weapons[0]?.ammo} cmd f${p.lastCmd.fwd.toFixed(1)} b${p.lastCmd.buttons}`);
+    }
+  }
   if (process.env.STUCK && i % 600 === 0) {
     // Bots that moved < 3 m over the last 10 s while alive the whole time; "inside" counts back-face hits around them.
     for (const p of m.players.values()) {

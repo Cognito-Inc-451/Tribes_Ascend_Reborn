@@ -67,6 +67,8 @@ export class GameClient {
   private zoomToggled = false;
   private showMarkers = true;
   private spec = { free: true, target: -1, pos: new THREE.Vector3(), yaw: 0, pitch: -0.3, speed: 40 };
+  /** Smoothed chase-camera state: bots' aim jitters every tick, and following it raw shakes the view. */
+  private chase = { target: -1, yaw: 0, pitch: 0, pos: new THREE.Vector3(), cam: new THREE.Vector3() };
   private deathPos: Vec3 | null = null;
   private nextFireLocal = 0;
   private prevClip = -1;
@@ -626,10 +628,14 @@ export class GameClient {
     switch (m.kind) {
       case 'explode': {
         const def = projDef(item);
-        this.fx.explosion(m.pos, Math.max(2, (m.radius ?? 4) * 0.6), def?.color ?? 0xffa040);
+        if (!this.fx.taExplosion(item, m.pos, m.radius ?? 4)) this.fx.explosion(m.pos, Math.max(2, (m.radius ?? 4) * 0.6), def?.color ?? 0xffa040);
         audio.playExplosion(item, m.pos, Math.min(1.4, (m.radius ?? 5) / 6));
         break;
       }
+      case 'fractal':
+        this.fx.fractalShot(item, m.pos, m.to ?? m.pos);
+        if (!audio.playKey('fractal_shot', m.pos, 0.7)) audio.playExplosion(item, m.to ?? m.pos, 0.4);
+        break;
       case 'tracer': {
         this.fx.tracer(m.pos, m.to ?? m.pos, item === 'light_turret' ? 0xff8060 : 0xfff0a0);
         const owner = m.player ?? -1;
@@ -794,10 +800,21 @@ export class GameClient {
       if (!this.spec.free) {
         const tgt = interp.find((x) => x.p.id === this.spec.target);
         if (tgt) {
-          const d = dirFromAngles(tgt.yaw, Math.min(0.2, tgt.pitch) - 0.25);
-          cam.position.set(tgt.pos.x - d.x * 7, tgt.pos.y + 2.4 - d.y * 7, tgt.pos.z - d.z * 7);
-          cam.lookAt(tgt.pos.x, tgt.pos.y + 1.4, tgt.pos.z);
-          focus.set(tgt.pos.x, tgt.pos.y, tgt.pos.z);
+          const c = this.chase;
+          if (c.target !== tgt.p.id) { c.target = tgt.p.id; c.yaw = tgt.yaw; c.pitch = tgt.pitch; c.pos.set(tgt.pos.x, tgt.pos.y, tgt.pos.z); }
+          const ka = 1 - Math.exp(-dt * 4), kp = 1 - Math.exp(-dt * 12);
+          let dy = tgt.yaw - c.yaw;
+          while (dy > Math.PI) dy -= Math.PI * 2;
+          while (dy < -Math.PI) dy += Math.PI * 2;
+          c.yaw += dy * ka;
+          c.pitch += (tgt.pitch - c.pitch) * ka;
+          c.pos.lerp(new THREE.Vector3(tgt.pos.x, tgt.pos.y, tgt.pos.z), kp);
+          const d = dirFromAngles(c.yaw, Math.min(0.2, c.pitch) - 0.25);
+          const want = new THREE.Vector3(c.pos.x - d.x * 7, c.pos.y + 2.4 - d.y * 7, c.pos.z - d.z * 7);
+          if (c.cam.distanceToSquared(want) > 400) c.cam.copy(want); else c.cam.lerp(want, kp);
+          cam.position.copy(c.cam);
+          cam.lookAt(c.pos.x, c.pos.y + 1.4, c.pos.z);
+          focus.copy(c.pos);
         } else this.spec.free = true;
       }
       if (this.spec.free) {
@@ -979,7 +996,7 @@ export class GameClient {
     const flagInfo = (snap?.flags ?? []).map((f) => `${f.team <= 1 ? TEAM_NAMES[f.team].split(' ')[0].toUpperCase() : 'FLAG'}: ${f.state === 0 ? 'HOME' : f.state === 1 ? `TAKEN (${this.pinfo(f.carrier)?.name ?? '?'})` : 'DROPPED'}`);
     const specTarget = spectating ? (this.spec.free ? 'FREE CAM' : this.pinfo(this.spec.target)?.name ?? 'FREE CAM') : null;
     const state: HudState = {
-      alive: this.pred.alive && !spectating, health: me?.health ?? 0, maxHealth: me?.maxHealth ?? 1, energy: self?.energy ?? this.pred.state.energy,
+      alive: (this.pred.alive || (!!me && (me.flags & PF.IN_VEHICLE) !== 0)) && !spectating, health: me?.health ?? 0, maxHealth: me?.maxHealth ?? 1, energy: self?.energy ?? this.pred.state.energy,
       maxEnergy: this.pred.params().maxEnergy, speedKmh: Math.hypot(this.pred.state.vel.x, this.pred.state.vel.y, this.pred.state.vel.z) * 3.6,
       cls: CLASSES.find((c) => c.id === this.cls)?.name ?? '', weapons: [w(lo.primary, 0), w(lo.secondary, 1)], slot: this.slot,
       belt: { name: ITEMS[lo.belt]?.name ?? '', count: self?.ammo[2]?.[0] ?? 0 }, pack: { name: ITEMS[lo.pack]?.name ?? '', active: (self?.ammo[3]?.[0] ?? 0) > 0 },
@@ -1005,7 +1022,9 @@ export class GameClient {
     ].join('\n') : null;
     this.hud.update(state, markers, plates, net);
     this.stats.tick(dt, state.alive, state.armor, this.cls, this.mode, state.health, state.maxHealth, this.pred.state.skiing && this.pred.state.onGround, state.speedKmh);
-    this.r.setSaturation(spectating ? 1 : !state.alive ? 0.12 : state.waiting ? 0.2 : 1);
+    // Driving counts as alive (the predicted pawn is parked while in a vehicle).
+    const dead = !me || !(me.flags & PF.ALIVE);
+    this.r.setSaturation(spectating ? 1 : dead ? 0.12 : state.waiting ? 0.2 : 1);
     const wantScores = this.input.held('scores') && !this.anyOverlay() || this.phase === PHASE.POSTGAME;
     if (wantScores) { this.scoreEl?.remove(); this.scoreEl = this.buildScoreboard(); }
     else if (this.scoreEl) { this.scoreEl.remove(); this.scoreEl = null; }

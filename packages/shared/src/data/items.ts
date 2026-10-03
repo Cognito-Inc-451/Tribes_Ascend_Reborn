@@ -23,6 +23,8 @@ export interface ProjectileDef {
   remote?: boolean;       // detonated by alt fire
   homing?: number;        // turn rate rad/s toward locked target
   split?: { count: number; spread: number; damage: number; radius: number };
+  /** TA fractal grenade (TrProj_SpikeGrenade): rises `ascent` m over `ascentTime` s, then every `interval` s for `duration` s shoots a shard up to `reach` m away (`reachY` m of drop) that blasts `damage` in `radius`; the grenade's own blast comes last. */
+  fractal?: { ascent: number; ascentTime: number; duration: number; interval: number; reach: number; reachY: number; damage: number; radius: number };
   size: number;           // collision radius vs players
   model: ProjectileModel;
   color: number;
@@ -199,8 +201,8 @@ export const ITEMS: Record<string, ItemDef> = Object.fromEntries(([
   item({ id: 'frag_grenade', name: 'Frag Grenade', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(800, 800, 250, 7), src: 'F/Doombringer' }),
   item({ id: 'mines', name: 'Mines', slot: 'belt', kind: 'deploy', clip: 3, ammo: 3, reload: 0, refire: 0.8, deploy: 'mine', src: 'F/Doombringer' }),
   item({ id: 'defective_frag', name: 'Defective Frag', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(700, 700, 250, 9, { fuse: 2.4 }), src: 'F/Doombringer' }),
-  item({ id: 'fractal_grenade', name: 'Fractal Grenade', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(410, 410, 150, 6, { split: { count: 6, spread: 5, damage: 410, radius: 5 } }), src: 'F/Brute' }),
-  item({ id: 'extended_fractal', name: 'Extended Fractal', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(390, 390, 140, 6, { split: { count: 8, spread: 7, damage: 390, radius: 5 } }), src: 'F/Brute' }),
+  item({ id: 'fractal_grenade', name: 'Fractal Grenade', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(410, 410, 150, 6, { fractal: { ascent: 1.8, ascentTime: 1, duration: 3, interval: 0.15, reach: 18, reachY: 2, damage: 100, radius: 6 } }), src: 'F/Brute; TA TrProj_SpikeGrenade' }),
+  item({ id: 'extended_fractal', name: 'Extended Fractal', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(390, 390, 140, 6, { fractal: { ascent: 1.8, ascentTime: 1, duration: 3.9, interval: 0.15, reach: 18, reachY: 2, damage: 85, radius: 6 } }), src: 'F/Brute; TA TrDevice_SpikeGrenade_MKD (longer, less per blast)' }),
   item({ id: 'light_sticky', name: 'Light Sticky', slot: 'belt', kind: 'projectile', clip: 2, ammo: 2, reload: 0, refire: 0.8, projectile: gren(1100, 1100, 300, 5.5, { sticky: true, bounce: undefined }), src: 'F/Brute' }),
 
   // ---------- Packs ----------

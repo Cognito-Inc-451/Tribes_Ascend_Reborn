@@ -140,7 +140,7 @@ export class GameServer {
       p.damagers.clear();
       if (!p.isBot) p.ready = false;
       this.match.addPlayer(p);
-      if (p.brain) p.brain.chooseRole(this.match, p);
+      if (p.brain) { p.brain.newMatch(); p.brain.chooseRole(this.match, p); }
     }
     this.mapVotes.clear();
   }
@@ -339,8 +339,8 @@ export class GameServer {
       case 'mapready':
         if (!p.ready) {
           p.ready = true;
-          if (p.team === 255 && !p.spectator) m.setTeam(p, m.autoTeam());
-          else if (p.team === 255) { m.setTeam(p, m.autoTeam()); }
+          if (p.chosenSpectator) m.setTeam(p, 255);
+          else if (p.team === 255) m.setTeam(p, m.autoTeam());
           else { p.spectator = false; p.respawnAt = m.now; }
           m.broadcastMatch();
           this.broadcastPlayers();
@@ -349,6 +349,7 @@ export class GameServer {
         break;
       case 'team': {
         const team = Number(msg.team);
+        p.chosenSpectator = team === 255;
         if (team === 255) m.setTeam(p, 255);
         else if (team === 0 || team === 1) m.setTeam(p, team);
         else m.setTeam(p, m.autoTeam(p));

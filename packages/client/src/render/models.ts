@@ -71,6 +71,9 @@ class ModelLibrary {
   textures: TextureStore | null = null;
   private renderer: THREE.WebGLRenderer | null = null;
 
+  /** Asset servers (local node first, then the host). */
+  get sources(): readonly string[] { return this.bases; }
+
   setup(bases: string[], renderer: THREE.WebGLRenderer) {
     const key = bases.join('|');
     if (this.renderer && key === this.bases.join('|')) return;

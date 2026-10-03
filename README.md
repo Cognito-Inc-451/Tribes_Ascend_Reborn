@@ -27,13 +27,16 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
   is instant.
 - All 9 classes (Pathfinder, Sentinel, Infiltrator, Soldier, Technician, Raider, Juggernaut, Doombringer, Brute) with
   their weapons, belts, packs, perks and upgrades. Everything is unlocked.
+- Fractal grenades behave like TA's: the orb rises, then fires damaging shards at the ground around it for 3 s
+  before its final blast.
 - Game modes: **CTF**, **CTF Blitz**, **Team Deathmatch**, **Rabbit**, **Arena**, **Capture and Hold**, plus Ski Training.
 - Bases: generators, inventory stations (walk in to restock, like TA), repair stations, turrets, radar, vehicle pads,
   vehicles (Grav Cycle, Beowulf, Shrike), deployables and call-ins (tactical strike, supply drop, orbital strike).
 - Bots (Recruit to Godlike, Adept by default) with roles (cappers, chasers, defenders, offense, farmers, roamers).
   They route into base interiors (generator rooms, CaH points) around enemy force fields, shell the enemy generator,
   restock at an inventory station they can actually reach, climb base shafts on a full energy tank, walk known
-  routes back out of a base after spawning or restocking inside, and roamers keep human players company (escorting
+  routes back out of a base after spawning or restocking inside (clearing the doorway before roaming), skip stations
+  whose generator is down, and roamers keep human players company (escorting
   or hunting them). Servers keep their bot count and only drop bots when the server is nearly full, to make room for
   players.
 - Host options: bots per team (10 by default), bot skill, time/score limits, infinite ammo, infinite energy, no fall
@@ -45,9 +48,11 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
   specular maps plus each material's diffuse tiling and colour tint, TA's translucent/additive materials such as light
   beams and glass, prefab interiors, lava/water, kill
   and pain volumes such as Lava Arena's lava and Blueshift's space), player/weapon/vehicle/station models, TA's class
-  skins (team armour and the Mercenary sets), sounds (weapons with looping automatic fire, reloads and draws,
+  skins (team armour and the Mercenary sets), sounds (every weapon and belt item's own fire and explosion sounds,
+  looping automatic fire, reloads and draws,
   vehicles' engines and weapons, stations, generators, turrets, deployables, call-ins, deaths, impacts, CTF
-  stingers), voice packs (VGS), music, HUD icons, menu art and the startup splash.
+  stingers), TA's particle effects for projectile trails, explosions and fractal shards (exported from the weapon
+  particle systems), voice packs (VGS), music, HUD icons, menu art and the startup splash.
 - Map mechanics from the levels themselves: base force fields that keep enemies out while their generator is up
   (TA's team blockers on Bella Omega, Permafrost and Sunstar's flag shields, plus the base door fields of Katabatic,
   Stonehenge, Blueshift, ...), your own base can't be damaged by your team, accelerators and launch pads (Blueshift,
@@ -67,6 +72,8 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
   messages stay for 30 s; all of them while typing). The crosshair is red and slightly larger by default.
 - Loading screen laid out like TA's (next map, game type, rules of engagement over a map screenshot, gameplay tip);
   the screenshot is captured on your first visit to a map.
+- Spectating: a smoothed chase camera on players and bots; if you chose to spectate you stay a spectator when the map
+  changes.
 - Graphics (Settings → Video, with Low/Medium/High/Ultra presets that only touch performance options):
   HDR 16-bit pipeline with ACES/AgX/Neutral/Cineon tone mapping, bloom, screen-space god rays, SSAO, UE3-style
   exponential height fog with sun inscattering (from each map's fog actor), depth of field, camera motion blur,
@@ -210,7 +217,7 @@ packages/shared   simulation (movement, projectiles, collision), game data (clas
 packages/server   game servers (authoritative 60 Hz match + bots), local node (discovery, relay, social, assets)
 packages/client   Three.js renderer, UI, prediction/interpolation, audio
 packages/master   optional legacy master server (not needed)
-tools/ta-import   reads TA's UE3 packages (maps, meshes, skeletal meshes, textures, sounds, UI)
+tools/ta-import   reads TA's UE3 packages (maps, meshes, skeletal meshes, textures, sounds, particle effects, UI)
 tools/e2e         Playwright smoke test
 scripts           install-ta (download + unpack + import)
 config            server configuration
@@ -222,6 +229,8 @@ config            server configuration
   are stored at reduced resolution to keep map downloads small. Materials use one diffuse, normal and specular map
   each, with the material's diffuse tiling and tint (TA's detail/overlay layers, panners and emissive layers such as
   glowing lava cracks are not reproduced).
+- TA particle effects are drawn as camera-facing sprites: mesh emitters, beams' noise and per-particle material
+  effects (distortion, depth fades) are approximated.
 - Map force fields stop players but not shots, and Sunstar's flag shields let their own team through (TA blocks
   everyone) so flags stay capturable.
 - HDR is internal (16-bit rendering, tone-mapped to the display); browsers do not expose HDR output for WebGL.
