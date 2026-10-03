@@ -1,4 +1,5 @@
 # Ascend Reborn
+<img width="1600" height="900" alt="image" src="https://github.com/user-attachments/assets/4d0f5725-74d0-42ad-9285-c5378a1aecad" />
 
 An unofficial, fan-made revival of **Tribes: Ascend** gameplay that runs in the browser (Chrome/Edge) with
 self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA game modes, with bots.
@@ -7,6 +8,7 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 > This repository contains **no** game assets. The original maps, models, textures, sounds and UI art are read from
 > **your own copy** of Tribes: Ascend by the local importer, stay on your machine (`maps-original/` is git-ignored),
 > and must not be redistributed. Without an import the game still runs on generated maps with procedural art.
+<img width="1600" height="900" alt="image" src="https://github.com/user-attachments/assets/eecd3d3d-6679-4d39-a564-3898eeff12f1" />
 
 ---
 
@@ -95,6 +97,8 @@ npm run install-ta
 
 npm start            # builds the client, starts the node + the default servers
 # open http://localhost:7770
+# or
+npm run play        # build and run the node without running servers (joining/hosting works)
 ```
 
 Already have Tribes: Ascend installed? Put this repository **inside** the game folder (next to `Binaries/`,
