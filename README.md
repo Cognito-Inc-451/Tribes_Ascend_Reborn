@@ -95,7 +95,7 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 
 ```bash
 git clone https://github.com/Cognito-Inc-451/Tribes_Ascend_Reborn
-cd Ascend_Reborn
+cd Tribes_Ascend_Reborn
 npm install
 
 # Optional but recommended: download Tribes: Ascend ("Parting Gifts" community archive) next to this folder,
