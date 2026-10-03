@@ -69,6 +69,8 @@ export interface Settings {
   transport: 'auto' | 'webtransport' | 'websocket';
   binds: Record<Action, string[]>;
   cosmetics: CosmeticProfile;
+  /** The voice was never picked by the player: it follows the best imported TA voice pack. */
+  voiceAuto: boolean;
   lastClass: string;
   loadouts: Record<string, Loadout>;
 }
@@ -145,6 +147,7 @@ const DEFAULTS: Settings = {
   transport: 'auto',
   binds: DEFAULT_BINDS,
   cosmetics: DEFAULT_COSMETICS,
+  voiceAuto: true,
   lastClass: 'pathfinder',
   loadouts: Object.fromEntries(CLASSES.map((c) => [c.id, c.defaultLoadout])),
 };
@@ -159,6 +162,8 @@ function load(): Settings {
     const raw = JSON.parse(localStorage.getItem(KEY) ?? '{}') as Partial<Settings>;
     const s: Settings = { ...DEFAULTS, ...raw, binds: { ...DEFAULT_BINDS, ...(raw.binds ?? {}) } };
     s.cosmetics = sanitizeCosmetics(raw.cosmetics);
+    // Saves from before TA voices were the default hold the old synth default without the player having chosen it.
+    s.voiceAuto = raw.voiceAuto ?? (raw.cosmetics?.voice === undefined || raw.cosmetics.voice === 'reborn_vanguard');
     s.loadouts = Object.fromEntries(CLASSES.map((c) => [c.id, validateLoadout(c.id, raw.loadouts?.[c.id] ?? c.defaultLoadout)]));
     s.name = String(s.name).slice(0, 20) || DEFAULTS.name;
     // Older saves only had an on/off shadow switch.
@@ -205,7 +210,7 @@ export function exportProfile(): string {
 export function importProfile(code: string): boolean {
   try {
     const p = JSON.parse(atob(code.trim())) as Partial<Settings>;
-    if (p.cosmetics) settings.cosmetics = sanitizeCosmetics(p.cosmetics);
+    if (p.cosmetics) { settings.cosmetics = sanitizeCosmetics(p.cosmetics); settings.voiceAuto = false; }
     if (p.loadouts) settings.loadouts = Object.fromEntries(CLASSES.map((c) => [c.id, validateLoadout(c.id, p.loadouts?.[c.id] ?? c.defaultLoadout)]));
     if (p.binds) settings.binds = { ...DEFAULT_BINDS, ...p.binds };
     if (typeof p.name === 'string') settings.name = p.name.slice(0, 20);

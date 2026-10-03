@@ -28,7 +28,7 @@ const m = new Match(cfg, map, {
         const v = m.players.get(msg.victim)!;
         const { x, y, z } = v.move.pos;
         const tb = map.world.terrain;
-        console.log(`${msg.item} ${v.name} ${v.brain!.role} pos(${x.toFixed(0)},${y.toFixed(0)},${z.toFixed(0)}) terrain ${tb.heightAt(x, z).toFixed(0)} hole ${tb.isHole(x, z)} vel(${v.move.vel.x.toFixed(0)},${v.move.vel.y.toFixed(0)},${v.move.vel.z.toFixed(0)})`);
+        console.log(`${msg.item} ${v.name} ${v.brain!.role} pos(${x.toFixed(0)},${y.toFixed(0)},${z.toFixed(0)}) terrain ${tb.heightAt(x, z).toFixed(0)} hole ${tb.isHole(x, z)} vel(${v.move.vel.x.toFixed(0)},${v.move.vel.y.toFixed(0)},${v.move.vel.z.toFixed(0)}) safe ${v.safe.length} rescued ${(m.now - v.lastRescue).toFixed(1)}s ago`);
       }
     }
   },
@@ -109,8 +109,10 @@ for (let i = 0; i < ticks; i++) {
       for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0], [0, -1, 0]]) if (map.world.raycast(c, { x: c.x + dx * 40, y: c.y + dy * 40, z: c.z + dz * 40 }, undefined, false)?.back) inside++;
       const key = `${Math.round(cur.x / 10)},${Math.round(cur.z / 10)}`;
       stuckSpots.set(key, (stuckSpots.get(key) ?? 0) + 1);
-      console.log(`t=${m.now.toFixed(0)} STUCK ${p.name} t${p.team} ${p.brain!.role} pos(${cur.x.toFixed(1)},${cur.y.toFixed(1)},${cur.z.toFixed(1)}) moved ${moved.toFixed(1)} g=${p.move.onGround} inside=${inside} terrain=${map.world.terrain.heightAt(cur.x, cur.z).toFixed(1)} w0=${p.weapons[0]?.clip}/${p.weapons[0]?.ammo}`);
+      console.log(`t=${m.now.toFixed(0)} STUCK ${p.name} t${p.team} ${p.brain!.role} pos(${cur.x.toFixed(1)},${cur.y.toFixed(1)},${cur.z.toFixed(1)}) moved ${moved.toFixed(1)} g=${p.move.onGround} inside=${inside} terrain=${map.world.terrain.heightAt(cur.x, cur.z).toFixed(1)} w0=${p.weapons[0]?.clip}/${p.weapons[0]?.ammo} goal=${(() => { const o = p.brain!.objective; return o ? `(${o.x.toFixed(0)},${o.y.toFixed(0)},${o.z.toFixed(0)})` : '-'; })()}`);
       if (process.env.STUCK === 'route') {
+        const dbg = p.brain as unknown as { stuckHits: number; abandoned: Map<string, number>; staticGoal: boolean };
+        console.log(`   stuckHits ${dbg.stuckHits} static ${dbg.staticGoal} abandoned ${JSON.stringify([...dbg.abandoned].map(([k, v]) => `${k}@${(v - m.now).toFixed(0)}`))} restock ${JSON.stringify(m.restock[p.team].map((s) => `${s.x.toFixed(0)},${s.y.toFixed(0)},${s.z.toFixed(0)}`))}`);
         const b = p.brain as unknown as { routeKey: string; routeIdx: number; indoor: boolean; exitPath: { x: number; y: number; z: number }[] | null; exitIdx: number; charging: boolean };
         const [x, y, z] = b.routeKey.split(',').map(Number);
         const r = b.routeKey ? m.nav.route({ x, y, z }, p.team) : null;

@@ -56,6 +56,8 @@ export class BotBrain {
   private flagGoal = false;
   /** The goal is a fixed objective (stand, generator, capture point) that may need an indoor route. */
   private staticGoal = false;
+  /** What the bot is heading for this tick (diagnostics). */
+  objective: Vec3 | null = null;
   /** Following indoor waypoints: walk/jet precisely, no skiing. */
   private indoor = false;
   private routeKey = '';
@@ -215,6 +217,7 @@ export class BotBrain {
     }
 
     const objective = this.goal(m, p);
+    this.objective = objective;
     const goal = objective ? this.viaRoute(m, p, objective) : null;
     const eye = p.eye();
     const w = p.weapon;
@@ -467,7 +470,7 @@ export class BotBrain {
         const eye = { x: pos.x, y: pos.y + 1.5, z: pos.z };
         this.unstickBack = !!m.world.raycast(eye, { x: eye.x, y: eye.y + 5, z: eye.z });
         // Stuck again and again on the way to an indoor objective: leave it alone for a while.
-        if (this.staticGoal && ++this.stuckHits >= 4) { this.abandoned.set(this.routeKey, now + 30); this.stuckHits = 0; }
+        if (this.staticGoal && ++this.stuckHits >= 4) { this.abandoned.set(this.routeKey || BotBrain.key(goal), now + 45); this.stuckHits = 0; }
       } else if (moved > 6) this.stuckHits = 0;
       this.lastPos = { ...pos };
       this.stuckCheck = now + 2.5;
@@ -515,6 +518,19 @@ export class BotBrain {
       if (this.charging) { buttons &= ~BTN.JET; fwd *= 0.2; strafe *= 0.2; }
       else if (energyFrac > 0.02) buttons |= BTN.JET;
     } else this.charging = false;
+    // A goal high above us (station niches on pillars): leave any overhang first, fill the tank, rise in the open, then go in.
+    let backoff = false;
+    if (!this.indoor && !this.flagGoal && dist < 30 && goal.y - pos.y > 8 && now >= this.unstickUntil) {
+      const roof = m.world.raycast({ x: pos.x, y: pos.y + 1.5, z: pos.z }, { x: pos.x, y: goal.y + 3, z: pos.z }, undefined, false);
+      if (roof) {
+        backoff = true;
+        fwd = -Math.cos(delta); strafe = Math.sin(delta);
+        buttons &= ~BTN.JET;
+      } else if (pos.y < goal.y + 1) {
+        fwd = 0; strafe = 0;
+        if (p.move.onGround && energyFrac < Math.min(0.95, (goal.y - pos.y) / 45 + 0.2)) { this.charging = true; buttons &= ~BTN.JET; }
+      }
+    }
     if (brake) { fwd = -Math.cos(goalYaw - cmd.yaw) * 0.7; strafe = Math.sin(goalYaw - cmd.yaw) * 0.7; }
     // Brake a hard landing with jets when fall damage would apply.
     const vy = p.move.vel.y;
@@ -533,7 +549,7 @@ export class BotBrain {
     if (this.voidBelow && energyFrac > 0.02) buttons |= BTN.JET;
 
     // Wall ahead: hop over it.
-    if (this.seq % 10 === 0 && dist > 5) {
+    if (this.seq % 10 === 0 && dist > 5 && !backoff) {
       const eye = { x: pos.x, y: pos.y + 1.2, z: pos.z };
       if (m.world.raycast(eye, { x: eye.x + hdx * 6, y: eye.y, z: eye.z + hdz * 6 })) { buttons |= BTN.JET | BTN.JUMP; }
     }

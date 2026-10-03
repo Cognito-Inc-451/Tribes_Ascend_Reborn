@@ -86,6 +86,10 @@ export class Player {
   spottedUntil = 0;
   rageUntil = 0;
   history: HistoryEntry[] = [];
+  /** Recent grounded positions outside any hazard (oldest first), where the out-of-bounds rescue puts the player back. */
+  safe: { x: number; y: number; z: number }[] = [];
+  safeAt = 0;
+  lastRescue = -99;
 
   chatTimes: number[] = [];
   vgsTimes: number[] = [];

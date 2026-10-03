@@ -1,28 +1,19 @@
-import * as THREE from 'three';
 import {
-  ACTION_LABELS, ARMOR_BLURB, ARMOR_SKINS, BANNERS, CLASSES, EMBLEMS, ITEMS, JET_TRAILS, LAYOUT_BY_ID, MODES, NAMEPLATES, PERKS, PERKS_A, PERKS_B,
-  PROTOCOL_VERSION, randomTip, TA_SKINS, VOICE_PACKS, WEAPON_FINISHES, validateLoadout, type Action, type GameOptions, type Loadout, type ModeId, type ServerInfo,
+  ACTION_LABELS, ARMOR_BLURB, BANNERS, CLASSES, EMBLEMS, ITEMS, JET_TRAILS, LAYOUT_BY_ID, MODES, NAMEPLATES, PERKS, PERKS_A, PERKS_B,
+  PROTOCOL_VERSION, randomTip, WEAPON_FINISHES, validateLoadout, type Action, type GameOptions, type Loadout, type ModeId, type ServerInfo,
 } from '@ar/shared';
 import { audio } from '../audio/audio.js';
 import type { Input } from '../input/input.js';
-import { fetchPeers, NODE_URL, voiceManifest, type BrowserServer, type DiscoveryStats } from '../net/node.js';
+import { fetchPeers, NODE_URL, type BrowserServer, type DiscoveryStats } from '../net/node.js';
 import { social, type ChatMsg } from '../net/social.js';
 import { loadStats, resetStats } from '../game/stats.js';
 import { expectedTransport, browserSupportsWebTransport } from '../net/transport.js';
-import { PlayerModel } from '../render/actors.js';
-import { models } from '../render/models.js';
-import { studioEnvironment } from '../render/renderer.js';
 import { applyQuality, exportProfile, importProfile, resetBinds, saveSettings, settings, type Quality } from '../settings.js';
 import { clear, h, keyLabel } from './dom.js';
+import { chooseVoice, ClassPreview, currentSkinName, ensureDefaultVoice, skinOptions, statBlock, taModelsReady, voiceLabel, voiceOptions } from './loadoutkit.js';
 
 declare const __MASTER_URL__: string;
 const MASTER = (new URLSearchParams(location.search).get('master') ?? __MASTER_URL__).replace(/\/$/, '');
-
-/** Reborn speech packs plus every original pack imported on this machine. */
-async function voiceOptions(): Promise<{ id: string; name: string }[]> {
-  const m = await voiceManifest();
-  return [...(m?.packs ?? []).map((p) => ({ id: p.id, name: p.name })), ...VOICE_PACKS.map((v) => ({ id: v.id, name: `${v.name} (synth)` }))];
-}
 
 export interface MenuHooks {
   join(info: ServerInfo): void;
@@ -53,21 +44,6 @@ export function rulesText(o: GameOptions): string {
   return r.join(' · ');
 }
 
-function statBlock(id: string): HTMLElement {
-  const it = ITEMS[id];
-  const rows: [string, string][] = [];
-  if (it.projectile) {
-    const p = it.projectile;
-    rows.push(['Direct / splash', `${p.direct} / ${p.splashMax}–${p.splashMin}`], ['Radius', `${p.radius} m`], ['Speed', `${p.speed} m/s (${Math.round(p.speed * 3.6)} km/h)`], ['Inheritance', `${Math.round(p.inherit * 100)}%`]);
-  }
-  if (it.hitscan) rows.push(['Damage', `${it.hitscan.damage}${it.hitscan.pellets > 1 ? ` × ${it.hitscan.pellets}` : ''} → ${it.hitscan.minDamage}`]);
-  if (it.clip) rows.push(['Clip / ammo', `${it.clip} / ${it.ammo}`]);
-  if (it.refire) rows.push(['Refire', `${it.refire}s`]);
-  rows.push(['Source', it.src]);
-  return h('div', { class: 'panel', style: 'padding:.8em 1em;margin-bottom:.8em' }, h('div', { style: 'font:600 15px var(--display);letter-spacing:.1em;margin-bottom:.3em' }, it.name.toUpperCase()),
-    rows.map(([a, b]) => h('div', { class: 'stat-line' }, h('span', { class: 'muted' }, a), h('span', null, b))));
-}
-
 // ---------------------------------------------------------------- menus
 interface PanelItem { label: string; sub?: string; badge?: string; badgeKind?: 'gold' | 'blue'; active?: boolean; onClick: (e: MouseEvent) => void; onHover?: () => void }
 
@@ -82,7 +58,6 @@ export class Menus {
   private servers: BrowserServer[] = [];
   private pings = new Map<string, number>();
   private selected: BrowserServer | null = null;
-  private previewCleanup: (() => void) | null = null;
   private stats: DiscoveryStats | null = null;
   private nodeOk = true;
   private back: (() => void) | null = null;
@@ -102,6 +77,7 @@ export class Menus {
       h('div', { class: 'ta-bottombar' }, this.status, this.ticker),
       h('div', { class: 'grain' }));
     ui.append(this.root);
+    void ensureDefaultVoice();
     window.addEventListener('keydown', (e) => {
       if (this.root.classList.contains('hidden') || this.login || (e.target as HTMLElement)?.tagName === 'INPUT') return;
       if (e.code === 'Escape' && this.back) { e.preventDefault(); this.back(); }
@@ -218,9 +194,6 @@ export class Menus {
   }
 
   private setMain(...els: HTMLElement[]) {
-    this.previewCleanup?.();
-    this.previewCleanup = this.nextCleanup;
-    this.nextCleanup = null;
     clear(this.main);
     this.main.append(...els);
   }
@@ -431,59 +404,13 @@ export class Menus {
   }
 
   // ---------------- classes
-  private previewTeam = 0;
-  private taModels: boolean | null = null;
-  private nextCleanup: (() => void) | null = null;
+  private cp: ClassPreview | null = null;
 
-  /** Rotating 3D model of a class with the current cosmetics (drag to turn). */
-  private preview(clsId: string): HTMLElement {
-    const canvasHost = h('div', { class: 'ta-preview' });
-    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    renderer.toneMappingExposure = 1.1;
-    const scene = new THREE.Scene();
-    scene.environment = studioEnvironment(renderer);
-    scene.environmentIntensity = 0.6;
-    const cam = new THREE.PerspectiveCamera(32, 0.8, 0.1, 50);
-    cam.position.set(0, 1.25, 4.4);
-    cam.lookAt(0, 1, 0);
-    scene.add(new THREE.HemisphereLight(0xcfe6ff, 0x504438, 1.1));
-    const dl = new THREE.DirectionalLight(0xffffff, 2.4); dl.position.set(2, 4, 3); scene.add(dl);
-    const fill = new THREE.DirectionalLight(0xffe8d0, 0.8); fill.position.set(-2.5, 1.5, 3); scene.add(fill);
-    const rim = new THREE.DirectionalLight(0x9fe0ff, 1.6); rim.position.set(-3, 2, -3); scene.add(rim);
-    canvasHost.append(renderer.domElement);
-    const clsIdx = Math.max(0, CLASSES.findIndex((x) => x.id === clsId));
-    let model: PlayerModel | null = null;
-    const rebuild = () => {
-      if (model) { scene.remove(model.root); model.dispose(); }
-      model = new PlayerModel(clsIdx, this.previewTeam, settings.cosmetics);
-      model.setWeapon(settings.loadouts[CLASSES[clsIdx].id]?.primary ?? '');
-      scene.add(model.root);
-    };
-    rebuild();
-    canvasHost.append(h('div', { class: 'ta-preview-teams' },
-      ...['BLOOD EAGLE', 'DIAMOND SWORD'].map((n, i) => h('button', { class: `ta-tab ${this.previewTeam === i ? 'active' : ''}`, onclick: (e: MouseEvent) => {
-        this.previewTeam = i; rebuild();
-        for (const b of (e.currentTarget as HTMLElement).parentElement!.children) b.classList.toggle('active', b === e.currentTarget);
-      } }, n))));
-    let raf = 0, t = 0, drag = 0, down = false;
-    canvasHost.addEventListener('mousedown', () => (down = true));
-    const up = () => (down = false);
-    window.addEventListener('mouseup', up);
-    canvasHost.addEventListener('mousemove', (e) => { if (down) drag += e.movementX * 0.01; });
-    const loop = () => {
-      raf = requestAnimationFrame(loop);
-      const w = canvasHost.clientWidth, hh = canvasHost.clientHeight;
-      if (!w || !hh) return;
-      if (renderer.domElement.width !== w || renderer.domElement.height !== hh) { renderer.setSize(w, hh, false); renderer.domElement.style.width = '100%'; renderer.domElement.style.height = '100%'; cam.aspect = w / hh; cam.updateProjectionMatrix(); }
-      t += 0.016;
-      model?.update(0.016, Math.PI + drag + Math.sin(t * 0.4) * 0.3, 0, 0x8 | 0x2 * (Math.sin(t) > 0.6 ? 1 : 0), 0, null);
-      renderer.render(scene, cam);
-    };
-    loop();
-    this.nextCleanup = () => { cancelAnimationFrame(raf); window.removeEventListener('mouseup', up); model?.dispose(); renderer.dispose(); renderer.forceContextLoss(); };
-    return canvasHost;
+  /** The class preview (one WebGL view reused across screens), showing `weapon` or the class's primary. */
+  private preview(clsId: string, weapon?: string): ClassPreview {
+    if (!this.cp || this.cp.disposed) this.cp = new ClassPreview();
+    this.cp.show(clsId, weapon ?? settings.loadouts[clsId]?.primary ?? '');
+    return this.cp;
   }
 
   private loadoutSummary(clsId: string): HTMLElement {
@@ -504,7 +431,7 @@ export class Menus {
         h('div', { class: 'ta-class-body' },
           h('div', { class: 'ta-detail' }, h('p', null, ARMOR_BLURB[c.armor]), this.loadoutSummary(c.id),
             h('button', { class: 'ta-submit', onclick: () => this.showLoadout(c.id) }, 'MODIFY LOADOUT')),
-          this.preview(c.id))));
+          this.preview(c.id).el)));
     };
     this.setPanel('MODIFY CLASSES', CLASSES.map((c) => ({
       label: c.name.toUpperCase(), sub: `${c.armor.toUpperCase()} \u00b7 ${c.abbrev}`, badge: 'MASTERED', active: c.id === sel,
@@ -518,14 +445,9 @@ export class Menus {
     const cls = CLASSES.find((c) => c.id === clsId) ?? CLASSES[0];
     const lo = settings.loadouts[cls.id];
     const c = settings.cosmetics;
-    const skinKey = (`skin${cls.armor[0].toUpperCase()}${cls.armor.slice(1)}`) as 'skinLight' | 'skinMedium' | 'skinHeavy';
-    const clsIndex = CLASSES.indexOf(cls);
-    const taSkin = Number(c.taSkins?.[clsIndex] ?? 0);
-    const setTaSkin = (v: number) => { const s = (c.taSkins ?? '').padEnd(CLASSES.length, '0').split(''); s[clsIndex] = String(v); c.taSkins = s.join(''); saveSettings(); };
     // With TA models imported the original skins replace the generated ones.
-    const taModels = this.taModels ?? false;
-    if (this.taModels === null) void models.available().then((k) => { this.taModels = [...k].some((x) => x.startsWith('pc_')); if (this.taModels) this.showLoadout(clsId, slot); });
-    const skinName = taModels ? (TA_SKINS[cls.id]?.[taSkin] ?? 'Team Armor') : (ARMOR_SKINS.find((s) => s.id === c[skinKey])?.name ?? '');
+    taModelsReady(() => this.showLoadout(clsId, slot));
+    const skinName = currentSkinName(cls.id);
     const itemName = (id: string) => ITEMS[id]?.name ?? id;
     const perkName = (id: string) => PERKS.find((p) => p.id === id)?.name ?? id;
     const go = (s: typeof slot) => this.showLoadout(cls.id, s);
@@ -537,15 +459,19 @@ export class Menus {
       { label: 'PRIMARY PERK', sub: perkName(lo.perkA).toUpperCase(), active: slot === 'perkA', onClick: () => go('perkA') },
       { label: 'SECONDARY PERK', sub: perkName(lo.perkB).toUpperCase(), active: slot === 'perkB', onClick: () => go('perkB') },
       { label: 'SKIN', sub: skinName.toUpperCase(), active: slot === 'skin', onClick: () => go('skin') },
-      { label: 'VOICE', sub: c.voice.toUpperCase().replace(/^TA_/, '').replace(/_/g, ' '), active: slot === 'voice', onClick: () => go('voice') },
+      { label: 'VOICE', sub: voiceLabel(c.voice), active: slot === 'voice', onClick: () => go('voice') },
       { label: 'COSMETICS', sub: 'FINISH \u00b7 TRAIL \u00b7 EMBLEM \u00b7 BANNER', active: slot === 'more', onClick: () => go('more') },
     ], () => this.showClasses(cls.id));
 
     const choices = h('div', { class: 'ta-choices' });
     const info = h('div', { class: 'ta-choice-info' });
-    const choice = (label: string, selected: boolean, apply: () => void, detail?: () => HTMLElement | null) => {
+    // The preview holds the weapon of the slot being edited; hovering a weapon choice shows that one instead.
+    const held = slot === 'secondary' ? lo.secondary : lo.primary;
+    const pv = this.preview(cls.id, held);
+    const choice = (label: string, selected: boolean, apply: () => void, detail?: () => HTMLElement | null, weapon?: string) => {
       const el = h('button', { class: `ta-choice ${selected ? 'sel' : ''}`, onclick: () => { audio.ensure(); audio.play('click'); apply(); },
-        onmouseenter: () => { if (detail) { clear(info); const d = detail(); if (d) info.append(d); } } }, label.toUpperCase());
+        onmouseenter: () => { if (weapon) pv.show(cls.id, weapon); if (detail) { clear(info); const d = detail(); if (d) info.append(d); } },
+        onmouseleave: () => { if (weapon) pv.show(cls.id, held); } }, label.toUpperCase());
       if (selected && detail) { const d = detail(); if (d) info.append(d); }
       return el;
     };
@@ -553,17 +479,16 @@ export class Menus {
     const perkDesc = (id: string) => h('div', { class: 'panel stat-block' }, h('div', { class: 'stat-title' }, perkName(id).toUpperCase()), h('p', null, PERKS.find((p) => p.id === id)?.desc ?? ''));
     if (slot === 'primary' || slot === 'secondary' || slot === 'belt' || slot === 'pack') {
       const list = { primary: cls.primaries, secondary: cls.secondaries, belt: cls.belts, pack: cls.packs }[slot];
-      choices.append(...list.map((id) => choice(itemName(id), lo[slot] === id, () => setLo(slot, id), () => statBlock(id))));
+      const weaponSlot = slot === 'primary' || slot === 'secondary';
+      choices.append(...list.map((id) => choice(itemName(id), lo[slot] === id, () => setLo(slot, id), () => statBlock(id), weaponSlot ? id : undefined)));
     } else if (slot === 'perkA' || slot === 'perkB') {
       choices.append(...(slot === 'perkA' ? PERKS_A : PERKS_B).map((id) => choice(perkName(id), lo[slot] === id, () => setLo(slot, id), () => perkDesc(id))));
-    } else if (slot === 'skin' && taModels) {
-      choices.append(...(TA_SKINS[cls.id] ?? ['Team Armor']).map((name, i) => choice(name, taSkin === i, () => { setTaSkin(i); go(slot); })));
-      info.append(h('p', { class: 'muted' }, 'Original Tribes: Ascend armour from your import. Everyone sees your choice; Mercenary armour carries a faint team tint.'));
     } else if (slot === 'skin') {
-      choices.append(...ARMOR_SKINS.map((s) => choice(s.name, c[skinKey] === s.id, () => { c[skinKey] = s.id; saveSettings(); go(slot); })));
+      choices.append(...skinOptions(cls.id).map((s) => choice(s.name, s.selected, () => { s.apply(); go(slot); })));
+      if (taModelsReady()) info.append(h('p', { class: 'muted' }, 'Original Tribes: Ascend armour from your import. Everyone sees your choice; Mercenary armour carries a faint team tint.'));
     } else if (slot === 'voice') {
       void voiceOptions().then((list) => choices.append(...list.map((v) => choice(v.name, c.voice === v.id, () => {
-        c.voice = v.id; saveSettings(); audio.ensure(); void audio.vgs('GlobalShazbot', v.id); go(slot);
+        chooseVoice(v.id); audio.ensure(); void audio.vgs('GlobalShazbot', v.id); go(slot);
       }))));
       info.append(h('p', { class: 'muted' }, 'Original voice packs appear after importing them from your own Tribes: Ascend install (npm run ta-import).'));
     } else {
@@ -571,7 +496,7 @@ export class Menus {
     }
     this.setMain(h('div', { class: 'ta-window loadout-view' },
       h('div', { class: 'ta-window-head' }, cls.name.toUpperCase(), h('span', { class: 'hint' }, 'ALL ITEMS UNLOCKED')),
-      h('div', { class: 'ta-loadout-body' }, choices, h('div', { class: 'ta-loadout-side' }, this.preview(cls.id), info))));
+      h('div', { class: 'ta-loadout-body' }, choices, h('div', { class: 'ta-loadout-side' }, pv.el, info))));
   }
 
   private cosmeticsForm(clsId: string): HTMLElement {
@@ -668,7 +593,7 @@ export class Menus {
       row('Music Volume', range('musicVolume', 0, 1, 0.01, (v) => `${Math.round(v * 100)}%`, va));
       row('Effects Volume', range('effectsVolume', 0, 1, 0.01, (v) => `${Math.round(v * 100)}%`, va));
       row('Voice (VGS) Volume', range('vgsVolume', 0, 1, 0.01, (v) => `${Math.round(v * 100)}%`, va));
-      const vsel = h('select', { onchange: (e: Event) => { settings.cosmetics.voice = (e.target as HTMLSelectElement).value; saveSettings(); audio.ensure(); void audio.vgs('GlobalShazbot', settings.cosmetics.voice); } }) as HTMLSelectElement;
+      const vsel = h('select', { onchange: (e: Event) => { chooseVoice((e.target as HTMLSelectElement).value); audio.ensure(); void audio.vgs('GlobalShazbot', settings.cosmetics.voice); } }) as HTMLSelectElement;
       void voiceOptions().then((list) => vsel.append(...list.map((v) => h('option', { value: v.id, selected: settings.cosmetics.voice === v.id }, v.name))));
       row('Voice Pack', vsel);
     } else if (this.tab === 'controls') {

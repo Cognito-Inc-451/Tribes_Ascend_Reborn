@@ -228,6 +228,7 @@ export type C2S =
   | { t: 'hello'; v: number; name: string; cosmetics: Partial<CosmeticProfile>; spectate?: boolean; mapHash?: string; transport: TransportKind }
   | { t: 'team'; team: number; spawn?: boolean }
   | { t: 'class'; cls: string; loadout: Partial<Loadout>; spawn?: boolean }
+  | { t: 'cosmetics'; cosmetics: Partial<CosmeticProfile> }
   | { t: 'chat'; text: string; team: boolean }
   | { t: 'vgs'; id: string }
   | { t: 'vote'; yes: boolean }

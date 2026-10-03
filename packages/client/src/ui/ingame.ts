@@ -3,6 +3,7 @@ import { audio } from '../audio/audio.js';
 import { NODE_URL } from '../net/node.js';
 import { saveSettings, settings } from '../settings.js';
 import { clear, h, layoutChar } from './dom.js';
+import { chooseVoice, ClassPreview, currentSkinName, skinOptions, statBlock, taModelsReady, voiceLabel, voiceOptions } from './loadoutkit.js';
 
 export function overlay(...children: HTMLElement[]): HTMLElement {
   return h('div', { class: 'overlay-center' }, h('div', { class: 'panel modal' }, ...children));
@@ -41,49 +42,74 @@ export function teamMenu(mode: ModeId, myTeam: number, roster: () => RosterEntry
   return el;
 }
 
-/** TA in-game class & loadout: classes (left), loadout slots (middle), choices + stats (right), DEPLOY. */
-export function classMenu(mode: ModeId, team: number, onTeam: (t: number) => void, onPick: (cls: string, lo: Loadout) => void, onClose: () => void): HTMLElement {
+/** TA in-game class & loadout, laid out like the main menu's: classes, slots (weapons, perks, skin, voice), choices + stats, and a live preview. */
+export function classMenu(mode: ModeId, team: number, onTeam: (t: number) => void, onPick: (cls: string, lo: Loadout) => void, onClose: () => void, onCosmetics: () => void): HTMLElement {
+  type Slot = keyof Loadout | 'skin' | 'voice';
   let cls = CLASSES.find((c) => c.id === settings.lastClass) ?? CLASSES[0];
-  let slot: keyof Loadout = 'primary';
+  let slot: Slot = 'primary';
   const root = h('div', { class: 'ig-screen' });
+  const preview = new ClassPreview(team);
   const itemName = (id: string) => ITEMS[id]?.name ?? id;
   const perkName = (id: string) => PERKS.find((p) => p.id === id)?.name ?? id;
   const render = () => {
     clear(root);
+    taModelsReady(render);
     const lo = settings.loadouts[cls.id];
+    const c = settings.cosmetics;
     const classes = h('div', { class: 'ta-panel ig-col' }, h('div', { class: 'ta-panel-head' }, 'CLASSES'),
       h('div', { class: 'ta-items' }, (['light', 'medium', 'heavy'] as const).flatMap((armor) => [
         h('div', { class: 'ig-armor' }, `${armor.toUpperCase()} ARMOR`),
-        ...CLASSES.filter((c) => c.armor === armor).map((c) => h('button', { class: `ta-item ${c.id === cls.id ? 'active' : ''}`, onclick: () => { audio.play('click'); cls = c; settings.lastClass = c.id; saveSettings(); render(); } },
-          h('span', { class: 't' }, c.name.toUpperCase()), h('span', { class: 's' }, `${c.health} HP \u00b7 ${c.energy} EN`), h('span', { class: 'ta-badge blue' }, String(CLASSES.indexOf(c) + 1)))),
+        ...CLASSES.filter((x) => x.armor === armor).map((x) => h('button', { class: `ta-item ${x.id === cls.id ? 'active' : ''}`, onclick: () => { audio.play('click'); cls = x; settings.lastClass = x.id; saveSettings(); render(); } },
+          h('span', { class: 't' }, x.name.toUpperCase()), h('span', { class: 's' }, `${x.health} HP \u00b7 ${x.energy} EN`), h('span', { class: 'ta-badge blue' }, String(CLASSES.indexOf(x) + 1)))),
       ])));
-    const slots: [keyof Loadout, string, string][] = [
+    const slots: [Slot, string, string][] = [
       ['primary', 'PRIMARY WEAPON', itemName(lo.primary)], ['secondary', 'SECONDARY WEAPON', itemName(lo.secondary)], ['belt', 'BELT ITEM', itemName(lo.belt)],
       ['pack', 'PACK', itemName(lo.pack)], ['perkA', 'PRIMARY PERK', perkName(lo.perkA)], ['perkB', 'SECONDARY PERK', perkName(lo.perkB)],
+      ['skin', 'SKIN', currentSkinName(cls.id)], ['voice', 'VOICE', voiceLabel(c.voice)],
     ];
-    const loadout = h('div', { class: 'ta-panel ig-col' }, h('div', { class: 'ta-panel-head' }, `${cls.name.toUpperCase()} LOADOUT`),
+    const slotCol = h('div', { class: 'ta-panel ig-col' }, h('div', { class: 'ta-panel-head' }, `${cls.name.toUpperCase()} LOADOUT`),
       h('div', { class: 'ta-items' }, slots.map(([k, label, val]) => h('button', { class: `ta-item ${slot === k ? 'active' : ''}`, onclick: () => { audio.play('click'); slot = k; render(); } },
         h('span', { class: 't' }, label), h('span', { class: 's' }, val.toUpperCase())))));
-    const list = slot === 'perkA' ? PERKS_A : slot === 'perkB' ? PERKS_B : { primary: cls.primaries, secondary: cls.secondaries, belt: cls.belts, pack: cls.packs }[slot];
+    // The preview holds the weapon of the slot being edited; hovering a weapon choice shows that one instead.
+    const held = slot === 'secondary' ? lo.secondary : lo.primary;
+    preview.show(cls.id, held);
     const info = h('div', { class: 'ig-info' });
-    const describe = (id: string) => {
-      clear(info);
-      const it = ITEMS[id], perk = PERKS.find((p) => p.id === id);
-      info.append(h('div', { class: 'stat-title' }, (it?.name ?? perk?.name ?? id).toUpperCase()));
-      if (perk) info.append(h('p', null, perk.desc));
-      if (it?.projectile) info.append(h('p', null, `${it.projectile.direct} direct \u00b7 ${it.projectile.splashMax} splash \u00b7 ${it.projectile.radius} m radius \u00b7 ${Math.round(it.projectile.speed * 3.6)} km/h`));
-      else if (it?.hitscan) info.append(h('p', null, `${it.hitscan.damage}${it.hitscan.pellets > 1 ? ` \u00d7 ${it.hitscan.pellets}` : ''} damage \u00b7 ${it.clip ?? '-'} clip`));
+    const show = (el: HTMLElement | null) => { clear(info); if (el) info.append(el); };
+    const choices = h('div', { class: 'ta-choices' });
+    const choice = (label: string, selected: boolean, apply: () => void, detail?: () => HTMLElement | null, weapon?: string) => {
+      const el = h('button', {
+        class: `ta-choice ${selected ? 'sel' : ''}`,
+        onmouseenter: () => { if (weapon) preview.show(cls.id, weapon); if (detail) show(detail()); },
+        onmouseleave: () => { if (weapon) preview.show(cls.id, held); },
+        onclick: () => { audio.play('click'); apply(); },
+      }, label.toUpperCase());
+      if (selected && detail) show(detail());
+      return el;
     };
-    const choices = h('div', { class: 'ta-panel ig-col wide' }, h('div', { class: 'ta-panel-head' }, slots.find(([k]) => k === slot)![1]),
-      h('div', { class: 'ta-choices' }, list.map((id) => h('button', {
-        class: `ta-choice ${lo[slot] === id ? 'sel' : ''}`,
-        onmouseenter: () => describe(id),
-        onclick: () => { audio.play('click'); settings.loadouts[cls.id] = validateLoadout(cls.id, { ...lo, [slot]: id }); saveSettings(); render(); },
-      }, (slot === 'perkA' || slot === 'perkB' ? perkName(id) : itemName(id)).toUpperCase()))), info);
-    describe(lo[slot]);
+    const setLo = (id: string) => { settings.loadouts[cls.id] = validateLoadout(cls.id, { ...lo, [slot]: id }); saveSettings(); render(); };
+    const perkDesc = (id: string) => h('div', { class: 'panel stat-block' }, h('div', { class: 'stat-title' }, perkName(id).toUpperCase()), h('p', null, PERKS.find((p) => p.id === id)?.desc ?? ''));
+    if (slot === 'skin') {
+      choices.append(...skinOptions(cls.id).map((s) => choice(s.name, s.selected, () => { s.apply(); onCosmetics(); render(); })));
+    } else if (slot === 'voice') {
+      void voiceOptions().then((list) => choices.append(...list.map((v) => choice(v.name, c.voice === v.id, () => {
+        chooseVoice(v.id); onCosmetics(); void audio.vgs('GlobalShazbot', v.id); render();
+      }))));
+      show(h('p', { class: 'muted' }, 'Your voice for VGS calls. Original voice packs appear after importing them from your own Tribes: Ascend install.'));
+    } else if (slot === 'perkA' || slot === 'perkB') {
+      const perk = slot;
+      choices.append(...(perk === 'perkA' ? PERKS_A : PERKS_B).map((id) => choice(perkName(id), lo[perk] === id, () => setLo(id), () => perkDesc(id))));
+    } else {
+      const item = slot;
+      const list = { primary: cls.primaries, secondary: cls.secondaries, belt: cls.belts, pack: cls.packs }[item];
+      const weaponSlot = item === 'primary' || item === 'secondary';
+      choices.append(...list.map((id) => choice(itemName(id), lo[item] === id, () => setLo(id), () => statBlock(id), weaponSlot ? id : undefined)));
+    }
+    const head = slots.find(([k]) => k === slot)![1];
+    const choiceCol = h('div', { class: 'ta-panel ig-col' }, h('div', { class: 'ta-panel-head' }, head), choices, info);
+    const previewCol = h('div', { class: 'ta-panel ig-col ig-preview' }, h('div', { class: 'ta-panel-head' }, 'PREVIEW'), preview.el);
     root.append(
       h('div', { class: 'ig-head' }, h('span', null, 'SELECT CLASS'), h('small', null, `${MODES[mode].name.toUpperCase()}${MODES[mode].teams && (team === 0 || team === 1) ? ` \u00b7 ${TEAM_NAMES[team].toUpperCase()}` : ''}`)),
-      h('div', { class: 'ig-cols' }, classes, loadout, choices),
+      h('div', { class: 'ig-cols' }, classes, slotCol, choiceCol, previewCol),
       h('div', { class: 'ig-foot' },
         MODES[mode].teams ? h('button', { class: 'ta-mini', onclick: () => onTeam(-2) }, 'CHANGE TEAM') : null,
         h('button', { class: 'ta-mini', onclick: onClose }, 'CLOSE'),

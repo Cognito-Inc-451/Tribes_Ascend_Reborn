@@ -74,6 +74,9 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
   the screenshot is captured on your first visit to a map.
 - Spectating: a smoothed chase camera on players and bots; if you chose to spectate you stay a spectator when the map
   changes.
+- Class screen (key I, also in the main menu): classes, loadout slots (weapons, belt, pack, perks, skin, voice), the
+  stats of the hovered item and a live 3D preview with your skin and the weapon you are choosing; skin and voice
+  changes made in game apply at once. New players get an original TA voice when voice packs are imported.
 - Graphics (Settings → Video, with Low/Medium/High/Ultra presets that only touch performance options):
   HDR 16-bit pipeline with ACES/AgX/Neutral/Cineon tone mapping, bloom, screen-space god rays, SSAO, UE3-style
   exponential height fog with sun inscattering (from each map's fog actor), depth of field, camera motion blur,
@@ -233,6 +236,9 @@ config            server configuration
   effects (distortion, depth fades) are approximated.
 - Map force fields stop players but not shots, and Sunstar's flag shields let their own team through (TA blocks
   everyone) so flags stay capturable.
+- There is no swimming. On water maps (Sulfur Cove, Hinterlands, ...) the sea or any fall below the kill height puts you
+  back on the ground you were on a moment ago ("out of bounds", costs 10% health) instead of killing you; lava and
+  space maps stay lethal.
 - HDR is internal (16-bit rendering, tone-mapped to the display); browsers do not expose HDR output for WebGL.
 - No UDP hole punching (WebRTC/STUN); hosts that cannot map ports rely on a reachable node to relay.
 - Some unofficial/unfinished maps in TA's files (listed as `x_*`) are missing their streamed geometry.

@@ -80,6 +80,7 @@ export class Hud {
   private dmg: HTMLElement;
   private vignette: HTMLElement;
   private respawn: HTMLElement;
+  private respawnMain: HTMLElement;
   private net: HTMLElement;
   private pill: HTMLElement;
   private spec: HTMLElement;
@@ -122,7 +123,8 @@ export class Hud {
     this.hitmarker = h('div', { class: 'hitmarker' });
     this.dmg = h('div', { class: 'damage-dir' });
     this.vignette = h('div', { class: 'vignette' });
-    this.respawn = h('div', { class: 'respawn hidden' });
+    this.respawnMain = h('div');
+    this.respawn = h('div', { class: 'respawn hidden' }, this.respawnMain, h('div', { class: 'respawn-hint' }, 'I = CLASS \u00b7 P = TEAM'));
     this.net = h('div', { class: 'netstats hidden' });
     this.pill = h('div', { class: 'transport-pill' });
     this.spec = h('div', { class: 'spec-hud hidden' });
@@ -234,7 +236,7 @@ export class Hud {
     }
 
     this.respawn.classList.toggle('hidden', alive || !!s.spectating);
-    if (!alive && !s.spectating) this.respawn.textContent = s.respawn > 0 ? `${s.spawnQueued ? 'DEPLOYING' : 'RESPAWN'} IN ${s.respawn.toFixed(1)}` : 'CLICK TO RESPAWN · I = CLASS · P = TEAM';
+    if (!alive && !s.spectating) this.respawnMain.textContent = s.respawn > 0 ? `${s.spawnQueued ? 'DEPLOYING' : 'RESPAWN'} IN ${s.respawn.toFixed(1)}` : 'CLICK TO RESPAWN';
     this.spec.classList.toggle('hidden', !s.spectating);
     if (s.spectating) this.spec.textContent = `SPECTATING ${s.spectating} · LMB/RMB cycle · MMB free cam · Q/E up/down · wheel speed · G gens · F flags · B stands · V vehicles · R fastest`;
     this.net.classList.toggle('hidden', !sessionStats);

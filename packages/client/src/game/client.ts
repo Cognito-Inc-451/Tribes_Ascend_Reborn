@@ -218,7 +218,9 @@ export class GameClient {
         this.spawnQueued = true;
         this.closeOverlay();
       },
-      () => this.closeOverlay()));
+      () => this.closeOverlay(),
+      // Skin and voice changes apply at once for everyone (the server rebroadcasts the player list).
+      () => this.session.send({ t: 'cosmetics', cosmetics: settings.cosmetics })));
   }
 
   private teamChosen = false;

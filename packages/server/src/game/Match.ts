@@ -47,6 +47,8 @@ export class Match {
   private callInCooldown = new Map<string, number>();
   private killZ: number;
   private hazardY: number;
+  /** Water maps (no lava): TA lets you swim there, we have no swimming, so the sea returns you to land instead of killing. */
+  private waterRescue: boolean;
   readonly nav: IndoorRoutes;
   /** Inventory stations bots go back to when their main weapon runs dry, per team. */
   readonly restock: [Vec3[], Vec3[]] = [[], []];
@@ -59,19 +61,20 @@ export class Match {
     const theme = THEMES[map.data.theme];
     this.killZ = map.data.killZ ?? -Infinity;
     this.hazardY = theme.hazard && map.source === 'reborn' ? theme.hazard.level : -Infinity;
+    const fx = new Set((map.data.meshes ?? []).flatMap((m) => (m.groups ?? []).map((g) => g.fx)));
+    this.waterRescue = map.source === 'original' && fx.has('water') && !fx.has('lava');
     this.initEntities();
     this.nav = new IndoorRoutes(this.world);
     // Bots need routes into base interiors (generator rooms, CaH points, roofed flag stands).
     for (const a of this.assets) if (a.type === 'generator' || a.type === 'cap_point') this.nav.prepare(a.pos);
     for (const f of this.flags) this.nav.prepare(f.home);
-    // Where bots restock: the team's inventory station closest to its flag that bots can find a way into.
+    // Where bots restock: the team's inventory stations closest to its flag that bots can find a way to.
     for (const t of [0, 1]) {
       const home = this.flags.find((f) => f.team === t)?.home;
       const st = this.assets.filter((a) => a.type === 'inventory' && a.team === t);
       if (home) st.sort((a, b) => distSq(a.pos, home) - distSq(b.pos, home));
-      // Indoor stations need a route in; outdoor ones (no route needed) come next.
-      const pick = st.find((a) => { this.nav.prepare(a.pos); return this.nav.route(a.pos); }) ?? st.find((a) => this.nav.openSky(a.pos));
-      if (pick) this.restock[t] = [pick.pos];
+      // Indoor stations need a route in; outdoor ones (no route needed) are fine as they are. Bots drop a station they cannot reach.
+      this.restock[t] = st.filter((a) => { if (this.nav.openSky(a.pos)) return true; this.nav.prepare(a.pos); return !!this.nav.route(a.pos); }).slice(0, 3).map((a) => a.pos);
     }
     this.phase = PHASE.WARMUP;
     this.phaseEnd = this.mode.id === 'training' ? Infinity : 10;
@@ -377,6 +380,7 @@ export class Match {
     p.invulnUntil = this.mode.id === 'arena' ? this.now + 5 : this.now + 1.5;
     p.lastCmd = { ...p.lastCmd, yaw: sp.yaw, pitch: 0 };
     p.history = [];
+    p.safe = [{ ...sp.pos }];
     this.io.send(p, { t: 'spawned', cls: p.cls.id, loadout: p.loadout, yaw: sp.yaw });
   }
 
@@ -438,7 +442,11 @@ export class Match {
       this.damagePlayer(p, (res.impact - FALL_DAMAGE_THRESHOLD) * FALL_DAMAGE_PER_MS, null, 'fall', false, null, 0);
     }
     if (!p.alive) return;
-    if (p.move.pos.y < this.killZ || p.move.pos.y < this.hazardY) { this.kill(p, null, 'killz'); return; }
+    if (p.move.pos.y < this.killZ || p.move.pos.y < this.hazardY) {
+      if (p.move.pos.y < this.killZ && this.rescue(p)) return;
+      this.kill(p, null, 'killz');
+      return;
+    }
     this.handleWeapons(p, cmd);
     p.prevButtons = cmd.buttons;
   }
@@ -460,6 +468,11 @@ export class Match {
     h.push({ t: this.now, x: p.move.pos.x, y: p.move.pos.y, z: p.move.pos.z });
     if (h.length > 40) h.shift();
     if (this.map.data.volumes && this.hazards(p)) return;
+    if (this.waterRescue && p.move.onGround && this.now - p.safeAt >= 0.25) {
+      p.safeAt = this.now;
+      p.safe.push({ x: p.move.pos.x, y: p.move.pos.y, z: p.move.pos.z });
+      if (p.safe.length > 5) p.safe.shift();
+    }
     this.checkFlagTouch(p);
     this.checkPickups(p);
     if (this.tick % 6 === 0) this.checkStationTouch(p);
@@ -478,9 +491,24 @@ export class Match {
     const pos = p.move.pos;
     const v = this.volumeAt({ x: pos.x, y: pos.y + 0.1, z: pos.z }) ?? this.volumeAt({ x: pos.x, y: pos.y + p.phys.height * 0.5, z: pos.z });
     if (!v) return false;
+    if (v.kind === 'pain' && this.rescue(p)) return true;
     if (v.kind === 'kill') this.kill(p, null, 'killz');
     else this.damagePlayer(p, v.dps * DT, null, 'hazard', false, null, 0);
     return !p.alive;
+  }
+
+  /** Out of bounds on a water map: back to ground the player stood on a moment ago, for a small health price. */
+  private rescue(p: Player): boolean {
+    if (!this.waterRescue || p.vehicle || !p.safe.length || p.health <= p.maxHealth * 0.1) return false;
+    const s = p.safe[0];
+    p.move.pos = { x: s.x, y: s.y + 0.3, z: s.z };
+    p.move.vel = { x: 0, y: 0, z: 0 };
+    p.move.onGround = false;
+    p.lastRescue = this.now;
+    p.health -= p.maxHealth * 0.1;
+    p.lastHurt = this.now;
+    if (!p.isBot) this.io.send(p, { t: 'toast', text: 'OUT OF BOUNDS - returned to the battlefield' });
+    return true;
   }
   /** Like TA: walking into a friendly powered inventory station restocks and applies a pending loadout. */
   private checkStationTouch(p: Player) {

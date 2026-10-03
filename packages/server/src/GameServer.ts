@@ -363,6 +363,9 @@ export class GameServer {
         if (p.alive && p.pending) this.send(p, { t: 'toast', text: 'Loadout will apply at an inventory station or on respawn' });
         if (msg.spawn && !p.alive && !p.spectator) p.spawnQueued = true;
         break;
+      case 'cosmetics':
+        if (typeof msg.cosmetics === 'object' && msg.cosmetics) { p.cosmetics = sanitizeCosmetics(msg.cosmetics); this.broadcastPlayers(); }
+        break;
       case 'chat': {
         const text = sanitizeText(msg.text, 160);
         if (!text) return;

@@ -193,9 +193,11 @@ input[type=checkbox] { accent-color: var(--amber); width: 18px; height: 18px; }
 .ta-choice small { font: 500 12px var(--body); color: var(--dim); letter-spacing: .04em; }
 .ta-choice:hover { background: rgba(255,181,71,.1); }
 .ta-choice.sel { color: var(--amber); border-left-color: var(--amber); background: rgba(255,181,71,.08); }
-.ta-loadout-side { display: flex; flex-direction: column; min-height: 0; overflow: auto; padding: 0 1em 1em 0; }
-.ta-loadout-side .ta-preview { min-height: 36vh; }
-.ta-choice-info .stat-block, .stat-block { padding: .8em 1em; margin-top: .6em; }
+.ta-loadout-side { display: grid; grid-template-rows: minmax(0, 1fr) 13em; min-height: 0; overflow: hidden; padding: 0 1em 1em 0; gap: .6em; }
+.ta-loadout-side .ta-preview { min-height: 0; }
+.ta-choice-info { overflow: auto; min-height: 0; }
+.loadout-view { height: min(78vh, 780px); }
+.ta-choice-info .stat-block, .stat-block { padding: .8em 1em; margin-top: 0; }
 .stat-title { font: 600 15px var(--display); letter-spacing: .1em; margin-bottom: .3em; }
 
 /* social */
@@ -288,13 +290,14 @@ input[type=checkbox] { accent-color: var(--amber); width: 18px; height: 18px; }
 .ig-team-count { font: 600 12px var(--display); letter-spacing: .24em; color: rgba(255,255,255,.7); }
 .ig-team-list { flex: 1; font-size: 15px; line-height: 1.5; color: #e8edf1; overflow: hidden; }
 .ig-team-join { align-self: flex-start; padding: .5em 1.4em; font: 700 13px var(--display); letter-spacing: .18em; color: #1a1206; background: linear-gradient(180deg, #ffcf6e, #e89a26); }
-.ig-cols { display: grid; grid-template-columns: minmax(240px, 1fr) minmax(260px, 1fr) minmax(300px, 1.3fr); gap: 1.2vw; min-height: 0; max-height: 72vh; }
+.ig-cols { display: grid; grid-template-columns: minmax(190px, .8fr) minmax(230px, 1fr) minmax(260px, 1.2fr) minmax(220px, 1fr); gap: 1.2vw; height: 70vh; }
 .ig-col { display: flex; flex-direction: column; min-height: 0; animation: none; }
-.ig-col .ta-items { max-height: none; flex: 1; }
+.ig-col .ta-items { max-height: none; flex: 1; min-height: 0; overflow: auto; }
 .ig-col .ta-choices { flex: 1; min-height: 0; }
 .ig-armor { padding: .7em 1.3em .2em; font: 600 10px var(--display); letter-spacing: .3em; color: var(--amber); }
-.ig-info { padding: .8em 1.2em 1em; border-top: 1px solid rgba(255,255,255,.08); min-height: 6em; }
+.ig-info { padding: .8em 1.2em 1em; border-top: 1px solid rgba(255,255,255,.08); height: 15em; flex: none; overflow: auto; }
 .ig-info p { margin: .3em 0 0; color: #cfd6dc; line-height: 1.4; }
+.ig-preview .ta-preview { flex: 1; min-height: 0; }
 
 /* ---------- loadout / cosmetics ---------- */
 .slot-row { display: grid; grid-template-columns: 110px 1fr; align-items: start; gap: .5em; margin-top: .6em; }
@@ -436,6 +439,7 @@ input[type=checkbox] { accent-color: var(--amber); width: 18px; height: 18px; }
 .bigmap-title small { color: var(--dim); font-size: 12px; letter-spacing: .14em; }
 .transport-pill { position: absolute; right: 18px; bottom: 6px; font-size: 11px; letter-spacing: .14em; opacity: .7; }
 .respawn { position: absolute; left: 50%; top: 62%; transform: translateX(-50%); text-align: center; font-size: 20px; letter-spacing: .14em; text-shadow: 0 2px 6px #000; }
+.respawn-hint { margin-top: .5em; font-size: 13px; letter-spacing: .2em; color: var(--dim); }
 .spec-hud { position: absolute; left: 50%; bottom: 24px; transform: translateX(-50%); text-align: center; font-size: 14px; letter-spacing: .1em; background: rgba(8,11,15,.7); padding: .5em 1.2em; }
 
 /* scoreboard */
