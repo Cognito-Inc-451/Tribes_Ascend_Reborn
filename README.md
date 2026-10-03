@@ -9,6 +9,8 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 > **your own copy** of Tribes: Ascend by the local importer, stay on your machine (`maps-original/` is git-ignored),
 > and must not be redistributed. Without an import the game still runs on generated maps with procedural art.
 <img width="1600" height="900" alt="image" src="https://github.com/user-attachments/assets/eecd3d3d-6679-4d39-a564-3898eeff12f1" />
+<img width="2166" height="1257" alt="image" src="https://github.com/user-attachments/assets/70515b97-74fe-4687-8cd4-8c6d5dd62dc0" />
+<img width="2169" height="1260" alt="image" src="https://github.com/user-attachments/assets/abbb3d43-201f-4c1b-bb26-754587b2575e" />
 
 ---
 
@@ -167,8 +169,7 @@ Chat commands: `/g message` (global chat), `/w name message` (whisper), `/r mess
 
 ### VGS (Voice Game System)
 
-Press **V**, then the letters shown on screen (they follow your keyboard layout: on AZERTY the Z key is Z). Some
-favourites:
+Press **V**, then the letters shown on screen (they follow your keyboard layout: on AZERTY the Z key is Z)
 
 | Keys | Line | Keys | Line |
 |---|---|---|---|
@@ -185,6 +186,7 @@ Branches: **A**ttack, **D**efend, **F**lag, **G**lobal (**C**ompliment, **R**esp
 **S**elf, **T**arget, **W**arning, **V**ery quick. With voice packs imported you hear the original lines.
 
 ## Hosting
+<img width="404" height="667" alt="image" src="https://github.com/user-attachments/assets/11d197c9-972b-4aad-a552-9986799b4c54" />
 
 - *Play → Host Game*: pick game type, **map set** (original maps by default; generated "Reborn" layouts on request),
   map or rotation, bots per team and skill, limits and rule toggles, then *Launch*. Your game is announced to this PC,
@@ -192,6 +194,9 @@ Branches: **A**ttack, **D**efend, **F**lag, **G**lobal (**C**ompliment, **R**esp
 - Dedicated servers: edit `config/servers.json` (mode, maps, bots `fillTo` = number of bots / `difficulty`, max
   players, options). Bots leave only when the server is down to 2 free slots. The default config runs one server per
   mode on the original maps.
+
+<img width="2169" height="1259" alt="image" src="https://github.com/user-attachments/assets/1d88a420-2927-42f3-8179-2b3692d86137" />
+<img width="2170" height="1257" alt="image" src="https://github.com/user-attachments/assets/2dd5c27d-fa81-4e0e-921c-68f4f4836269" />
 
 ## Repository layout
 
