@@ -1,5 +1,6 @@
 # Ascend Reborn
 <img width="1600" height="900" alt="image" src="https://github.com/user-attachments/assets/4d0f5725-74d0-42ad-9285-c5378a1aecad" />
+<img width="1200" height="698" alt="demo" src="https://github.com/user-attachments/assets/a78aec11-186e-4d6b-a106-99660687676c" />
 
 An unofficial, fan-made revival of **Tribes: Ascend** gameplay that runs in the browser (Chrome/Edge) with
 self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA game modes, with bots.
