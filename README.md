@@ -89,7 +89,7 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 ## Setup
 
 ```bash
-git clone <this repo> Ascend_Reborn
+git clone https://github.com/Cognito-Inc-451/Tribes_Ascend_Reborn
 cd Ascend_Reborn
 npm install
 
