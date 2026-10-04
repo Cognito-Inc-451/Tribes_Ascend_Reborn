@@ -15,6 +15,39 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 <img width="2165" height="1259" alt="image" src="https://github.com/user-attachments/assets/a6b669b2-9eb9-4a2b-85ea-48c4a2557c7f" />
 
 ---
+## Quick Start Guide
+
+**Windows**
+```
+You'll need nodejs with npm:
+install https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi and keep "npm package manager" selected.
+
+Go to your desired target folder & open command prompt from there via right-click in explorer,
+or go there via the command prompt (WIN+R and cmd [ENTER]) with "cd D:\games" or whatever your folder is.
+
+Once your target folder is open in command prompt, type these commands:
+  git clone https://github.com/Cognito-Inc-451/Tribes_Ascend_Reborn
+  cd Tribes_Ascend_Reborn
+  npm install
+  npm run install-ta
+
+if you still/already have T:A installed, you can open command prompt in the games' folder to execute the commands listed above
+but replace "npm run install-ta" with "npm run ta-import -- --all"
+
+then either type:
+  npm run play
+to play without running servers (you can still join others or host a server from ingame)
+
+or:
+  npm start
+to host servers and play simultaneously
+
+And finally, type "localhost:7770" in Chrome's address bar
+To close, close the tab and the command prompt window (or press CTRL+C in it).
+To run the game again, "npm start" or "npm run play"
+
+If later there is an update on github, you can just type "git pull" from with the Tribes_Ascend_Reborn folder to update
+```
 
 ## Features
 
@@ -113,7 +146,7 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 - (automatically downloaded during setup) the original content: about **11 GB** for the Tribes: Ascend files, plus room for the archive while
   `install-ta` runs (~20 GB free recommended). The imported data itself (`maps-original/`) is a few hundred MB.
 
-## Setup
+## Setup (see Quick Start Guide above)
 
 ```bash
 git clone https://github.com/Cognito-Inc-451/Tribes_Ascend_Reborn
