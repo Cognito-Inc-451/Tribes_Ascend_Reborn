@@ -61,9 +61,9 @@ function noCollide(name: string): boolean {
 }
 
 /** Sky domes and star-field cards are replaced by the client sky shader. */
-const SKIP_MESH = /skydome|skybox|skysphere|sky_?hemi|starfield|shootingstar|_stars?_|nebula|outofboundsgrid|rimlight/i;
+const SKIP_MESH = /skydome|skybox|skysphere|sky_?hemi|starfield|shootingstar|_stars?_|nebula|outofbounds|gridplane|rimlight/i;
 /** Invisible in game, collision only (map-edge "creativity walls", blockers). */
-const HIDDEN_MESH = /creativitywall|invisiblewall|invis_?wall|blocker|blockingmesh|collision_?only/i;
+const HIDDEN_MESH = /creativitywall|walllimit|invisiblewall|invis_?wall|blocker|blockingmesh|collision_?only/i;
 
 /** 3x3 column-major UE rotation (from FRotationMatrix rows) times per-axis scale, converted to map axes. */
 function transform(loc: Vec, rot: Rot, scale: Vec): Float32Array {

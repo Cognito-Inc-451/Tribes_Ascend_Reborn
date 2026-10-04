@@ -64,6 +64,7 @@ export class Match {
     const fx = new Set((map.data.meshes ?? []).flatMap((m) => (m.groups ?? []).map((g) => g.fx)));
     this.waterRescue = map.source === 'original' && fx.has('water') && !fx.has('lava');
     this.initEntities();
+    if (this.mode.id === 'cah') this.setupCaH();
     this.nav = new IndoorRoutes(this.world);
     // Bots need routes into base interiors (generator rooms, CaH points, roofed flag stands).
     for (const a of this.assets) if (a.type === 'generator' || a.type === 'cap_point') this.nav.prepare(a.pos);
@@ -110,6 +111,20 @@ export class Match {
       this.flags.push(f);
     }
     if (m === 'arena') this.tickets = [this.mode.respawnTickets ?? 25, this.mode.respawnTickets ?? 25];
+  }
+
+  /** TA's goal score is 100 per control point (300/400/500); neutral defences and stations join the nearest point's owner. */
+  private setupCaH() {
+    const points = this.assets.filter((a) => a.type === 'cap_point');
+    if (!points.length) return;
+    const opt = this.cfg.options?.scoreLimit;
+    if (opt === undefined || opt === MODES.cah.scoreLimit) this.mode.scoreLimit = Math.max(3, points.length) * 100;
+    for (const a of this.assets) {
+      if (a.team !== 255 || a.owner >= 0 || !['base_turret', 'inventory', 'repair_station', 'radar', 'vehicle_pad'].includes(a.type)) continue;
+      let best: Asset | null = null, bd = 130 * 130;
+      for (const p of points) { const d = distSq(a.pos, p.pos); if (d < bd) { bd = d; best = p; } }
+      if (best) a.capLink = best;
+    }
   }
 
   /** TA station/generator actors sit at their collision-cylinder centre; their meshes are offset 50 uu (1 m) down onto the floor. */
@@ -202,6 +217,14 @@ export class Match {
     const lo = validateLoadout(cls.id, loadout);
     if (!p.alive) { p.cls = cls; p.loadout = lo; p.pending = null; }
     else { p.pending = { cls, loadout: lo }; this.io.send(p, { t: 'toast', text: `${cls.name} loadout applies at an inventory station or on respawn` }); }
+  }
+
+  /** A Technician's deployed turrets last only while he lives in the class. */
+  private dropTurrets(p: Player) {
+    for (const a of this.assets.filter((x) => x.owner === p.id && (x.type === 'light_turret' || x.type === 'exr_turret'))) {
+      this.io.broadcast({ t: 'fx', kind: 'explode', pos: a.pos, radius: 2, item: `asset_${a.type}` });
+      this.removeAsset(a);
+    }
   }
 
   private applyLoadout(p: Player) {
@@ -367,6 +390,7 @@ export class Match {
 
   spawn(p: Player) {
     if (p.pending) { p.cls = p.pending.cls; p.loadout = p.pending.loadout; p.pending = null; }
+    p.repairSwap = false;
     this.applyLoadout(p);
     const sp = this.spawnPoint(p);
     p.move = newMoveState(sp.pos);
@@ -527,7 +551,10 @@ export class Match {
   }
 
   private useStation(p: Player) {
-    if (p.pending) { p.cls = p.pending.cls; p.loadout = p.pending.loadout; p.pending = null; }
+    if (p.pending) {
+      if (p.pending.cls !== p.cls) this.dropTurrets(p);
+      p.cls = p.pending.cls; p.loadout = p.pending.loadout; p.pending = null;
+    }
     p.repairSwap = false;
     this.applyLoadout(p);
     p.health = p.maxHealth;
@@ -1009,6 +1036,7 @@ export class Match {
       if (a.type === 'repair_station') {
         p.repairSwap = true;
         p.weapons[1] = makeWeapon('repair_tool');
+        this.io.send(p, { t: 'spawned', cls: p.cls.id, loadout: { ...p.loadout, secondary: 'repair_tool' } });
         this.io.send(p, { t: 'toast', text: 'Repair tool equipped (slot 2)' });
         return;
       }
@@ -1130,6 +1158,7 @@ export class Match {
     if (v.flag) this.dropFlag(v, false);
     if (v.vehicle) this.exitVehicle(v, true);
     v.packActive = false;
+    this.dropTurrets(v);
     if (!silent) v.deaths++;
     if (!v.rewardedSinceDeath) v.determination = Math.min(3, v.determination + (v.hasPerk('determination') ? 1 : 0));
     else v.determination = 0;
@@ -1236,7 +1265,7 @@ export class Match {
   }
 
   private turretThink(a: Asset) {
-    if (this.now < a.nextFire || this.tick % 3 !== 0) return;
+    if (a.team === 255 || this.now < a.nextFire || this.tick % 3 !== 0) return;
     const range = a.def.range ?? 60;
     const muzzle = { x: a.pos.x, y: a.pos.y + a.def.size[1] * 1.6, z: a.pos.z };
     let target: Player | null = null, td = range * range;
@@ -1313,12 +1342,17 @@ export class Match {
 
   private capPointThink(a: Asset) {
     const touching = new Set<number>();
-    for (const o of this.players.values()) if (o.alive && distSq(o.move.pos, a.pos) < 3.2 * 3.2) touching.add(o.team);
+    for (const o of this.players.values()) {
+      if (!o.alive || o.vehicle) continue;
+      const dy = o.move.pos.y - a.pos.y;
+      if (Math.hypot(o.move.pos.x - a.pos.x, o.move.pos.z - a.pos.z) < 3.6 && dy > -2 && dy < 4) touching.add(o.team);
+    }
     if (touching.size === 1) {
       const team = [...touching][0];
       if (team !== a.capTeam) {
         a.capTeam = team;
         a.team = team;
+        for (const d of this.assets) if (d.capLink === a) { d.team = team; d.nextFire = this.now + 1; }
         a.capHeldSince = this.now;
         a.capNextScore = this.now + 5;
         for (const o of this.players.values()) if (o.alive && o.team === team && distSq(o.move.pos, a.pos) < 3.2 * 3.2) { this.earn(o, CREDITS.capPointHold); o.score += 10; o.rewardedSinceDeath = true; }

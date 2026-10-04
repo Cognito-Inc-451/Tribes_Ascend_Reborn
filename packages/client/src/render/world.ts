@@ -1,8 +1,9 @@
 import * as THREE from 'three';
-import { isForceFieldMesh, THEMES, type MapData, type MeshFx, type Theme } from '@ar/shared';
+import { isBoundaryMesh, isForceFieldMesh, THEMES, type MapData, type MeshFx, type Theme } from '@ar/shared';
 import { settings } from '../settings.js';
 import { FOG_UNIFORMS, withFog } from './fog.js';
 import { forceFieldMaterial, forceFieldTime } from './forcefield.js';
+import { beamMaterial, BEAM_MESH, coneAxis, disposeBeams } from './beams.js';
 import { disposeLiquids, lavaMaterial, waterMaterial } from './liquids.js';
 import { matFor, surfaceMaterial } from './materials.js';
 import { NORMAL_STRENGTH } from './models.js';
@@ -396,6 +397,22 @@ export class WorldView {
     } catch { return null; }
   }
 
+  /** Light shaft / exhaust plume: a soft additive volume (see beams.ts) instead of a milky glass shell. */
+  private beamFor(mi: number, name: string, positions: Float32Array, tex: number): THREE.Material {
+    const key = `${mi}|${tex}`;
+    const tint = /thruster/i.test(name) ? 0xa8c8ff : 0xfff2d8;
+    const tname = tex >= 0 ? this.map.textures?.[tex] : undefined;
+    const m = beamMaterial(key, coneAxis(positions), tint);
+    if (tname && this.textures) {
+      void this.textures.get(tname).then((tx) => {
+        if (!tx) return;
+        tx.wrapS = tx.wrapT = THREE.RepeatWrapping;
+        beamMaterial(key, null, tint, tx);
+      });
+    }
+    return m;
+  }
+
   /**
    * TA's non-opaque materials: additive / unlit translucent glows (light beams, holograms) add their texture, lit
    * translucent (glass) blends over the scene, modulate (grime decals) multiplies it. None write depth.
@@ -504,7 +521,7 @@ export class WorldView {
     const blockerOf = new Map((this.map.blockers ?? []).map((b, i) => [b.instance, i]));
     for (const [mi, list] of byMesh) {
       const me = meshes[mi];
-      if (me.hidden) continue;
+      if (me.hidden || isBoundaryMesh(me.name)) continue;
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(me.positions, 3));
       g.setIndex(new THREE.BufferAttribute(me.indices, 1));
@@ -542,7 +559,10 @@ export class WorldView {
         bg.setIndex(g.index);
         bg.boundingSphere = g.boundingSphere;
         const bm: THREE.Material[] = [];
-        for (const grp of blended) { bg.addGroup(grp.start, grp.count, bm.length); bm.push(this.blendMaterial(textured ? grp.tex : -1, grp.fx as BlendFx)); }
+        for (const grp of blended) {
+          bg.addGroup(grp.start, grp.count, bm.length);
+          bm.push(grp.fx === 'additive' && BEAM_MESH.test(me.name) ? this.beamFor(mi, me.name, me.positions, textured ? grp.tex : -1) : this.blendMaterial(textured ? grp.tex : -1, grp.fx as BlendFx));
+        }
         const im = new THREE.InstancedMesh(bg, bm, list.length);
         list.forEach((ii, k) => {
           const m = instances[ii].m;
@@ -638,7 +658,7 @@ export class WorldView {
     const v = [0, 0, 0, 0, 0, 0, 0, 0, 0];
     for (const it of instances) {
       const me = meshes[it.mesh];
-      if (me.hidden || !me.collide || isForceFieldMesh(me.name)) continue;
+      if (me.hidden || !me.collide || isForceFieldMesh(me.name) || isBoundaryMesh(me.name)) continue;
       const p = me.positions, I = me.indices, m = it.m;
       for (let t = 0; t < I.length; t += 3) {
         for (let k = 0; k < 3; k++) {
@@ -717,6 +737,7 @@ export class WorldView {
     });
     for (const m of this.texMats.values()) m.dispose();
     for (const m of this.blendMats.values()) m.dispose();
+    disposeBeams();
     disposeLiquids();
     this.skyEnv?.dispose();
   }

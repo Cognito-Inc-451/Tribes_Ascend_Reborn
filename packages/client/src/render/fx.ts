@@ -195,7 +195,12 @@ export class Effects {
   taExplosion(item: string, pos: Vec3, radius: number): boolean {
     const f = this.ta.item(item);
     if (!this.ta.play(f?.explode, pos)) return false;
-    this.flash(pos, f?.boomLight ?? f?.light ?? 0xffaa66, 60 + radius * 20, 0.35);
+    const c = f?.boomLight ?? f?.light ?? 0xffaa66;
+    // TA's fireball shells are meshes we draw as faint sprites: give every blast a bright core and shockwave.
+    this.sprite(pos, GLOW!, 0xffffff, 0.12, (k) => radius * 0.7 * (0.8 + k), (k) => 1 - k);
+    this.sprite(pos, GLOW!, c, 0.4, (k) => radius * 0.7 * (1 + k * 1.2), (k) => (1 - k) * 0.8);
+    this.sprite(pos, RING!, c, 0.35, (k) => radius * 0.7 * (0.4 + k * 2.2), (k) => (1 - k) * 0.7);
+    this.flash(pos, c, 60 + radius * 20, 0.35);
     return true;
   }
 

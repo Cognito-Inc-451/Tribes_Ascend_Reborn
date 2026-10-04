@@ -22,6 +22,7 @@ with sync_playwright() as p:
     browser = p.chromium.launch(headless=True, args=['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist'])
     page = browser.new_page(viewport={'width': 1280, 'height': 720})
     page.on('pageerror', lambda e: print('pageerror:', e))
+    page.on('console', lambda m: print('console:', m.text[:400]) if m.type == 'error' else None)
     page.goto(base + '/?debug')
     page.wait_for_load_state('networkidle')
     time.sleep(3)

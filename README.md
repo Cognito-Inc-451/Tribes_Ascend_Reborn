@@ -29,6 +29,9 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
   their weapons, belts, packs, perks and upgrades. Everything is unlocked.
 - Fractal grenades behave like TA's: the orb rises, then fires damaging shards at the ground around it for 3 s
   before its final blast.
+- Capture and Hold uses TA's goal score (100 per control point, 30 min limit). Turrets, stations and radars near a
+  point belong to whoever holds it (neutral ones stay quiet until the point is taken). A Technician's turrets
+  disappear when he dies or changes class.
 - Game modes: **CTF**, **CTF Blitz**, **Team Deathmatch**, **Rabbit**, **Arena**, **Capture and Hold**, plus Ski Training.
 - Bases: generators, inventory stations (walk in to restock, like TA), repair stations, turrets, radar, vehicle pads,
   vehicles (Grav Cycle, Beowulf, Shrike), deployables and call-ins (tactical strike, supply drop, orbital strike).

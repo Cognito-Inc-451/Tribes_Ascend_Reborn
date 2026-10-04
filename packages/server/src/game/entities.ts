@@ -148,6 +148,8 @@ export interface Asset {
   capTeam?: number;       // CaH: owning team
   capHeldSince?: number;
   capNextScore?: number;
+  /** CaH: the control point whose owner this defence/station belongs to (map assets start neutral). */
+  capLink?: Asset;
   armedAt?: number;
 }
 

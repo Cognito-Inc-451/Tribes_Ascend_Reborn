@@ -148,6 +148,17 @@ class ModelLibrary {
 
 export const models = new ModelLibrary();
 
+/** Players seen from afar must not sink into fog and shadow: a little self-light that grows with distance. */
+export function liftWithDistance(mats: THREE.MeshStandardMaterial[]) {
+  for (const mat of mats) {
+    mat.customProgramCacheKey = () => 'far-lift';
+    mat.onBeforeCompile = (sh) => {
+      sh.fragmentShader = sh.fragmentShader.replace('#include <emissivemap_fragment>',
+        '#include <emissivemap_fragment>\n totalEmissiveRadiance += diffuseColor.rgb * (0.05 + 0.3 * smoothstep(25.0, 220.0, length(vViewPosition)));');
+    };
+  }
+}
+
 /** Static (bind pose) instance, rotated so the model's front faces -Z like every other actor. */
 export function staticModel(m: ModelData, tint?: number, selfLit = 0): THREE.Group {
   const mesh = new THREE.Mesh(m.geometry, models.materials(m, tint, selfLit));
@@ -215,6 +226,7 @@ export class CharacterRig {
     });
     bones.forEach((b, i) => { const p = m.bones[i].parent; if (p >= 0) bones[p].add(b); });
     this.mats = models.materials(m);
+    liftWithDistance(this.mats);
     this.mesh = new THREE.SkinnedMesh(m.geometry, this.mats);
     this.mesh.add(bones[0]);
     this.mesh.updateMatrixWorld(true);

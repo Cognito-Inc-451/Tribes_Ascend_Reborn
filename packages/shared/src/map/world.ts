@@ -3,7 +3,9 @@ import type { MapData, MapEntity, MeshInstance } from './spec.js';
 
 /** Energy fields in TA maps (base force fields, shield domes, conduit fields): translucent, players pass through. */
 export const isForceFieldMesh = (name: string) => /forcefield(?!_base)|shielddome|sunstar_shield$|conduit_field|forcebubble/i.test(name);
-const solid = (me: { collide: boolean; name: string } | undefined) => !!me?.collide && !isForceFieldMesh(me.name);
+/** TA's map-edge warning grids (shown only near the boundary); the creativity walls do the blocking. */
+export const isBoundaryMesh = (name: string) => /outofbounds|gridplane|walllimit/i.test(name);
+const solid = (me: { collide: boolean; name: string } | undefined) => !!me?.collide && !isForceFieldMesh(me.name) && !isBoundaryMesh(me.name);
 
 /** Transform mesh instances to a world-space triangle soup. */
 function instanceTriangles(map: MapData, list: MeshInstance[]): Float32Array | null {

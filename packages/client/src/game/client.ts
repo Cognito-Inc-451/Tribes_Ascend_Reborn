@@ -154,6 +154,7 @@ export class GameClient {
   }
 
   private vmItem = '';
+  private repairFiring = false;
   /** Swap the first-person weapon model when the held weapon changes. */
   private syncViewModel() {
     const item = this.slot === 1 ? this.loadout.secondary : this.loadout.primary;
@@ -162,6 +163,7 @@ export class GameClient {
     const key = `${item}|${settings.cosmetics.weaponFinish}|${armor}|${team}`;
     if (key === this.vmItem) return;
     this.vmItem = key;
+    this.repairFiring = false;
     for (const c of [...this.viewModel.children]) { this.viewModel.remove(c); disposeViewModel(c); }
     this.viewModel.add(buildViewModel(item, settings.cosmetics.weaponFinish, { armor, team }));
   }
@@ -432,7 +434,13 @@ export class GameClient {
     if (!def || !self || !this.pred.alive || ((this.meSnap()?.flags ?? 0) & PF.IN_VEHICLE)) return;
     const now = performance.now() / 1000;
     const clip = self.ammo[this.slot]?.[0] ?? 0;
-    if ((buttons & BTN.FIRE) && now >= this.nextFireLocal && clip > 0 && self.reload === 0 && (!def.spinup || self.spin >= 0.99) && def.kind !== 'repair') {
+    if (def.kind === 'repair') {
+      // The beam is server-side; the tool's own Fire clip loops while the trigger is held.
+      const on = (buttons & BTN.FIRE) !== 0;
+      if (on !== this.repairFiring) { this.repairFiring = on; this.fp?.player.play(on ? 'Fire' : 'Idle', true, 0.08); }
+      return;
+    }
+    if ((buttons & BTN.FIRE) && now >= this.nextFireLocal && clip > 0 && self.reload === 0 && (!def.spinup || self.spin >= 0.99)) {
       this.nextFireLocal = now + def.refire;
       audio.fire(this.session.myId, def.id);
       this.recoil = Math.min(1, this.recoil + (def.projectile ? 0.8 : 0.35) * (this.fp ? 0.35 : 1));
@@ -624,9 +632,23 @@ export class GameClient {
     }
   }
 
+  /** Where a shot's effect starts: our camera's gun or the rendered body, not the server's slightly older position (visible while strafing). */
+  private muzzleFor(m: Extract<S2C, { t: 'fx' }>): Vec3 {
+    if (m.player === undefined || (m.item ?? '').startsWith('veh_')) return m.pos;
+    if (m.player === this.session.myId && !this.thirdPerson) {
+      const q = this.r.camera.quaternion, p = this.r.camera.position;
+      const f = new THREE.Vector3(0, 0, -1).applyQuaternion(q), r = new THREE.Vector3(1, 0, 0).applyQuaternion(q), u = new THREE.Vector3(0, 1, 0).applyQuaternion(q);
+      return { x: p.x + f.x * 0.8 + r.x * 0.22 - u.x * 0.2, y: p.y + f.y * 0.8 + r.y * 0.22 - u.y * 0.2, z: p.z + f.z * 0.8 + r.z * 0.22 - u.z * 0.2 };
+    }
+    const v = this.players.get(m.player), sp = this.session.latest?.players.find((p) => p.id === m.player);
+    if (!v || !sp) return m.pos;
+    const rp = v.model.root.position;
+    return { x: rp.x + (m.pos.x - sp.pos.x), y: rp.y + (m.pos.y - sp.pos.y), z: rp.z + (m.pos.z - sp.pos.z) };
+  }
+
   private onFx(m: Extract<S2C, { t: 'fx' }>) {
     const item = m.item ?? '';
-    if ((m.kind === 'fire' || m.kind === 'tracer') && m.player !== undefined) this.players.get(m.player)?.model.fire();
+    if ((m.kind === 'fire' || m.kind === 'tracer' || m.kind === 'repair') && m.player !== undefined) this.players.get(m.player)?.model.fire();
     switch (m.kind) {
       case 'explode': {
         const def = projDef(item);
@@ -639,20 +661,20 @@ export class GameClient {
         if (!audio.playKey('fractal_shot', m.pos, 0.7)) audio.playExplosion(item, m.to ?? m.pos, 0.4);
         break;
       case 'tracer': {
-        this.fx.tracer(m.pos, m.to ?? m.pos, item === 'light_turret' ? 0xff8060 : 0xfff0a0);
+        this.fx.tracer(this.muzzleFor(m), m.to ?? m.pos, item === 'light_turret' ? 0xff8060 : 0xfff0a0);
         const owner = m.player ?? -1;
         if (m.player !== this.session.myId || item.startsWith('veh_')) audio.fire(owner, item, m.pos, 0.6);
         if (m.to) audio.impact(owner, m.to);
         break;
       }
-      case 'lance': this.fx.beam(m.pos, m.to ?? m.pos, 0x9fe8ff, 0.15, 0.05); if (m.player !== this.session.myId) audio.play('lance', m.pos); break;
+      case 'lance': this.fx.beam(this.muzzleFor(m), m.to ?? m.pos, 0x9fe8ff, 0.15, 0.05); if (m.player !== this.session.myId) audio.play('lance', m.pos); break;
       case 'fire':
         // Vehicle and turret shots are not predicted locally, so their sound comes from here for everyone.
         if (m.player !== this.session.myId || item.startsWith('veh_')) audio.fire(m.player ?? -2, item, m.pos);
-        if (m.player !== this.session.myId) this.fx.muzzle(m.pos, projDef(item)?.color ?? 0xffd890);
+        if (m.player !== this.session.myId) this.fx.muzzle(this.muzzleFor(m), projDef(item)?.color ?? 0xffd890);
         break;
       case 'melee': audio.play('melee', m.pos); break;
-      case 'repair': this.fx.beam(m.pos, m.to ?? m.pos, 0x60ff90, 0.12, 0.03); if (Math.random() < 0.3) audio.play('repair', m.pos, 0.5); break;
+      case 'repair': this.fx.beam(this.muzzleFor(m), m.to ?? m.pos, 0x60ff90, 0.12, 0.03); if (Math.random() < 0.3) audio.play('repair', m.pos, 0.5); break;
       case 'deploy': {
         const key = /claymore/.test(item) ? 'claymore' : /^(motion_)?mine$/.test(item) ? 'mine' : item;
         if (!audio.playKey(`deploy_${key}`, m.pos)) audio.play('deploy', m.pos);

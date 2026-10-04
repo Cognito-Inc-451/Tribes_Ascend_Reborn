@@ -28,7 +28,7 @@ export const MODES: Record<ModeId, ModeDef> = {
     rules: ['Grab the flag to score a point.', 'Hold onto the flag to gain more points.', 'Kill enemy players to score.', 'Game to 30 points.'] },
   arena: { id: 'arena', name: 'Arena', short: 'ARENA', teams: true, scoreLimit: 2, timeLimit: 10, usesBases: false, vehicles: false, callIns: false, respawnTickets: 25, roundsToWin: 2, internalPrefix: 'TrArena',
     rules: ['Eliminate the opposing team\'s forces.', 'The team that wins two rounds wins the match.', 'Each team has 25 respawns.', 'After team respawns are depleted, players get one more life.'] },
-  cah: { id: 'cah', name: 'Capture and Hold', short: 'CAH', teams: true, scoreLimit: 100, timeLimit: 20, usesBases: true, vehicles: true, callIns: true, internalPrefix: 'TrCaH',
+  cah: { id: 'cah', name: 'Capture and Hold', short: 'CAH', teams: true, scoreLimit: 400, timeLimit: 30, usesBases: true, vehicles: true, callIns: true, internalPrefix: 'TrCaH',
     rules: ['Capture and hold the various Control Points.', 'A Control Point is captured by touching a point\'s switch.', 'Once a Control Point has been held for 5 seconds, the owning team gains a score.', 'Held Control Points generate a score every 5 seconds.', 'The team that reaches the goal score wins.'] },
   training: { id: 'training', name: 'Ski Training', short: 'TRAIN', teams: false, scoreLimit: 0, timeLimit: 0, usesBases: false, vehicles: true, callIns: false, internalPrefix: 'TrTraining',
     rules: ['Hold Space to ski down slopes.', 'Hold Right Mouse to jet.', 'Ski down hills and jet up the next to keep your speed.'] },

@@ -29,6 +29,11 @@ export interface PostOptions {
 
 const VERT = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
 
+/** NaN/Inf texels (degenerate normals, depth at silhouettes) must never reach a blur: they grow into black blocks. */
+const CLEAN = `
+  vec3 clean3(vec3 v) { return (any(isnan(v)) || any(isinf(v))) ? vec3(0.0) : v; }
+  float clean1(float v, float def) { return (isnan(v) || isinf(v)) ? def : v; }`;
+
 const VIEWPOS = `
   uniform sampler2D tDepth; uniform mat4 uInvProj;
   vec3 viewPos(vec2 uv) {
@@ -38,7 +43,7 @@ const VIEWPOS = `
   }`;
 
 /** Alchemy-style SSAO from depth only (normals rebuilt from neighbours), at half resolution. */
-const AO_FRAG = `varying vec2 vUv; ${VIEWPOS}
+const AO_FRAG = `varying vec2 vUv; ${VIEWPOS}${CLEAN}
   uniform mat4 uProj; uniform vec2 uTexel; uniform float uRadius; uniform float uIntensity; uniform float uFrame;
   void main() {
     float d0 = texture2D(tDepth, vUv).x;
@@ -49,6 +54,7 @@ const AO_FRAG = `varying vec2 vUv; ${VIEWPOS}
     vec3 dx = abs(pr.z - p.z) < abs(p.z - pl.z) ? pr - p : p - pl;
     vec3 dy = abs(pu.z - p.z) < abs(p.z - pd.z) ? pu - p : p - pd;
     vec3 n = normalize(cross(dx, dy));
+    if (any(isnan(n)) || any(isinf(n)) || dot(n, n) < 0.5) { gl_FragColor = vec4(1.0); return; }
     float rpx = uRadius * uProj[1][1] * 0.5 / max(0.1, -p.z);
     float rnd = fract(52.9829189 * fract(dot(gl_FragCoord.xy + uFrame * 5.588238, vec2(0.06711056, 0.00583715))));
     float sum = 0.0;
@@ -60,31 +66,31 @@ const AO_FRAG = `varying vec2 vUv; ${VIEWPOS}
       float vv = dot(v, v);
       sum += max(0.0, dot(v, n) - 0.01 * -p.z) / (vv + 0.02) * (1.0 - smoothstep(uRadius * uRadius * 0.6, uRadius * uRadius * 1.6, vv));
     }
-    float ao = max(0.0, 1.0 - 2.0 * uIntensity * sum / float(SAMPLES));
-    gl_FragColor = vec4(vec3(pow(ao, 1.4)), 1.0);
+    float ao = clean1(max(0.0, 1.0 - 2.0 * uIntensity * sum / float(SAMPLES)), 1.0);
+    gl_FragColor = vec4(vec3(clamp(pow(ao, 1.4), 0.0, 1.0)), 1.0);
   }`;
 
 /** Depth-aware 4x4 blur for the half-resolution AO. */
-const AO_BLUR_FRAG = `varying vec2 vUv; ${VIEWPOS}
+const AO_BLUR_FRAG = `varying vec2 vUv; ${VIEWPOS}${CLEAN}
   uniform sampler2D tAO; uniform vec2 uTexel;
   void main() {
     float z0 = viewPos(vUv).z, sum = 0.0, w = 0.0;
     for (int y = -2; y < 2; y++) for (int x = -2; x < 2; x++) {
       vec2 o = (vec2(float(x), float(y)) + 0.5) * uTexel;
-      float k = 1.0 / (1.0 + abs(viewPos(vUv + o).z - z0) * 4.0);
-      sum += texture2D(tAO, vUv + o).r * k; w += k;
+      float k = clean1(1.0 / (1.0 + abs(viewPos(vUv + o).z - z0) * 4.0), 0.0);
+      sum += clean1(texture2D(tAO, vUv + o).r, 1.0) * k; w += k;
     }
-    gl_FragColor = vec4(vec3(sum / max(w, 1e-4)), 1.0);
+    gl_FragColor = vec4(vec3(clamp(clean1(sum / max(w, 1e-4), 1.0), 0.0, 1.0)), 1.0);
   }`;
 
 /** God rays, step 1: bright sky around the sun (occluders are black). */
-const GOD_MASK_FRAG = `varying vec2 vUv;
+const GOD_MASK_FRAG = `varying vec2 vUv;${CLEAN}
   uniform sampler2D tColor; uniform sampler2D tDepth; uniform vec2 uSun; uniform float uAspect;
   void main() {
     float sky = step(0.99999, texture2D(tDepth, vUv).x);
     vec2 d = (vUv - uSun) * vec2(uAspect, 1.0);
     float glow = exp(-dot(d, d) * 28.0);
-    vec3 c = min(texture2D(tColor, vUv).rgb, vec3(4.0));
+    vec3 c = min(clean3(texture2D(tColor, vUv).rgb), vec3(4.0));
     // Only the bright sky around the sun casts shafts, not the whole sky dome.
     c = max(c - vec3(0.85), vec3(0.0));
     gl_FragColor = vec4(c * sky * glow, 1.0);
@@ -101,19 +107,19 @@ const GOD_BLUR_FRAG = `varying vec2 vUv;
   }`;
 
 /** Half-resolution disc blur used by depth of field. */
-const DOF_BLUR_FRAG = `varying vec2 vUv;
+const DOF_BLUR_FRAG = `varying vec2 vUv;${CLEAN}
   uniform sampler2D tColor; uniform vec2 uTexel;
   void main() {
     vec3 acc = vec3(0.0);
     for (int i = 0; i < 16; i++) {
       float a = float(i) * 2.39996323, r = sqrt((float(i) + 0.5) / 16.0) * 5.0;
-      acc += min(texture2D(tColor, vUv + vec2(cos(a), sin(a)) * r * uTexel).rgb, vec3(16.0));
+      acc += min(clean3(texture2D(tColor, vUv + vec2(cos(a), sin(a)) * r * uTexel).rgb), vec3(16.0));
     }
     gl_FragColor = vec4(acc / 16.0, 1.0);
   }`;
 
 /** HDR composite: water SSR, ambient occlusion, depth of field and god rays. */
-const COMPOSITE_FRAG = `varying vec2 vUv; ${VIEWPOS}
+const COMPOSITE_FRAG = `varying vec2 vUv; ${VIEWPOS}${CLEAN}
   uniform sampler2D tColor; uniform sampler2D tAO; uniform sampler2D tGod; uniform sampler2D tDof;
   uniform mat4 uProj; uniform vec3 uViewUp; uniform float uTime;
   uniform float uAO; uniform vec3 uGod; uniform vec3 uDof; uniform float uSSR;
@@ -146,17 +152,17 @@ const COMPOSITE_FRAG = `varying vec2 vUv; ${VIEWPOS}
     }
     #endif
     #ifdef USE_AO
-    float ao = texture2D(tAO, vUv).r;
+    float ao = clamp(clean1(texture2D(tAO, vUv).r, 1.0), 0.0, 1.0);
     c *= mix(1.0, ao, uAO * (1.0 - smoothstep(70.0, 150.0, dist)) * step(d, 0.99999));
     #endif
     #ifdef USE_DOF
     float coc = smoothstep(uDof.x, uDof.x + uDof.y, dist) + (uDof.z > 0.0 ? 1.0 - smoothstep(uDof.z * 0.35, uDof.z * 0.8, dist) : 0.0);
-    c = mix(c, texture2D(tDof, vUv).rgb, clamp(coc, 0.0, 1.0) * step(1.2, dist));
+    c = mix(c, clean3(texture2D(tDof, vUv).rgb), clamp(coc, 0.0, 1.0) * step(1.2, dist));
     #endif
     #ifdef USE_GOD
-    c += texture2D(tGod, vUv).rgb * uGod;
+    c += clean3(texture2D(tGod, vUv).rgb) * uGod;
     #endif
-    gl_FragColor = vec4(c, 1.0);
+    gl_FragColor = vec4(clean3(c), 1.0);
   }`;
 
 /** Display pass: motion blur, chromatic aberration, sharpen, white balance, tone mapping, grade, vignette, grain. */
