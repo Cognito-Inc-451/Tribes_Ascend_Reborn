@@ -160,7 +160,7 @@ export class Match {
       destroyed: false, destroyedAt: 0, owner, createdAt: this.now, nextFire: 0, box: null, tag, capTeam: type === 'cap_point' ? 255 : undefined,
       armedAt: this.now + 1,
     };
-    if (def.solid && owner >= 0) {
+    if (def.solid && (owner >= 0 || def.mass)) {
       a.box = makeOBB({ x: pos.x, y: pos.y + def.size[1], z: pos.z }, [...def.size], yaw, 0, 0, type === 'force_field' ? 'forcefield' : 'metal');
       if (type === 'force_field') a.box.passTeam = team;
       this.world.dynamic.set(a.id, a.box);

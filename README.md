@@ -64,6 +64,9 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
   Bella Omega, Katabatic, Stonehenge, ...), and spawn points picked like TA does (a random team start, skipping the
   last one used and any with an enemy in sight; maps without team starts are split in two halves so each team
   spawns on its own side).
+- Base generators, base turrets and radars are solid (players and vehicles collide with them); inventory, repair
+  and vehicle pads stay walk-in. Base assets show damage (darkening, smoke and sparks) and look dead when
+  disabled (unpowered: dimmed; destroyed: charred, slumped turret heads, no glow).
 - TA's baked (Lightmass) lighting on map meshes, packed into a few atlas pages per map (Settings → Video → Baked
   Lighting). The lightmap texels are linear, so their colour matches each level's sun and sky.
 - TA's own animations: third-person locomotion blended like TA's AnimTree (8-way run and ski, flight, landing,
@@ -91,7 +94,8 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 
 **Networking (no central server)**
 - Every running copy is a *node*. Nodes find each other on the LAN (UDP multicast) and on the internet through the
-  public BitTorrent DHT, then exchange server lists over HTTP. WebTransport (UDP) with WebSocket fallback.
+  public BitTorrent DHT (bootstrapped from the router hosts with literal-IP fallbacks and retried while the routing
+  table is empty), then exchange server lists over HTTP. WebTransport (UDP) with WebSocket fallback.
 - NAT traversal, in order: **UPnP / NAT-PMP** port mapping → **relay** through another player's reachable node
   (TURN-like tunnel over WebSocket, automatic when your router refuses port mapping). Players connect to relayed
   games exactly like direct ones.
@@ -102,8 +106,11 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 ## Requirements
 
 - **Node.js 22+** (24 recommended) and npm.
-- **Chrome or Edge** (WebTransport, WebGL2). Firefox works over WebSocket.
-- For the original content: about **11 GB** for the Tribes: Ascend files, plus room for the archive while
+  install https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi and keep "npm package manager" selected
+  - optional: to verify nodejs: open command prompt (WIN+R and type cmd + press [Enter]) and type "node -v" 
+  - optional: to verify npm: type "npm -v" in command prompt
+- **Chrome or Edge** (WebTransport, WebGL2). Firefox works over WebSocket. Chrome is recommended.
+- (automatically downloaded during setup) the original content: about **11 GB** for the Tribes: Ascend files, plus room for the archive while
   `install-ta` runs (~20 GB free recommended). The imported data itself (`maps-original/`) is a few hundred MB.
 
 ## Setup

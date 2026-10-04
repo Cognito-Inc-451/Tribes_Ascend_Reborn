@@ -6,6 +6,7 @@ declare module 'bittorrent-dht' {
     announce(infoHash: Buffer | string, port: number, cb?: (err?: Error) => void): void;
     lookup(infoHash: Buffer | string, cb?: (err?: Error, n?: number) => void): void;
     destroy(cb?: () => void): void;
+    nodes: { toArray(): unknown[] };
   }
 }
 

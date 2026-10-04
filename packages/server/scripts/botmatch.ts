@@ -1,13 +1,14 @@
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { MODES, PHASE, type ModeId } from '@ar/shared';
+import { ASSETS, MODES, PHASE, type ModeId } from '@ar/shared';
 import type { ServerConfig } from '../src/config.js';
 import { BotBrain, BOT_NAMES } from '../src/game/bots.js';
 import { Player } from '../src/game/entities.js';
 import { MapLibrary } from '../src/game/maps.js';
 import { Match } from '../src/game/Match.js';
 
-// Headless bot match: tsx scripts/botmatch.ts <mode> <map> <reborn|original> <bots> <seconds>
+// Tribes-style simulation: tsx scripts/botmatch.ts <mode> <map> <reborn|original> <bots> <seconds>   (NOMASS=1: map assets do not block movement)
+if (process.env.NOMASS) for (const t of ['generator', 'base_turret', 'radar'] as const) delete ASSETS[t].mass;
 const [mode = 'ctf', mapId = 'katabatic', source = 'original', nBots = '14', secs = '300'] = process.argv.slice(2);
 const here = dirname(fileURLToPath(import.meta.url));
 const lib = new MapLibrary(resolve(here, '../../../maps-original'));

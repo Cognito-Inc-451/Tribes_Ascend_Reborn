@@ -21,13 +21,15 @@ export interface AssetDef {
   lifetime?: number;
   size: [number, number, number]; // collision box half extents
   solid: boolean;
+  /** Map-placed (not player-deployed) asset that still blocks movement. */
+  mass?: boolean;
   src: string;
 }
 
 export const ASSETS: Record<AssetType, AssetDef> = {
-  generator: { type: 'generator', name: 'Generator', health: 6000, armored: true, needsPower: false, upgradeCosts: [1500, 1500, 2000, 2000], healthPerLevel: 2000, autoRepair: 300, size: [1.6, 1.8, 1.6], solid: true, src: 'TD/Generator' },
-  base_turret: { type: 'base_turret', name: 'Base Turret', health: 5000, armored: true, needsPower: true, upgradeCosts: [1500, 1500, 2000, 2000], healthPerLevel: 500, range: 110, damage: 650, splash: 4, refire: 2.2, size: [1.2, 1.2, 1.2], solid: true, src: 'TD/Base_Turret' },
-  radar: { type: 'radar', name: 'Radar Sensor', health: 2000, armored: true, needsPower: true, upgradeCosts: [1500, 1500, 2000, 2000], healthPerLevel: 2000, range: 200, size: [1, 2.5, 1], solid: true, src: 'TD/Radar_Sensor' },
+  generator: { type: 'generator', name: 'Generator', health: 6000, armored: true, needsPower: false, upgradeCosts: [1500, 1500, 2000, 2000], healthPerLevel: 2000, autoRepair: 300, size: [1.6, 1.8, 1.6], solid: true, mass: true, src: 'TD/Generator' },
+  base_turret: { type: 'base_turret', name: 'Base Turret', health: 5000, armored: true, needsPower: true, upgradeCosts: [1500, 1500, 2000, 2000], healthPerLevel: 500, range: 110, damage: 650, splash: 4, refire: 2.2, size: [1.2, 1.2, 1.2], solid: true, mass: true, src: 'TD/Base_Turret' },
+  radar: { type: 'radar', name: 'Radar Sensor', health: 2000, armored: true, needsPower: true, upgradeCosts: [1500, 1500, 2000, 2000], healthPerLevel: 2000, range: 200, size: [1, 2.5, 1], solid: true, mass: true, src: 'TD/Radar_Sensor' },
   inventory: { type: 'inventory', name: 'Inventory Station', health: 0, armored: true, needsPower: true, size: [0.9, 1.3, 0.6], solid: true, src: 'TD/Inventory_Station' },
   repair_station: { type: 'repair_station', name: 'Repair Station', health: 0, armored: true, needsPower: false, size: [0.5, 1.0, 0.5], solid: true, src: 'F/CTF tips' },
   vehicle_pad: { type: 'vehicle_pad', name: 'Vehicle Station', health: 0, armored: true, needsPower: true, size: [0.8, 1.2, 0.6], solid: true, src: 'F/CTF tips' },

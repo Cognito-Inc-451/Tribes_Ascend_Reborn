@@ -318,7 +318,9 @@ export class AssetModel {
         for (const o of proc) if (o !== this.head && o !== this.spin) o.visible = false;
         if (this.head) this.head.visible = false;
         if (this.spin && type !== 'cap_point') this.spin.visible = false;
-        const g = staticModel(m);
+        const g = staticModel(m, undefined, 0, tc);
+        this.real = g;
+        this.shown = '';
         g.scale.setScalar(ASSET_SCALE[type] ?? 1);
         const mesh = g.children[0] as THREE.Mesh;
         if (Array.isArray(mesh.material)) {
@@ -329,11 +331,38 @@ export class AssetModel {
     }
   }
 
+  private real: THREE.Group | null = null;
+  private shown = '';
+
+  /** Damaged: scorched; unpowered: dull; destroyed: black and wrecked (turrets and sensors slump, their lights go out). */
+  private look(hp: number, powered: boolean, destroyed: boolean) {
+    const k = destroyed ? 0.22 : !powered ? 0.6 : 0.55 + 0.45 * Math.min(1, hp / 0.5);
+    this.root.traverse((o) => {
+      const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+      for (const m of Array.isArray(mat) ? mat : mat ? [mat] : []) {
+        const sm = m as THREE.MeshStandardMaterial;
+        if (!sm.isMeshStandardMaterial || sm === this.glow) continue;
+        sm.userData.base ??= sm.color.clone();
+        sm.color.copy(sm.userData.base as THREE.Color).multiplyScalar(k);
+        sm.userData.baseEm ??= sm.emissiveIntensity;
+        sm.emissiveIntensity = destroyed ? 0 : (sm.userData.baseEm as number) * (powered ? 1 : 0.3);
+      }
+    });
+    const slump = this.type === 'base_turret' || this.type === 'radar' || this.type.endsWith('turret');
+    const tilt = destroyed ? 0.2 : !powered ? 0.08 : 0;
+    if (slump) {
+      if (this.real) { this.real.rotation.x = tilt; this.real.position.y = destroyed ? -0.15 : 0; }
+      if (this.head) this.head.rotation.x = tilt * 2;
+    }
+  }
+
   update(s: AssetSnap, dt: number) {
     const destroyed = (s.flags & AF.DESTROYED) !== 0, powered = (s.flags & AF.POWERED) !== 0;
     this.glow.emissiveIntensity = destroyed ? 0 : powered ? 1.4 : 0.2;
     this.glow.color.setHex(destroyed ? 0x222222 : teamColor(s.team));
     this.glow.emissive.setHex(teamColor(s.team));
+    const state = `${destroyed}|${powered}|${Math.round(s.health * 8)}`;
+    if (state !== this.shown) { this.shown = state; this.look(s.health, powered, destroyed); }
     if (this.head) this.head.rotation.y = s.yaw - this.root.rotation.y;
     if (this.spin && powered && !destroyed) this.spin.rotation[this.type === 'cap_point' ? 'z' : 'y'] += dt * 1.5;
     this.root.position.set(s.pos.x, s.pos.y, s.pos.z);
@@ -358,7 +387,7 @@ export class FlagModel {
     void models.get(`flag_${team === 1 ? 1 : 0}`).then((m) => {
       if (!m) return;
       pole.visible = false; this.cloth.visible = false;
-      const real = staticModel(m);
+      const real = staticModel(m, undefined, 0, tc);
       real.position.y = 1;
       this.root.add(real);
     });

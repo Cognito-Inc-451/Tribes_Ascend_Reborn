@@ -124,13 +124,22 @@ class ModelLibrary {
     return p;
   }
 
-  materials(m: ModelData, tint?: number, selfLit = 0): THREE.MeshStandardMaterial[] {
+  materials(m: ModelData, tint?: number, selfLit = 0, maskTint?: number): THREE.MeshStandardMaterial[] {
     return m.sections.map((s) => {
       // TA's diffuse maps already carry the paint/metal look; without its cube maps, PBR metalness only darkens them.
       const mat = new THREE.MeshStandardMaterial({ color: tint ?? 0xffffff, roughness: 0.68, metalness: 0.06, envMapIntensity: 0.6, side: THREE.DoubleSide });
       if (s.tex && this.textures) void this.textures.get(s.tex).then((t) => {
         if (!t) return;
         mat.map = t;
+        if (t.userData.packed) {
+          // A channel-packed mask the material recolours (it looks magenta raw): its luminance shades the team colour.
+          if (maskTint !== undefined) { mat.color.setHex(maskTint); mat.emissive.setHex(maskTint); mat.emissiveIntensity = 0.25; }
+          mat.customProgramCacheKey = () => 'packed-model';
+          mat.onBeforeCompile = (sh) => {
+            sh.fragmentShader = sh.fragmentShader.replace('#include <map_fragment>',
+              '#ifdef USE_MAP\n vec4 sdc = texture2D(map, vMapUv); diffuseColor.rgb *= vec3(dot(sdc.rgb, vec3(0.3, 0.59, 0.11))) * 1.3 + 0.1;\n#endif');
+          };
+        }
         if (selfLit) { mat.emissiveMap = t; mat.emissive.setHex(0xffffff); mat.emissiveIntensity = selfLit; }
         mat.needsUpdate = true;
       });
@@ -148,20 +157,20 @@ class ModelLibrary {
 
 export const models = new ModelLibrary();
 
-/** Players seen from afar must not sink into fog and shadow: a little self-light that grows with distance. */
+/** Players seen from afar or back-lit must not sink into fog and shadow: a base fill, a sky-side rim and a gain that grows with distance. */
 export function liftWithDistance(mats: THREE.MeshStandardMaterial[]) {
   for (const mat of mats) {
-    mat.customProgramCacheKey = () => 'far-lift';
+    mat.customProgramCacheKey = () => 'far-lift2';
     mat.onBeforeCompile = (sh) => {
       sh.fragmentShader = sh.fragmentShader.replace('#include <emissivemap_fragment>',
-        '#include <emissivemap_fragment>\n totalEmissiveRadiance += diffuseColor.rgb * (0.05 + 0.3 * smoothstep(25.0, 220.0, length(vViewPosition)));');
+        '#include <emissivemap_fragment>\n float rimK = pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), 3.0);\n totalEmissiveRadiance += diffuseColor.rgb * (0.17 + 0.3 * rimK + 0.3 * smoothstep(25.0, 220.0, length(vViewPosition)));');
     };
   }
 }
 
-/** Static (bind pose) instance, rotated so the model's front faces -Z like every other actor. */
-export function staticModel(m: ModelData, tint?: number, selfLit = 0): THREE.Group {
-  const mesh = new THREE.Mesh(m.geometry, models.materials(m, tint, selfLit));
+/** Static (bind pose) instance, rotated so the model's front faces -Z like every other actor. `maskTint` colours channel-packed masks. */
+export function staticModel(m: ModelData, tint?: number, selfLit = 0, maskTint?: number): THREE.Group {
+  const mesh = new THREE.Mesh(m.geometry, models.materials(m, tint, selfLit, maskTint));
   mesh.userData.sharedGeometry = true;
   mesh.castShadow = true;
   mesh.receiveShadow = true;

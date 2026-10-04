@@ -318,6 +318,16 @@ export class Effects {
     this.transients.push({ obj: m, t: 0, life, update: (k) => { (m.material as THREE.MeshBasicMaterial).opacity = 0.6 * (1 - k); }, dispose: () => (m.material as THREE.Material).dispose() });
   }
 
+  /** Smoke and sparks from a badly damaged or destroyed base asset. */
+  assetDamage(pos: Vec3, hp: number, destroyed: boolean, type: string, dt: number) {
+    if (!destroyed && hp > 0.5) return;
+    const rate = destroyed ? 4 : (0.5 - hp) * 8;
+    if (Math.random() > rate * dt * settings.particles) return;
+    const h = type === 'generator' || type === 'radar' ? 3 : 2;
+    this.smoke.emit({ x: pos.x + (Math.random() - 0.5) * 0.8, y: pos.y + h, z: pos.z + (Math.random() - 0.5) * 0.8 }, { x: 0, y: 1.6, z: 0 }, SMOKE_DARK, 0.5, 2.2, { grow: 1, spread: 0.3 });
+    if (destroyed && Math.random() < 0.2) this.particles.emit({ x: pos.x, y: pos.y + h * 0.7, z: pos.z }, { x: 0, y: 2, z: 0 }, new THREE.Color(0xffc060), 0.07, 0.4, { spread: 5, gravity: 12 });
+  }
+
   jetPuff(pos: Vec3, vel: Vec3, color: number) {
     this.particles.emit(pos, { x: vel.x * 0.3, y: -6 + vel.y * 0.3, z: vel.z * 0.3 }, new THREE.Color(color), 0.28, 0.3, { spread: 1.5, grow: 0.6 });
   }

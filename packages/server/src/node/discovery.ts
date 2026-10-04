@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import dgram from 'node:dgram';
+import { resolve4 } from 'node:dns/promises';
 import { isIP } from 'node:net';
 import { MODE_IDS, PROTOCOL_VERSION, type ServerInfo } from '@ar/shared';
 
@@ -24,6 +25,9 @@ const MCAST_PORT = 7771;
 const INFO_HASH = createHash('sha1').update(`${APP}/v${PROTOCOL_VERSION}`).digest();
 const MAX_PEERS = 256;
 const MAX_BODY = 64 * 1024;
+/** Public DHT entry points; literal IPs back up DNS (the library's own hostname bootstrap left the routing table empty on current Node). */
+const DHT_ROUTERS: [string, number][] = [['router.bittorrent.com', 6881], ['router.utorrent.com', 6881], ['dht.transmissionbt.com', 6881], ['dht.libtorrent.org', 25401]];
+const DHT_FALLBACK = ['67.215.246.10:6881', '82.221.103.244:6881', '87.98.162.88:6881', '185.157.221.247:25401'];
 
 export interface DiscoveryOptions {
   nodeId: string; nodePort: number; gamePorts: number[]; lan: boolean; internet: boolean; upnp: boolean; log: (s: string) => void;
@@ -168,7 +172,7 @@ export class Discovery {
 
   stats() {
     const list = [...this.peers.values()].filter((p) => p.nodeId !== this.o.nodeId && (p.servers.length || p.player));
-    return { lan: list.filter((p) => p.origin === 'lan').length, internet: list.filter((p) => p.origin === 'internet').length, upnp: this.upnpOk, publicIp: this.publicIp, dht: !!this.dht };
+    return { lan: list.filter((p) => p.origin === 'lan').length, internet: list.filter((p) => p.origin === 'internet').length, upnp: this.upnpOk, publicIp: this.publicIp, dht: !!this.dht && (this.dht as unknown as { nodes?: { toArray(): unknown[] } }).nodes?.toArray().length !== 0 };
   }
 
   /** Internet nodes offering to relay for hosts behind NAT (most recently reachable first). */
@@ -285,23 +289,38 @@ export class Discovery {
     }
   }
 
-  private async startDht() {
+  private async startDht(attempt = 0): Promise<void> {
     try {
       const { default: DHT } = await import('bittorrent-dht');
-      const dht = new DHT();
+      const found = new Set<string>(DHT_FALLBACK);
+      await Promise.all(DHT_ROUTERS.map(async ([host, port]) => {
+        try { for (const ip of await resolve4(host)) found.add(`${ip}:${port}`); } catch { /* the literal IPs still work */ }
+      }));
+      const dht = new DHT({ bootstrap: [...found] });
       dht.on('peer', (peer: { host: string; port: number }) => this.addPeer(peer.host, peer.port, 'internet'));
       dht.on('error', (e: Error) => this.o.log(`DHT error: ${e.message}`));
       dht.on('warning', () => {});
       dht.listen(0);
+      const timers: NodeJS.Timeout[] = [];
+      const stop = dht.destroy.bind(dht);
+      dht.destroy = (cb?: () => void) => { timers.forEach(clearInterval); stop(cb); };
       dht.on('ready', () => {
         this.o.log('Internet discovery: joined the public BitTorrent DHT');
         const announce = () => dht.announce(INFO_HASH, this.o.nodePort, () => {});
         const lookup = () => dht.lookup(INFO_HASH, () => {});
         announce(); lookup();
-        setInterval(announce, 5 * 60_000).unref();
-        setInterval(lookup, 45_000).unref();
+        timers.push(setInterval(announce, 5 * 60_000).unref(), setInterval(lookup, 45_000).unref());
       });
       this.dht = dht as unknown as typeof this.dht;
+      // No routing nodes after a while means the bootstrap packets were lost: start over.
+      setTimeout(() => {
+        if (this.dht !== (dht as unknown as typeof this.dht) || dht.nodes.toArray().length > 0) return;
+        if (attempt >= 3) { this.o.log('DHT: no nodes reachable (is outbound UDP blocked?); LAN play and direct addresses still work'); return; }
+        this.o.log('DHT: no nodes yet, retrying');
+        dht.destroy();
+        this.dht = null;
+        void this.startDht(attempt + 1);
+      }, 30_000).unref();
     } catch (e) {
       this.o.log(`DHT unavailable: ${(e as Error).message}`);
     }

@@ -513,7 +513,7 @@ export class GameClient {
     const seen = new Set<number>();
     for (const a of s.assets) {
       const def = ASSETS[ASSET_TYPES[a.type]];
-      if (!def?.solid || a.owner === 255) continue;
+      if (!def?.solid || (a.owner === 255 && !def.mass)) continue;
       seen.add(a.id);
       let box = this.world.dynamic.get(a.id);
       if (!box) {
@@ -764,6 +764,7 @@ export class GameClient {
         let v = this.assetViews.get(a.id);
         if (!v) { v = new AssetModel(a); this.assetViews.set(a.id, v); this.r.scene.add(v.root); }
         v.update(a, dt);
+        this.fx.assetDamage(a.pos, a.health, (a.flags & AF.DESTROYED) !== 0, ASSET_TYPES[a.type], dt);
       }
       for (const [id, v] of this.assetViews) if (!aSeen.has(id)) { this.r.scene.remove(v.root); this.assetViews.delete(id); }
       const fSeen = new Set<number>();
