@@ -1,5 +1,6 @@
 # Ascend Reborn
 <img width="1600" height="900" alt="image" src="https://github.com/user-attachments/assets/4d0f5725-74d0-42ad-9285-c5378a1aecad" />
+<img width="1200" height="698" alt="demo" src="https://github.com/user-attachments/assets/a78aec11-186e-4d6b-a106-99660687676c" />
 
 An unofficial, fan-made revival of **Tribes: Ascend** gameplay that runs in the browser (Chrome/Edge) with
 self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA game modes, with bots.
@@ -8,9 +9,10 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 > This repository contains **no** game assets. The original maps, models, textures, sounds and UI art are read from
 > **your own copy** of Tribes: Ascend by the local importer, stay on your machine (`maps-original/` is git-ignored),
 > and must not be redistributed. Without an import the game still runs on generated maps with procedural art.
-<img width="1600" height="900" alt="image" src="https://github.com/user-attachments/assets/eecd3d3d-6679-4d39-a564-3898eeff12f1" />
-<img width="2166" height="1257" alt="image" src="https://github.com/user-attachments/assets/70515b97-74fe-4687-8cd4-8c6d5dd62dc0" />
-<img width="2169" height="1260" alt="image" src="https://github.com/user-attachments/assets/abbb3d43-201f-4c1b-bb26-754587b2575e" />
+<img width="2091" height="818" alt="image" src="https://github.com/user-attachments/assets/54b62d5a-5dde-41cb-ace4-17b05f292482" />
+<img width="2167" height="1256" alt="image" src="https://github.com/user-attachments/assets/c8f567ba-462c-4e57-8dc8-ce620b142409" />
+<img width="2164" height="1254" alt="image" src="https://github.com/user-attachments/assets/2dfe714a-1739-497d-b7e8-6e4dcf025f74" />
+<img width="2165" height="1259" alt="image" src="https://github.com/user-attachments/assets/a6b669b2-9eb9-4a2b-85ea-48c4a2557c7f" />
 
 ---
 
@@ -212,9 +214,9 @@ Branches: **A**ttack, **D**efend, **F**lag, **G**lobal (**C**ompliment, **R**esp
 - Dedicated servers: edit `config/servers.json` (mode, maps, bots `fillTo` = number of bots / `difficulty`, max
   players, options). Bots leave only when the server is down to 2 free slots. The default config runs one server per
   mode on the original maps.
+<img width="2167" height="1254" alt="image" src="https://github.com/user-attachments/assets/1c270158-26c3-4e2f-b2aa-a19cec829cdb" />
+<img width="2167" height="1256" alt="image" src="https://github.com/user-attachments/assets/8f6447c4-cf99-4c1d-8052-adeaa74bb6e6" />
 
-<img width="2169" height="1259" alt="image" src="https://github.com/user-attachments/assets/1d88a420-2927-42f3-8179-2b3692d86137" />
-<img width="2170" height="1257" alt="image" src="https://github.com/user-attachments/assets/2dd5c27d-fa81-4e0e-921c-68f4f4836269" />
 
 ## Repository layout
 
