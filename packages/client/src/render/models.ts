@@ -160,10 +160,13 @@ export const models = new ModelLibrary();
 /** Players seen from afar or back-lit must not sink into fog and shadow: a base fill, a sky-side rim and a gain that grows with distance. */
 export function liftWithDistance(mats: THREE.MeshStandardMaterial[]) {
   for (const mat of mats) {
-    mat.customProgramCacheKey = () => 'far-lift2';
+    mat.customProgramCacheKey = () => 'far-lift3';
     mat.onBeforeCompile = (sh) => {
-      sh.fragmentShader = sh.fragmentShader.replace('#include <emissivemap_fragment>',
-        '#include <emissivemap_fragment>\n float rimK = pow(1.0 - clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0), 3.0);\n totalEmissiveRadiance += diffuseColor.rgb * (0.17 + 0.3 * rimK + 0.3 * smoothstep(25.0, 220.0, length(vViewPosition)));');
+      // TA's heavy armour textures are near-black: lift the darks, then add fill from the viewer's side.
+      sh.fragmentShader = sh.fragmentShader
+        .replace('#include <map_fragment>', '#include <map_fragment>\n diffuseColor.rgb = pow(max(diffuseColor.rgb, vec3(0.0)), vec3(0.72));')
+        .replace('#include <emissivemap_fragment>',
+          '#include <emissivemap_fragment>\n float facing = clamp(dot(normal, normalize(vViewPosition)), 0.0, 1.0);\n float rimK = pow(1.0 - facing, 3.0);\n totalEmissiveRadiance += diffuseColor.rgb * (0.2 + 0.3 * facing + 0.3 * rimK + 0.3 * smoothstep(25.0, 220.0, length(vViewPosition)));');
     };
   }
 }
