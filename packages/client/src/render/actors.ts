@@ -5,7 +5,7 @@ import {
 } from '@ar/shared';
 import { settings } from '../settings.js';
 import { forceFieldMaterial } from './forcefield.js';
-import { skinMaterial } from './materials.js';
+import { isSharedMaterial, markShared, ownMaterial, skinMaterial } from './materials.js';
 import { CharacterRig, models, staticModel } from './models.js';
 
 const _jet = new THREE.Vector3();
@@ -16,8 +16,27 @@ export const teamColor = (t: number) => (t === 0 || t === 1 ? TEAM_COLORS[t] : N
 const box = (w: number, h: number, d: number) => new THREE.BoxGeometry(w, h, d);
 const cyl = (r1: number, r2: number, h: number, s = 12) => new THREE.CylinderGeometry(r1, r2, h, s);
 
+/** Every material an actor builds from fixed parameters is cached here and shared across
+ *  instances; anything mutated per instance (stealth fade, team colour, damage dimming) is
+ *  cloned out of the cache with `own()` first, so the shared original stays pristine. */
+const matCache = new Map<string, THREE.Material>();
+function shared<T extends THREE.Material>(key: string, make: () => T): T {
+  const hit = matCache.get(key);
+  if (hit) return hit as T;
+  const m = markShared(make());
+  matCache.set(key, m);
+  return m;
+}
+
+/** Clone a shared material for one actor; `out` records it so the actor disposes it. */
+function own<T extends THREE.Material>(mat: T, out?: T[]): T {
+  const c = ownMaterial(mat);
+  out?.push(c);
+  return c;
+}
+
 function glowMat(color: number, intensity = 1.5, opacity = 1): THREE.MeshStandardMaterial {
-  return new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: intensity, roughness: 0.4, transparent: opacity < 1, opacity });
+  return shared(`glow|${color}|${intensity}|${opacity}`, () => new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: intensity, roughness: 0.4, transparent: opacity < 1, opacity }));
 }
 
 const emblemCache = new Map<string, THREE.CanvasTexture>();
@@ -69,12 +88,12 @@ export class PlayerModel {
     const k = cls.armor === 'light' ? 0.85 : cls.armor === 'medium' ? 1 : 1.22;
     const h = cls.armor === 'light' ? 1.85 : cls.armor === 'medium' ? 1.95 : 2.25;
     const skinId = settings.forceDefaultSkins ? 'standard' : cls.armor === 'light' ? cos.skinLight : cls.armor === 'medium' ? cos.skinMedium : cos.skinHeavy;
-    const skin = skinMaterial(ARMOR_SKINS.find((s) => s.id === skinId) ?? ARMOR_SKINS[0]);
     const tc = teamColor(team);
-    const accent = new THREE.MeshStandardMaterial({ color: tc, roughness: 0.5, metalness: 0.3, emissive: tc, emissiveIntensity: 0.25 });
-    const visor = glowMat(tc, 2.2);
-    const dark = new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.6, metalness: 0.5 });
-    this.mats.push(skin, accent, visor, dark);
+    // Stealth fades every material under the root, so this actor owns clones of the shared templates.
+    const skin = own(skinMaterial(ARMOR_SKINS.find((s) => s.id === skinId) ?? ARMOR_SKINS[0]), this.mats);
+    const accent = own(shared(`accent|${tc}`, () => new THREE.MeshStandardMaterial({ color: tc, roughness: 0.5, metalness: 0.3, emissive: tc, emissiveIntensity: 0.25 })), this.mats);
+    const visor = own(glowMat(tc, 2.2), this.mats);
+    const dark = own(shared('dark|0x2a2e33', () => new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.6, metalness: 0.5 })), this.mats);
 
     const legH = h * 0.45;
     const torsoH = h * 0.32;
@@ -97,7 +116,7 @@ export class PlayerModel {
     for (const sx of [-1, 1]) mk(box(0.2 * k, 0.16 * k, 0.28 * k), accent, sx * 0.3 * k, legH + torsoH * 0.95, 0);
     mk(box(0.24 * k, 0.26, 0.28), skin, 0, legH + torsoH + 0.15, 0);
     mk(box(0.2 * k, 0.07, 0.02), visor, 0, legH + torsoH + 0.17, -0.145);
-    const emb = new THREE.Mesh(new THREE.PlaneGeometry(0.16 * k, 0.16 * k), new THREE.MeshBasicMaterial({ map: emblemTexture(cos.emblem), transparent: true, color: tc }));
+    const emb = new THREE.Mesh(new THREE.PlaneGeometry(0.16 * k, 0.16 * k), own(shared(`emblem|${cos.emblem}|${tc}`, () => new THREE.MeshBasicMaterial({ map: emblemTexture(cos.emblem), transparent: true, color: tc })), this.mats));
     emb.position.set(0, legH + torsoH * 0.6, -0.155 * k);
     emb.rotation.y = Math.PI;
     this.body.add(emb);
@@ -105,7 +124,7 @@ export class PlayerModel {
     mk(box(0.34 * k, torsoH * 0.9, 0.18 * k), dark, 0, legH + torsoH * 0.5, 0.24 * k);
     const trail = JET_TRAILS.find((j) => j.id === cos.jetTrail) ?? JET_TRAILS[0];
     const flameCol = new THREE.Color(tc).offsetHSL(0, (trail.saturation - 1) * 0.3, (trail.brightness - 1) * 0.25).lerp(new THREE.Color(0xffffff), 0.35);
-    const flameMat = new THREE.MeshBasicMaterial({ color: flameCol, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false });
+    const flameMat = own(shared(`flame|${flameCol.getHex()}`, () => new THREE.MeshBasicMaterial({ color: flameCol, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false })), this.mats);
     for (const sx of [-1, 1]) {
       const f = new THREE.Mesh(new THREE.ConeGeometry(0.07 * k, 0.8, 8), flameMat);
       f.rotation.x = Math.PI;
@@ -119,21 +138,20 @@ export class PlayerModel {
     this.armR.position.set(0.3 * k, legH + torsoH * 0.85, -0.05);
     this.body.add(this.armR);
     const fin = WEAPON_FINISHES.find((w) => w.id === cos.weaponFinish) ?? WEAPON_FINISHES[0];
-    const wmat = new THREE.MeshStandardMaterial({ color: fin.tint, metalness: fin.metalness, roughness: 0.4 });
-    this.mats.push(wmat);
+    const wmat = own(shared(`wfinish|${fin.tint}|${fin.metalness}`, () => new THREE.MeshStandardMaterial({ color: fin.tint, metalness: fin.metalness, roughness: 0.4 })), this.mats);
     this.weapon = mk(box(0.12, 0.14, 0.7), wmat, 0, -0.1, -0.35, this.armR);
     mk(box(0.14 * k, 0.4, 0.14 * k), skin, 0, -0.15, 0, this.armR);
     // Flag (hidden unless carrying).
     this.flag = new THREE.Group();
     const pole = new THREE.Mesh(cyl(0.025, 0.025, 2.2, 6), dark);
     pole.position.y = 1.1;
-    const cloth = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.55), new THREE.MeshStandardMaterial({ color: tc, side: THREE.DoubleSide, emissive: tc, emissiveIntensity: 0.3 }));
+    const cloth = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.55), own(shared(`flagcloth|${tc}`, () => new THREE.MeshStandardMaterial({ color: tc, side: THREE.DoubleSide, emissive: tc, emissiveIntensity: 0.3 })), this.mats));
     cloth.position.set(0.45, 1.9, 0);
     this.flag.add(pole, cloth);
     this.flag.position.set(0, legH, 0.3 * k);
     this.flag.visible = false;
     this.body.add(this.flag);
-    this.shield = new THREE.Mesh(new THREE.SphereGeometry(h * 0.62, 20, 14), glowMat(tc, 0.8, 0.18));
+    this.shield = new THREE.Mesh(new THREE.SphereGeometry(h * 0.62, 20, 14), own(glowMat(tc, 0.8, 0.18), this.mats));
     this.shield.position.y = h * 0.5;
     this.shield.visible = false;
     this.root.add(this.body, this.shield);
@@ -215,6 +233,9 @@ export class PlayerModel {
   dispose() {
     this.disposed = true;
     this.body.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+    // Only this actor's clones are disposed; the shared templates stay alive for other actors.
+    for (const m of this.mats) if (!isSharedMaterial(m)) m.dispose();
+    this.mats.length = 0;
     this.rig?.dispose();
   }
 }
@@ -242,9 +263,11 @@ export class AssetModel {
     this.type = type;
     const def = ASSETS[type];
     const tc = teamColor(s.team);
-    this.glow = glowMat(tc, 1.4);
-    const body = new THREE.MeshStandardMaterial({ color: 0x70767e, roughness: 0.55, metalness: 0.5 });
-    const dark = new THREE.MeshStandardMaterial({ color: 0x33373d, roughness: 0.6, metalness: 0.6 });
+    // `look()` dims every standard material in the root (and `update()` drives the glow), so
+    // this asset owns clones of the shared templates; the force-field shader material is shared.
+    this.glow = own(glowMat(tc, 1.4));
+    const body = own(shared('asset-body', () => new THREE.MeshStandardMaterial({ color: 0x70767e, roughness: 0.55, metalness: 0.5 })));
+    const dark = own(shared('asset-dark', () => new THREE.MeshStandardMaterial({ color: 0x33373d, roughness: 0.6, metalness: 0.6 })));
     const add = (g: THREE.BufferGeometry, m: THREE.Material, x = 0, y = 0, z = 0, parent: THREE.Object3D = this.root) => {
       const mesh = new THREE.Mesh(g, m);
       mesh.position.set(x, y, z);
@@ -282,8 +305,8 @@ export class AssetModel {
         break;
       case 'repair_station':
         add(cyl(sx, sx, sy * 2, 8), body, 0, sy);
-        add(box(0.5, 0.15, 0.05), glowMat(0x40ff80), 0, sy * 1.5, -sx - 0.02);
-        add(box(0.15, 0.5, 0.05), glowMat(0x40ff80), 0, sy * 1.5, -sx - 0.02);
+        add(box(0.5, 0.15, 0.05), own(glowMat(0x40ff80)), 0, sy * 1.5, -sx - 0.02);
+        add(box(0.15, 0.5, 0.05), own(glowMat(0x40ff80)), 0, sy * 1.5, -sx - 0.02);
         break;
       case 'vehicle_pad':
         add(box(sx * 2, sy * 2, sz * 2), body, 0, sy);
@@ -376,12 +399,13 @@ export class FlagModel {
 
   constructor(team: number) {
     const tc = teamColor(team);
-    const pole = new THREE.Mesh(cyl(0.04, 0.04, 2.6, 6), new THREE.MeshStandardMaterial({ color: 0x3a3f46, metalness: 0.7, roughness: 0.4 }));
+    // Flag visuals are identical per team and never mutated after construction, so they are shared.
+    const pole = new THREE.Mesh(cyl(0.04, 0.04, 2.6, 6), shared('flag-pole', () => new THREE.MeshStandardMaterial({ color: 0x3a3f46, metalness: 0.7, roughness: 0.4 })));
     pole.position.y = 1.3;
     const g = new THREE.PlaneGeometry(1.1, 0.7, 8, 4);
-    this.cloth = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: tc, emissive: tc, emissiveIntensity: 0.45, side: THREE.DoubleSide }));
+    this.cloth = new THREE.Mesh(g, shared(`flag-cloth|${tc}`, () => new THREE.MeshStandardMaterial({ color: tc, emissive: tc, emissiveIntensity: 0.45, side: THREE.DoubleSide })));
     this.cloth.position.set(0.55, 2.2, 0);
-    const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.4, 60, 8, 1, true), new THREE.MeshBasicMaterial({ color: tc, transparent: true, opacity: 0.12, depthWrite: false, blending: THREE.AdditiveBlending }));
+    const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.4, 60, 8, 1, true), shared(`flagbeacon|${tc}`, () => new THREE.MeshBasicMaterial({ color: tc, transparent: true, opacity: 0.12, depthWrite: false, blending: THREE.AdditiveBlending })));
     beacon.position.y = 30;
     this.root.add(pole, this.cloth, beacon);
     void models.get(`flag_${team === 1 ? 1 : 0}`).then((m) => {
@@ -414,8 +438,10 @@ export class VehicleModel {
   constructor(v: VehSnap) {
     this.type = VEHICLE_TYPES[v.type];
     const tc = teamColor(v.team);
-    const hull = new THREE.MeshStandardMaterial({ color: 0x7d858e, metalness: 0.6, roughness: 0.45 });
-    const accent = new THREE.MeshStandardMaterial({ color: tc, emissive: tc, emissiveIntensity: 0.3, metalness: 0.4, roughness: 0.5 });
+    // Vehicle materials are never mutated after construction and vehicles are never disposed,
+    // so all four are shared per team.
+    const hull = shared('veh-hull', () => new THREE.MeshStandardMaterial({ color: 0x7d858e, metalness: 0.6, roughness: 0.45 }));
+    const accent = shared(`veh-accent|${tc}`, () => new THREE.MeshStandardMaterial({ color: tc, emissive: tc, emissiveIntensity: 0.3, metalness: 0.4, roughness: 0.5 }));
     const glow = glowMat(tc, 2);
     const add = (g: THREE.BufferGeometry, m: THREE.Material, x = 0, y = 0, z = 0, parent: THREE.Object3D = this.root) => {
       const mesh = new THREE.Mesh(g, m);

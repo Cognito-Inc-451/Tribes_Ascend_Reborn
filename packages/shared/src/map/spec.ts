@@ -74,6 +74,8 @@ export interface MeshAsset {
   collide: boolean;
   /** Collision-only geometry (blocking volumes, invisible BSP). */
   hidden?: boolean;
+  /** The original sky dome: drawn unlit, fog-exempt, behind everything, and used as the sky IBL source. */
+  sky?: boolean;
   /** UV0 per vertex (original maps). */
   uvs?: Float32Array;
   /** Lightmap UVs (the mesh's LightMapCoordinateIndex set) when they differ from UV0. */
@@ -94,6 +96,8 @@ export interface MapEnv {
   sunColor?: number;
   sunIntensity?: number;
   ambientColor?: number;
+  /** Authored SkyLight brightness (UE3 SkyLight.Brightness); scales ambientColor. */
+  ambientIntensity?: number;
   fogColor?: number;
   fogDensity?: number;
   fogStart?: number;
@@ -105,6 +109,15 @@ export interface MapEnv {
   snow?: boolean;
   /** The sun is a static DirectionalLight, so lightmaps already contain its light (else it is dominant/dynamic). */
   sunBaked?: boolean;
+  /**
+   * Authored sky dome kept from the original level (UE3 sky dome meshes carry the real sky art).
+   * `skyMesh` indexes `MapData.meshes`, `skyTex` indexes `MapData.textures`. The client draws the dome unlit,
+   * fog-exempt and behind everything, and uses it as the scene's image-based lighting source.
+   */
+  skyMesh?: number;
+  skyTex?: number;
+  /** Authored sky tint (sky dome material tint), applied multiplicatively to the dome. */
+  skyColor?: number;
 }
 
 export interface TerrainLayer { tex: number; scale: number; ntex?: number; stex?: number }

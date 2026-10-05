@@ -2,8 +2,48 @@ import * as THREE from 'three';
 import type { ArmorSkin, SkinPattern } from '@ar/shared';
 import { withFog } from './fog.js';
 
+/** `userData` flag: this material is owned by a module cache, never by one instance. */
+const SHARED = 'ascendSharedMaterial';
+const surfaceCache = new Map<string, THREE.MeshStandardMaterial>();
+const patternCache = new Map<string, THREE.CanvasTexture>();
+
+/** True when a material comes from a module cache and must not be mutated or disposed by a caller. */
+export function isSharedMaterial(mat: THREE.Material): boolean {
+  return mat.userData[SHARED] === true;
+}
+
+/** Mark a material handed out by a module cache as shared, so `ownMaterial()` clones it. */
+export function markShared<T extends THREE.Material>(mat: T): T {
+  mat.userData[SHARED] = true;
+  return mat;
+}
+
+/**
+ * A material this instance may safely mutate and dispose.
+ * Cached materials are cloned lazily here, so fades, tints and flashes never leak into
+ * the shared original that every other instance reads.
+ */
+export function ownMaterial<T extends THREE.Material>(mat: T): T {
+  if (!isSharedMaterial(mat)) return mat;
+  const c = mat.clone() as T;
+  c.userData[SHARED] = false;
+  // THREE's Material.copy() ignores per-instance shader hooks, so re-attach them
+  // (surfaceMaterial injects fog/noise through onBeforeCompile).
+  c.onBeforeCompile = mat.onBeforeCompile;
+  if (Object.prototype.hasOwnProperty.call(mat, 'customProgramCacheKey')) {
+    (c as THREE.Material & { customProgramCacheKey: () => string }).customProgramCacheKey =
+      (mat as THREE.Material & { customProgramCacheKey: () => string }).customProgramCacheKey;
+  }
+  return c;
+}
+
 /** MeshStandardMaterial with world-space procedural grime/detail so untextured geometry does not look flat. */
 export function surfaceMaterial(color: number, opts: { roughness?: number; metalness?: number; detail?: number; scale?: number; emissive?: number; vertexColors?: boolean; flat?: boolean; transparent?: boolean; opacity?: number; side?: THREE.Side } = {}): THREE.MeshStandardMaterial {
+  // Identical parameters produce an identical material, and every caller builds these from
+  // static map data, so hand out one shared instance per parameter set.
+  const key = `${color}|${opts.roughness}|${opts.metalness}|${opts.detail}|${opts.scale}|${opts.emissive}|${opts.vertexColors}|${opts.flat}|${opts.transparent}|${opts.opacity}|${opts.side ?? -1}`;
+  const cached = surfaceCache.get(key);
+  if (cached) return cached;
   const m = new THREE.MeshStandardMaterial({
     color, roughness: opts.roughness ?? 0.85, metalness: opts.metalness ?? 0.05, vertexColors: opts.vertexColors ?? false,
     flatShading: opts.flat ?? false, emissive: opts.emissive ?? 0x000000, transparent: opts.transparent ?? false, opacity: opts.opacity ?? 1,
@@ -40,6 +80,8 @@ export function surfaceMaterial(color: number, opts: { roughness?: number; metal
         float ao = mix(1.0, 0.82, smoothstep(0.2, -0.6, vWNrm.y));
         diffuseColor.rgb *= (1.0 - uDetail*0.5 + n*uDetail) * ao;`);
   };
+  m.userData[SHARED] = true;
+  surfaceCache.set(key, m);
   return m;
 }
 
@@ -77,12 +119,20 @@ export function matFor(tag: string, themeStructure?: number, tint?: number): THR
 }
 
 export function clearMaterialCache() {
-  for (const m of cache.values()) m.dispose();
+  // matFor entries are the same objects surfaceMaterial handed out, so dispose once.
   cache.clear();
+  for (const m of surfaceCache.values()) m.dispose();
+  surfaceCache.clear();
+  // Skin materials keep their pattern textures alive, so drop the keys only.
+  patternCache.clear();
 }
 
 /** Canvas-generated pattern texture for armour skins / weapon finishes. */
 export function patternTexture(pattern: SkinPattern, base: number, secondary: number, scale = 1, seed = 1): THREE.CanvasTexture {
+  // The canvas is a pure function of these five parameters, so bake it once per key.
+  const key = `${pattern}|${base}|${secondary}|${scale}|${seed}`;
+  const cached = patternCache.get(key);
+  if (cached) return cached;
   const size = 128;
   const c = document.createElement('canvas');
   c.width = c.height = size;
@@ -144,6 +194,7 @@ export function patternTexture(pattern: SkinPattern, base: number, secondary: nu
   const t = new THREE.CanvasTexture(c);
   t.wrapS = t.wrapT = THREE.RepeatWrapping;
   t.colorSpace = THREE.SRGBColorSpace;
+  patternCache.set(key, t);
   return t;
 }
 
@@ -156,6 +207,7 @@ export function skinMaterial(skin: ArmorSkin): THREE.MeshStandardMaterial {
     roughness: skin.material === 'metal' ? 0.45 : skin.material === 'weathered' ? 0.8 : 0.7,
     metalness: skin.material === 'metal' ? 0.55 : 0.15,
   });
+  m.userData[SHARED] = true;
   skinCache.set(skin.id, m);
   return m;
 }

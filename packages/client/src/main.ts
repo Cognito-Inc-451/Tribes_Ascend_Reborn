@@ -53,6 +53,8 @@ function startBackdrop() {
     const tex = orig?.textures?.length ? new TextureStore([NODE_URL], renderer.renderer) : null;
     const view = new WorldView(map, renderer.scene, tex, renderer.renderer);
     renderer.setSun(view.sunDirection);
+    view.onSkyEnv = (t) => renderer.setSkyEnvironment(t);
+    renderer.setSkyEnvironment(view.setSkyIBL());
     const pts = map.entities.filter((e) => e.kind === 'flag_stand' || e.kind === 'generator' || e.kind === 'spawn');
     const cx = pts.length ? pts.reduce((a, e) => a + e.pos.x, 0) / pts.length : 0;
     const cz = pts.length ? pts.reduce((a, e) => a + e.pos.z, 0) / pts.length : 0;
@@ -77,8 +79,10 @@ function stopBackdrop() {
   backdropToken++;
   if (!backdrop) return;
   cancelAnimationFrame(backdrop.raf);
+  backdrop.view.onSkyEnv = null;
   backdrop.view.dispose();
   backdrop.tex?.dispose();
+  renderer.setSkyEnvironment(null);
   backdrop = null;
 }
 

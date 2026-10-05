@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { settings, type ColorGrade } from '../settings.js';
 import { installHeightFog } from './fog.js';
-import { PostPipeline } from './post.js';
+import { PostPipeline, structuralKey, type PostOptions } from './post.js';
 
 installHeightFog();
 
@@ -36,6 +36,10 @@ const TONE: Record<typeof settings.toneMapping, THREE.ToneMapping> = {
 /** Shadow map size per quality step. */
 export const SHADOW_RES: Record<typeof settings.shadowQuality, number> = { off: 0, low: 1024, medium: 2048, high: 2048, ultra: 4096 };
 
+/** Ambient intensity with the sky-based IBL installed, versus the neutral studio fallback. */
+const SKY_ENV_INTENSITY = 0.55;
+const STUDIO_ENV_INTENSITY = 0.35;
+
 export class Renderer {
   readonly renderer: THREE.WebGLRenderer;
   readonly scene = new THREE.Scene();
@@ -57,7 +61,7 @@ export class Renderer {
     this.camera = new THREE.PerspectiveCamera(70, 1, 0.1, 6000);
     this.scene.add(this.camera);
     this.scene.environment = studioEnvironment(this.renderer);
-    this.scene.environmentIntensity = 0.35;
+    this.scene.environmentIntensity = STUDIO_ENV_INTENSITY;
     this.configure();
     window.addEventListener('resize', () => this.resize());
     this.resize();
@@ -65,7 +69,29 @@ export class Renderer {
 
   get canvas() { return this.renderer.domElement; }
 
-  /** Rebuild post-processing after a settings change. */
+  private skyEnv: THREE.Texture | null = null;
+  /** Adaptive-resolution multiplier (1 = the player's own slider value). */
+  private adaptScale = 1;
+  /**
+   * Install a world's prefiltered sky as the scene environment, so PBR ambient comes from the
+   * authored sky art (TA's look) instead of the neutral studio room. Pass null to fall back.
+   */
+  setSkyEnvironment(tex: THREE.Texture | null) {
+    if (tex) {
+      this.skyEnv = tex;
+      this.scene.environment = tex;
+      this.scene.environmentIntensity = SKY_ENV_INTENSITY;
+    } else {
+      this.skyEnv = null;
+      this.scene.environment = studioEnvironment(this.renderer);
+      this.scene.environmentIntensity = STUDIO_ENV_INTENSITY;
+    }
+  }
+
+  /**
+   * Refresh post-processing after a settings change. The chain is rebuilt only when its
+   * *structural* shape changes (targets/defines); slider-only changes are applied in place.
+   */
   configure() {
     settings.shadows = settings.shadowQuality !== 'off';
     this.renderer.shadowMap.enabled = settings.shadows;
@@ -73,23 +99,38 @@ export class Renderer {
     if (this.renderer.shadowMap.type !== shadowType) { this.renderer.shadowMap.type = shadowType; this.renderer.shadowMap.needsUpdate = true; }
     this.renderer.toneMapping = TONE[settings.toneMapping] ?? THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = 1.05 * settings.brightness;
-    this.post?.dispose();
-    this.post = null;
-    if (settings.post !== 'off') {
-      const g = GRADES[settings.grade] ?? GRADES.neutral;
-      this.post = new PostPipeline(this.renderer, {
-        hdr: settings.hdr, msaa: settings.antialias ? 4 : 0, bloom: settings.bloom ? settings.bloomStrength : 0,
-        ao: settings.ao === 'high' ? 2 : settings.ao === 'low' ? 1 : 0, godrays: settings.godrays ? 0.4 : 0, dof: settings.dof,
-        motionBlur: settings.motionBlur, ssr: settings.ssr, exposure: 1, contrast: settings.contrast, saturation: settings.saturation,
-        vibrance: settings.vibrance + (g.vibrance ?? 0), temperature: settings.temperature, tint: settings.tint,
-        lift: new THREE.Vector3(...g.lift), gamma: new THREE.Vector3(...g.gamma), gain: new THREE.Vector3(...g.gain),
-        vignette: settings.vignette, grain: settings.filmGrain, chromatic: settings.chromatic, sharpen: settings.sharpen,
-      });
-      this.post.sunDir.copy(this.sunDir);
+    const opts = this.postOptions();
+    if (opts) {
+      if (this.post && this.post.structuralKey === structuralKey(opts)) {
+        this.post.update(opts);
+      } else {
+        this.post?.dispose();
+        this.post = new PostPipeline(this.renderer, opts);
+        this.post.sunDir.copy(this.sunDir);
+      }
+    } else {
+      this.post?.dispose();
+      this.post = null;
     }
     this.applySaturation();
     this.camera.far = Math.max(1500, settings.viewDistance * 2.5);
     this.resize();
+  }
+
+  /** Current settings as post-chain options; null when post-processing is off. */
+  private postOptions(): PostOptions | null {
+    if (settings.post === 'off') return null;
+    const g = GRADES[settings.grade] ?? GRADES.neutral;
+    return {
+      hdr: settings.hdr, msaa: settings.antialias ? 4 : 0, bloom: settings.bloom ? settings.bloomStrength : 0,
+      ao: settings.ao === 'high' ? 2 : settings.ao === 'low' ? 1 : 0, godrays: settings.godrays ? 0.4 : 0, dof: settings.dof,
+      motionBlur: settings.motionBlur, ssr: settings.ssr, exposure: 1, contrast: settings.contrast, saturation: settings.saturation,
+      vibrance: settings.vibrance + (g.vibrance ?? 0), temperature: settings.temperature, tint: settings.tint,
+      lift: new THREE.Vector3(...g.lift), gamma: new THREE.Vector3(...g.gamma), gain: new THREE.Vector3(...g.gain),
+      vignette: settings.vignette, grain: settings.filmGrain, chromatic: settings.chromatic,
+      // "Light" post is the cheap chain: no unsharp mask (menus label "full" as "On + sharpen").
+      sharpen: settings.post === 'full' ? settings.sharpen : 0,
+    };
   }
 
   private sunDir = new THREE.Vector3(0, 1, 0);
@@ -118,11 +159,20 @@ export class Renderer {
   resize() {
     const w = this.container.clientWidth || window.innerWidth, h = this.container.clientHeight || window.innerHeight;
     this.width = w; this.height = h;
-    const pr = Math.max(0.25, Math.min(2.5, settings.renderScale));
+    // The player's slider is the ceiling; adaptive resolution can only scale it down.
+    const pr = Math.max(0.25, Math.min(2.5, settings.renderScale * this.adaptScale));
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h);
     this.post?.setSize(w * pr, h * pr);
     this.setFov(settings.fov);
+  }
+
+  /** Applied by the frame-rate controller; 1 disables the effect. */
+  setAdaptiveScale(scale: number) {
+    const s = Math.max(0.25, Math.min(2.5, scale));
+    if (Math.abs(s - this.adaptScale) < 0.002) return;
+    this.adaptScale = s;
+    this.resize();
   }
 
   /** TA-style horizontal FOV, converted for any aspect ratio (ultrawide keeps the same vertical feel). */

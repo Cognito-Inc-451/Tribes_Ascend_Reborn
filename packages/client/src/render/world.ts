@@ -22,7 +22,7 @@ const HIDDEN_INSTANCE = new THREE.Matrix4().makeScale(0, 0, 0);
  * Baked lighting balance, shared by every lightmapped program: how much of the dynamic ambient (hemisphere + sky IBL)
  * remains on top of the lightmap, and how much dynamic sun reaches lightmapped surfaces (0 when the map bakes its sun).
  */
-export const LM_UNIFORMS = { lmAmbient: { value: 0.3 }, lmDirect: { value: 1 }, lmGain: { value: 0.11 }, lmSpec: { value: 1 }, lmSat: { value: 0.9 } };
+export const LM_UNIFORMS = { lmAmbient: { value: 0.55 }, lmDirect: { value: 1 }, lmGain: { value: 0.16 }, lmSpec: { value: 1 }, lmSat: { value: 0.9 } };
 
 /** TA specular maps: their colour sets the reflectance, bright texels turn glossy (UE3 Phong spec, roughly). */
 const SPEC_UNIFORMS = { specGain: { value: 0.18 }, specRough: { value: 0.55 } };
@@ -56,7 +56,83 @@ function setMaterialHooks(mm: THREE.MeshStandardMaterial) {
 }
 const ROOF_CELL = 4;
 const WEATHER_BOX = 120;
-const wrap = (v: number, c: number) => c + ((((v - c) % WEATHER_BOX) + WEATHER_BOX * 1.5) % WEATHER_BOX) - WEATHER_BOX / 2;
+/** Shared soft radial sprite for weather points (built once). */
+let spriteTex: THREE.DataTexture | null = null;
+function softSprite(): THREE.DataTexture {
+  if (!spriteTex) {
+    const N = 32, d = new Uint8Array(N * N * 4);
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const r = Math.hypot(x - 15.5, y - 15.5) / 16;
+        const a = Math.max(0, 1 - r);
+        const i = (y * N + x) * 4;
+        d[i] = d[i + 1] = d[i + 2] = 255;
+        d[i + 3] = Math.round((a * a * (3 - 2 * a)) * 255);
+      }
+    }
+    spriteTex = new THREE.DataTexture(d, N, N, THREE.RGBAFormat);
+    spriteTex.colorSpace = THREE.SRGBColorSpace;
+    spriteTex.needsUpdate = true;
+  }
+  return spriteTex;
+}
+/** Authored domes are exported uninstanced, so they arrive at their raw mesh size (10-420 m). */
+const SKY_DOME_RADIUS = 4800;
+/**
+ * Rescale an authored dome to sky scale and put the camera inside it: uniform scale to
+ * SKY_DOME_RADIUS, centred on x/z, and on y either base-at-origin (hemispheres, domes) or
+ * centred (full skyboxes), so the viewer always ends up within the shell.
+ */
+function normalizeSkyDome(src: Float32Array): Float32Array {
+  let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < src.length; i += 3) {
+    if (src[i] < minX) minX = src[i]; if (src[i] > maxX) maxX = src[i];
+    if (src[i + 1] < minY) minY = src[i + 1]; if (src[i + 1] > maxY) maxY = src[i + 1];
+    if (src[i + 2] < minZ) minZ = src[i + 2]; if (src[i + 2] > maxZ) maxZ = src[i + 2];
+  }
+  const height = maxY - minY;
+  const span = Math.max((maxX - minX) / 2, (maxZ - minZ) / 2, height);
+  if (!(span > 1e-3)) return src;
+  const s = SKY_DOME_RADIUS / span;
+  // A shell that starts at its own base is a dome: keep the base at eye level. A shell that wraps
+  // the origin (skybox) must stay centred, or the camera ends up outside it.
+  const cy = minY >= -height * 0.05 ? minY : (minY + maxY) / 2;
+  const cx = (minX + maxX) / 2, cz = (minZ + maxZ) / 2;
+  const out = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i += 3) {
+    out[i] = (src[i] - cx) * s;
+    out[i + 1] = (src[i + 1] - cy) * s;
+    out[i + 2] = (src[i + 2] - cz) * s;
+  }
+  return out;
+}
+/** Shadow frustums snap to this many texels; the map is only re-rendered when the snap grid moves. */
+const SHADOW_SNAP_TEXELS = 2;
+/** While nothing moves, refresh moving actors' shadows at 15 Hz instead of every frame. */
+const SHADOW_IDLE_FRAMES = 4;
+const SHADOW_HEADROOM = 60;
+// Scratch objects for the per-frame shadow snap (it ran on four fresh Matrix4/Vector3 allocations per frame).
+const _snapRot = new THREE.Matrix4();
+const _snapInv = new THREE.Matrix4();
+const _snapVec = new THREE.Vector3();
+const _snapZero = new THREE.Vector3();
+const _snapUp = new THREE.Vector3(0, 1, 0);
+/** Wrap a coordinate into a periodic box of side `box` centred on `c`.
+ *  The result always lies in [c - box/2, c + box/2). */
+export function wrapBox(v: number, c: number, box: number): number {
+  return c + ((((v - c) % box) + box * 1.5) % box) - box / 2;
+}
+
+const wrap = (v: number, c: number) => wrapBox(v, c, WEATHER_BOX);
+
+/** View-distance culling test with hysteresis.
+ *  `dx/dy/dz` is the offset from the camera to a body's centre, `radius` its world-space
+ *  bounding radius, `dist` the configured view distance. A visible body is only hidden once
+ *  it is `dist * hysteresis` away (nearest surface), so it does not flicker at the boundary. */
+export function cullVisible(dx: number, dy: number, dz: number, radius: number, dist: number, visible: boolean, hysteresis: number): boolean {
+  const d = Math.sqrt(dx * dx + dy * dy + dz * dz) - radius;
+  return visible ? d <= dist * hysteresis : d <= dist;
+}
 
 /** computeVertexNormals yields NaN on degenerate triangles; NaNs poison lighting and smear black blocks through bloom. */
 export function safeNormals(g: THREE.BufferGeometry) {
@@ -74,6 +150,31 @@ export function safeNormals(g: THREE.BufferGeometry) {
 /** Highest visible surface above each 4 m cell (meshes + BSP, not terrain). Used for indoor-aware weather and the minimap. */
 export interface RoofGrid { originX: number; originZ: number; nx: number; nz: number; cell: number; top: Float32Array }
 
+/** An InstancedMesh whose instances are culled individually by view distance. */
+export interface CullGroup {
+  im: THREE.InstancedMesh;
+  /** World-space instance centres, xyz triplets. */
+  centres: Float32Array;
+  /** World-space bounding radius per instance. */
+  radii: Float32Array;
+  /** Original matrices, restored when an instance becomes visible again. */
+  mats: THREE.Matrix4[];
+  /** Per-instance visibility flags. */
+  visible: Uint8Array;
+}
+
+/** Frames between view-distance culling passes. */
+const CULL_INTERVAL = 6;
+/** Squared camera movement (m^2) that forces an immediate culling pass. */
+const CULL_MOVE_SQ = 9;
+/** Extra margin applied before a visible body is hidden. */
+const CULL_HYSTERESIS = 1.15;
+/** Seconds between weather shelter re-evaluations. */
+const SHELTER_INTERVAL = 0.35;
+/** uTime is wrapped at this period: every kind's velocity times it is an exact multiple of WEATHER_BOX, so the
+ *  wrapped particle positions are identical while the float magnitudes driving them stay bounded. */
+const WEATHER_PERIOD = 240;
+
 export class WorldView {
   readonly group = new THREE.Group();
   readonly theme: Theme;
@@ -85,12 +186,32 @@ export class WorldView {
   private weather: THREE.Points | null = null;
   private weatherOffsets: Float32Array | null = null;
   private weatherVel = new THREE.Vector3();
+  private weatherTime = 0;
+  /** uTime for the weather shader; uploaded once per frame in place of a per-particle CPU loop. */
+  private weatherTimeU = { value: 0 };
+  private weatherShelter: Float32Array | null = null;
+  private shelterTimer = 0;
+  private lastShelterCam = new THREE.Vector3(NaN, NaN, NaN);
   private hazard: THREE.Mesh | null = null;
   private texMats = new Map<string, THREE.MeshStandardMaterial>();
   private blendMats = new Map<string, THREE.Material>();
   private skyEnv: THREE.Texture | null = null;
+  private skyDome: THREE.Mesh | null = null;
+  private skyDomeTex: THREE.Texture | null = null;
+  private skyDomeMat: THREE.MeshBasicMaterial | null = null;
+  private skyDomeEnv: THREE.Texture | null = null;
+  private skyDomeRT: THREE.WebGLRenderTarget | null = null;
+  /** Called when the sky IBL is (re)baked so the scene environment can follow the authored sky art. */
+  onSkyEnv: ((tex: THREE.Texture | null) => void) | null = null;
+  private shadowSnap = new THREE.Vector3(NaN, NaN, NaN);
+  private shadowIdle = 0;
   /** Map force-field instances by blocker index, so they can drop with their generator. */
   private blockerSlots: { im: THREE.InstancedMesh; k: number; m: THREE.Matrix4; up: boolean }[] = [];
+  /** Instanced groups culled per instance by the view-distance setting. */
+  private cullGroups: CullGroup[] = [];
+  private cullFrame = CULL_INTERVAL;
+  private cullDirty = false;
+  private lastCullCam = new THREE.Vector3(NaN, NaN, NaN);
 
   constructor(readonly map: MapData, private scene: THREE.Scene, private textures: TextureStore | null = null, private renderer: THREE.WebGLRenderer | null = null) {
     this.theme = THEMES[map.theme] ?? THEMES.alpine;
@@ -99,11 +220,12 @@ export class WorldView {
     LM_UNIFORMS.lmDirect.value = env?.sunBaked ? 0 : 1;
     const fogColor = env?.fogColor ?? t.fog;
     scene.background = new THREE.Color(env?.fogColor ?? t.skyHorizon);
-    const fogDensity = env?.fogDensity !== undefined ? THREE.MathUtils.clamp(env.fogDensity * 0.03, 0.00025, 0.0025) : t.fogDensity;
-    scene.fog = new THREE.FogExp2(fogColor, fogDensity * (1400 / Math.max(600, settings.viewDistance)));
+    const fogDensity = env?.fogDensity !== undefined ? THREE.MathUtils.clamp(env.fogDensity * 0.03, 0.0002, 0.006) : t.fogDensity;
+    scene.fog = new THREE.FogExp2(fogColor, fogDensity);
 
     const ambient = env?.ambientColor ?? t.ambient;
-    this.hemi = new THREE.HemisphereLight(ambient, map.source === 'original' ? 0x6a665e : t.grass, t.ambientIntensity * (map.source === 'original' ? 1.05 : 1));
+    const ambientInt = (env?.ambientIntensity !== undefined ? THREE.MathUtils.clamp(env.ambientIntensity, 0.35, 2.5) : 1) * t.ambientIntensity * (map.source === 'original' ? 1.05 : 1);
+    this.hemi = new THREE.HemisphereLight(ambient, map.source === 'original' ? 0x6a665e : t.grass, ambientInt);
     this.group.add(this.hemi);
     this.sunDir = env?.sunDir ? new THREE.Vector3(env.sunDir.x, Math.max(0.15, env.sunDir.y), env.sunDir.z).normalize() : new THREE.Vector3(...t.sunDir).normalize();
     const sunInt = t.sunIntensity * (env?.sunIntensity !== undefined ? THREE.MathUtils.clamp(env.sunIntensity, 0.6, 1.5) : 1);
@@ -116,7 +238,9 @@ export class WorldView {
 
     this.sky = this.buildSky(fogColor);
     this.group.add(this.sky);
-    if (this.renderer && settings.waterQuality === 'high') this.skyEnv = this.buildSkyEnv();
+    this.skyDome = this.buildSkyDome();
+    if (this.skyDome) this.group.add(this.skyDome);
+    if (this.renderer) this.skyEnv = this.buildSkyEnv();
     this.group.add(this.buildTerrain());
     for (const m of this.buildBoxes()) this.group.add(m);
     for (const m of this.buildMeshes()) this.group.add(m);
@@ -141,17 +265,76 @@ export class WorldView {
     s.im.instanceMatrix.needsUpdate = true;
   }
 
+  /** Register an instanced group for view-distance culling.
+   *  With `instances`, each instance is tested per culling pass (hidden by a zero-scale matrix).
+   *  With `null`, the group is exempt: it is never hidden (boxes, force fields, blended glows). */
+  private registerCullGroup(im: THREE.InstancedMesh, geo: THREE.BufferGeometry, instances: number[] | null) {
+    const n = instances ? im.count : 0;
+    const bs = geo.boundingSphere;
+    const radius = bs ? bs.radius : 0;
+    const centres = new Float32Array(n * 3);
+    const radii = new Float32Array(n);
+    const mats: THREE.Matrix4[] = new Array(n);
+    const visible = new Uint8Array(Math.max(n, 1)).fill(1);
+    if (instances) {
+      const m = new THREE.Matrix4();
+      for (let k = 0; k < n; k++) {
+        im.getMatrixAt(k, m);
+        mats[k] = m.clone();
+        centres[k * 3] = m.elements[12];
+        centres[k * 3 + 1] = m.elements[13];
+        centres[k * 3 + 2] = m.elements[14];
+        // Conservative world radius: bounding-sphere radius scaled by the largest axis stretch.
+        const e = m.elements;
+        const sMax = Math.max(
+          Math.hypot(e[0], e[4], e[8]),
+          Math.hypot(e[1], e[5], e[9]),
+          Math.hypot(e[2], e[6], e[10]),
+        );
+        radii[k] = radius * sMax;
+      }
+    }
+    this.cullGroups.push({ im, centres, radii, mats, visible });
+  }
+
+  /** Per-instance view-distance culling pass. Reads `settings.viewDistance` live, so the
+   *  "World Detail" slider takes effect without rebuilding the world. Allocation-free. */
+  private refreshCulling(cam: THREE.Camera) {
+    const dist = settings.viewDistance;
+    const cx = cam.position.x, cy = cam.position.y, cz = cam.position.z;
+    for (const grp of this.cullGroups) {
+      if (!grp.mats.length) continue; // exempt group
+      const { centres, radii, mats, visible, im } = grp;
+      let dirty = false;
+      for (let k = 0; k < mats.length; k++) {
+        const j = k * 3;
+        const vis = cullVisible(centres[j] - cx, centres[j + 1] - cy, centres[j + 2] - cz, radii[k], dist, visible[k] === 1, CULL_HYSTERESIS) ? 1 : 0;
+        if (vis !== visible[k]) {
+          visible[k] = vis;
+          im.setMatrixAt(k, vis ? mats[k] : HIDDEN_INSTANCE);
+          dirty = true;
+        }
+      }
+      if (dirty) im.instanceMatrix.needsUpdate = true;
+    }
+  }
+
   private fogColor = 0;
   /** Re-apply shadow and fog quality after a settings change. */
   applyGraphics() {
     this.setupFog(this.fogColor);
     this.setupShadows();
+    // View distance is read live by refreshCulling(); force a full pass so a
+    // slider change takes effect on the next frame.
+    this.cullDirty = true;
   }
 
   private setupShadows() {
     const res = SHADOW_RES[settings.shadowQuality] ?? 0;
     this.sun.castShadow = settings.shadows && res > 0;
-    if (!this.sun.castShadow) return;
+    this.shadowSnap.set(NaN, NaN, NaN);
+    this.shadowIdle = 0;
+    if (!this.sun.castShadow) { if (this.renderer) this.renderer.shadowMap.autoUpdate = true; return; }
     if (this.sun.shadow.mapSize.x !== res) {
       this.sun.shadow.mapSize.set(res, res);
       this.sun.shadow.map?.dispose();
@@ -160,13 +343,19 @@ export class WorldView {
     // Higher steps also cover more ground around the player.
     const ext = settings.shadowQuality === 'ultra' ? 170 : settings.shadowQuality === 'high' ? 135 : settings.shadowQuality === 'medium' ? 110 : 90;
     const c = this.sun.shadow.camera;
-    c.left = -ext; c.right = ext; c.top = ext; c.bottom = -ext; c.near = 1; c.far = 1200;
+    c.left = -ext; c.right = ext; c.top = ext; c.bottom = -ext;
+    // The ortho box is ±ext around the player; a 1200-unit depth range was ~10x wider than the box,
+    // wasting depth precision (shadow acne / peter-panning) for nothing.
+    c.near = 1; c.far = ext * 2 + SHADOW_HEADROOM;
     c.updateProjectionMatrix();
     this.sun.shadow.bias = -0.0004;
     this.sun.shadow.normalBias = 0.6;
     this.sun.shadow.radius = settings.softShadows ? 2.5 : 1;
     // UE3-style shadows keep sky/bounce light: a shadowed surface loses ~45% of direct sun, not all of it.
     this.sun.shadow.intensity = 0.55;
+    // Shadows are re-rendered on demand (see update()): static world geometry dominates the scene, so
+    // refreshing the map every frame was pure waste.
+    if (this.renderer) this.renderer.shadowMap.autoUpdate = false;
   }
 
   /**
@@ -219,6 +408,52 @@ export class WorldView {
     const m = new THREE.Mesh(new THREE.SphereGeometry(5000, 32, 16), mat);
     m.frustumCulled = false;
     m.renderOrder = -1;
+    return m;
+  }
+
+  /**
+   * The map's authored sky dome (TA's painted sky art, flagged by the exporter), drawn unlit behind
+   * everything. Returns null when the map has no dome, leaving the procedural gradient sky in charge.
+   */
+  private buildSkyDome(): THREE.Mesh | null {
+    const idx = this.map.env?.skyMesh ?? this.map.meshes?.findIndex((m) => m.sky) ?? -1;
+    const me = idx >= 0 ? this.map.meshes?.[idx] : undefined;
+    if (!me || me.positions.length < 9) return null;
+    // Only painted domes are usable: an untextured dome is a flat unlit shell that would bury the
+    // procedural sky, so those maps keep the gradient sky and its clouds.
+    const texIdx = this.map.env?.skyTex ?? me.groups?.find((g) => (g.tex ?? -1) >= 0)?.tex ?? -1;
+    const texName = texIdx >= 0 ? this.map.textures?.[texIdx] : undefined;
+    if (!texName || !this.textures) return null;
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(normalizeSkyDome(me.positions), 3));
+    if (me.indices) g.setIndex(new THREE.BufferAttribute(me.indices, 1));
+    if (me.uvs) g.setAttribute('uv', new THREE.BufferAttribute(me.uvs, 2));
+    // Unlit, unfogged, untone-mapped: the dome is authored at its final brightness, exactly like UE3's sky.
+    const mat = new THREE.MeshBasicMaterial({
+      color: this.map.env?.skyColor ?? 0xffffff, side: THREE.BackSide, depthWrite: false, depthTest: false, fog: false, toneMapped: false,
+    });
+    this.skyDomeMat = mat;
+    const m = new THREE.Mesh(g, mat);
+    m.frustumCulled = false;
+    // Draw after the procedural sky (-1) and before world geometry (0): the dome is depthTest:false,
+    // so any later pass paints over it, and it must never share a render order with the level.
+    m.renderOrder = -0.5;
+    m.castShadow = false;
+    m.receiveShadow = false;
+    void this.textures.get(texName).then((tx) => {
+      if (!tx || this.skyDomeMat !== mat) return;
+      tx.wrapS = tx.wrapT = THREE.RepeatWrapping;
+      mat.map = tx;
+      mat.needsUpdate = true;
+      this.skyDomeTex = tx;
+      // The painted sky is the scene's ambient light source: rebake the IBL now that the art is in.
+      if (this.renderer) {
+        this.skyDomeEnv?.dispose();
+        this.skyDomeEnv = null;
+        this.skyEnv = this.buildSkyEnv();
+        this.onSkyEnv?.(this.skyEnv);
+      }
+    });
     return m;
   }
 
@@ -283,10 +518,10 @@ export class WorldView {
     return mesh;
   }
 
-  /** Splat-blended terrain: up to five imported layers, each tiled at its original mapping scale, with TA's normal maps on the first three. */
+  /** Splat-blended terrain: up to five imported layers, each tiled at its original mapping scale, with TA's normal maps on every layer that has one. */
   private terrainMaterial(): THREE.MeshStandardMaterial {
     const T = this.map.terrain, layers = this.map.terrainLayers!.slice(0, 5);
-    const N = layers.length, NN = Math.min(3, N);
+    const N = layers.length, NN = N;
     const blank = new THREE.DataTexture(new Uint8Array([150, 150, 150, 255]), 1, 1, THREE.RGBAFormat);
     blank.needsUpdate = true;
     const flat = new THREE.DataTexture(new Uint8Array([128, 128, 255, 255]), 1, 1, THREE.RGBAFormat);
@@ -308,7 +543,7 @@ export class WorldView {
       const name = l.tex >= 0 ? this.map.textures?.[l.tex] : undefined;
       if (!name) return;
       void this.textures!.get(name).then((tx) => { if (tx) { uniforms.tL.value[i] = tx; uniforms.uHas.value[i] = 1; } });
-      const nname = i < NN && (l.ntex ?? -1) >= 0 && settings.textureDetail !== 'low' ? this.map.textures?.[l.ntex!] : undefined;
+      const nname = (l.ntex ?? -1) >= 0 && settings.textureDetail !== 'low' ? this.map.textures?.[l.ntex!] : undefined;
       if (nname) void this.textures!.get(nname, true).then((tx) => { if (tx) { uniforms.tN.value[i] = tx; uniforms.uHasN.value[i] = 1; } });
     });
     const m = new THREE.MeshStandardMaterial({ color: 0xffffff, vertexColors: true, roughness: 0.84, metalness: 0 });
@@ -380,21 +615,34 @@ export class WorldView {
       im.receiveShadow = true;
       im.computeBoundingSphere();
       out.push(im);
+      // Collision-visual boxes stay drawn at any distance (gameplay visibility);
+      // register them so they are exempt from view-distance culling.
+      this.registerCullGroup(im, geo, null);
     }
     return out;
   }
 
   /** Prefiltered environment of this map's sky, for water reflections. */
+  /** Prefiltered sky radiance: the authored dome art when we have one, else the procedural sky. */
   private buildSkyEnv(): THREE.Texture | null {
     try {
       const pm = new THREE.PMREMGenerator(this.renderer!);
       const s = new THREE.Scene();
-      const sky = new THREE.Mesh(this.sky.geometry, this.sky.material);
+      const sky = new THREE.Mesh(this.skyDome?.geometry ?? this.sky.geometry, this.skyDome ? this.skyDome!.material : this.sky.material);
       s.add(sky);
       const rt = pm.fromScene(s, 0, 0.1, 6000);
       pm.dispose();
+      this.skyDomeRT?.dispose();
+      this.skyDomeRT = rt;
+      this.skyDomeEnv = rt.texture;
       return rt.texture;
     } catch { return null; }
+  }
+
+  /** Sky-based image-based lighting for the scene, for the renderer to install as `scene.environment`. */
+  setSkyIBL(): THREE.Texture | null {
+    if (!this.renderer) return null;
+    return this.skyDomeEnv ?? this.buildSkyEnv();
   }
 
   /** Light shaft / exhaust plume: a soft additive volume (see beams.ts) instead of a milky glass shell. */
@@ -521,7 +769,7 @@ export class WorldView {
     const blockerOf = new Map((this.map.blockers ?? []).map((b, i) => [b.instance, i]));
     for (const [mi, list] of byMesh) {
       const me = meshes[mi];
-      if (me.hidden || isBoundaryMesh(me.name)) continue;
+      if (me.hidden || me.sky || isBoundaryMesh(me.name)) continue;
       const g = new THREE.BufferGeometry();
       g.setAttribute('position', new THREE.BufferAttribute(me.positions, 3));
       g.setIndex(new THREE.BufferAttribute(me.indices, 1));
@@ -541,6 +789,8 @@ export class WorldView {
         });
         im.computeBoundingSphere();
         out.push(im);
+        // Force fields must stay visible at any distance (gameplay).
+        this.registerCullGroup(im, g, null);
         continue;
       }
       const fallback = matFor(me.mat, this.theme.structure);
@@ -572,6 +822,8 @@ export class WorldView {
         im.renderOrder = 2;
         im.computeBoundingSphere();
         out.push(im);
+        // Glows/glass read as distant landmarks; exempt from culling.
+        this.registerCullGroup(im, bg, null);
       }
       if (allBlend) continue;
       // Instances with TA baked lighting draw per packed lightmap page; the rest use the dynamic lighting only.
@@ -619,6 +871,7 @@ export class WorldView {
         im.receiveShadow = true;
         im.computeBoundingSphere();
         out.push(im);
+        this.registerCullGroup(im, geo, sub);
       }
     }
     return out;
@@ -637,12 +890,34 @@ export class WorldView {
     const off = new Float32Array(n * 3);
     for (let i = 0; i < n * 3; i++) off[i] = (Math.random() - 0.5) * WEATHER_BOX;
     this.weatherOffsets = off;
+    const shelter = new Float32Array(n);
+    this.weatherShelter = shelter;
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n * 3), 3));
+    // Base offsets stay static: the GPU animates and wraps them, so no per-frame CPU loop.
+    g.setAttribute('position', new THREE.BufferAttribute(off, 3));
+    g.setAttribute('aShelter', new THREE.BufferAttribute(shelter, 1));
     const color = kind === 'snow' ? 0xffffff : kind === 'rain' ? 0x9ab0c8 : kind === 'ash' ? 0x555555 : 0xc8a878;
-    this.weather = new THREE.Points(g, new THREE.PointsMaterial({ color, size: kind === 'rain' ? 0.08 : 0.16, transparent: true, opacity: 0.8, depthWrite: false }));
-    this.weather.frustumCulled = false;
     this.weatherVel.set(kind === 'dust' ? 6 : 1, kind === 'rain' ? -30 : kind === 'snow' ? -3 : -1.5, kind === 'dust' ? 2 : 0.5);
+    const vx = this.weatherVel.x, vy = this.weatherVel.y, vz = this.weatherVel.z;
+    const B = WEATHER_BOX, H = WEATHER_BOX / 2;
+    const mat = new THREE.PointsMaterial({ color, map: softSprite(), alphaTest: 0.02, size: kind === 'rain' ? 0.08 : 0.16, transparent: true, opacity: 0.8, depthWrite: false });
+    // Soft round sprite: TA's particles are blurred dots, not the hard squares a bare point gives.
+    mat.onBeforeCompile = (sh) => {
+      Object.assign(sh.uniforms, { uTime: this.weatherTimeU });
+      sh.vertexShader = sh.vertexShader
+        .replace('#include <common>', '#include <common>\nattribute float aShelter;\nuniform float uTime;')
+        .replace('#include <begin_vertex>', `vec3 transformed = vec3( position );
+vec3 pv = position + vec3(${vx}, ${vy}, ${vz}) * uTime;
+transformed = vec3(
+	cameraPosition.x + mod( pv.x - cameraPosition.x + ${H}, ${B} ) - ${H},
+	cameraPosition.y + mod( pv.y - cameraPosition.y + ${H}, ${B} ) - ${H},
+	cameraPosition.z + mod( pv.z - cameraPosition.z + ${H}, ${B} ) - ${H} );
+if ( aShelter > 0.5 ) transformed.y = -1e5;`);
+    };
+    // Velocity is baked into the source above, so each kind needs its own program.
+    mat.customProgramCacheKey = () => 'ar-weather-' + kind;
+    this.weather = new THREE.Points(g, mat);
+    this.weather.frustumCulled = false;
     this.group.add(this.weather);
   }
 
@@ -702,30 +977,60 @@ export class WorldView {
   update(cam: THREE.Camera, dt: number, focus: THREE.Vector3) {
     forceFieldTime.value += dt;
     this.sky.position.copy(cam.position);
-    if (this.sun.castShadow) {
-      // Snap the shadow frustum to whole shadow-map texels in light space so shadows do not swim as the player moves.
+    this.skyDome?.position.copy(cam.position);
+    if (this.sun.castShadow && this.renderer) {
+      // Snap the shadow frustum to a coarse grid of shadow-map texels in light space, so shadows do not swim as the
+      // player moves and the map only needs a refresh when the snap grid (not the player) moves.
       const sc = this.sun.shadow.camera, texel = (sc.right - sc.left) / this.sun.shadow.mapSize.x;
-      const lightRot = new THREE.Matrix4().lookAt(this.sunDir, new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 1, 0));
-      const inv = lightRot.clone().invert();
-      const ls = focus.clone().applyMatrix4(inv);
-      ls.x = Math.round(ls.x / texel) * texel; ls.y = Math.round(ls.y / texel) * texel;
-      const snapped = ls.applyMatrix4(lightRot);
-      this.sun.position.copy(snapped).addScaledVector(this.sunDir, 500);
-      this.sun.target.position.copy(snapped);
-    }
-    if (this.weather && this.weatherOffsets) {
-      // Particles live in world space and are wrapped into a box around the camera.
-      const p = this.weather.geometry.getAttribute('position') as THREE.BufferAttribute;
-      const a = p.array as Float32Array, w = this.weatherOffsets;
-      const v = this.weatherVel, cx = cam.position.x, cy = cam.position.y, cz = cam.position.z;
-      const T = this.map.terrain;
-      for (let i = 0; i < w.length; i += 3) {
-        const wx = wrap(w[i] + v.x * dt, cx), wy = wrap(w[i + 1] + v.y * dt, cy), wz = wrap(w[i + 2] + v.z * dt, cz);
-        w[i] = wx; w[i + 1] = wy; w[i + 2] = wz;
-        const sheltered = wy < this.roofAt(wx, wz) + 0.3 || (!T.isHole(wx, wz) && wy < T.heightAt(wx, wz));
-        a[i] = wx; a[i + 1] = sheltered ? -1e5 : wy; a[i + 2] = wz;
+      const step = texel * SHADOW_SNAP_TEXELS;
+      _snapRot.lookAt(this.sunDir, _snapZero, _snapUp);
+      _snapInv.copy(_snapRot).invert();
+      _snapVec.copy(focus).applyMatrix4(_snapInv);
+      _snapVec.x = Math.round(_snapVec.x / step) * step;
+      _snapVec.y = Math.round(_snapVec.y / step) * step;
+      const moved = !this.shadowSnap.equals(_snapVec);
+      if (moved) this.shadowSnap.copy(_snapVec);
+      _snapVec.applyMatrix4(_snapRot);
+      if (moved) {
+        this.sun.position.copy(_snapVec).addScaledVector(this.sunDir, 500);
+        this.sun.target.position.copy(_snapVec);
+        this.shadowIdle = 0;
+      } else if (++this.shadowIdle >= SHADOW_IDLE_FRAMES) {
+        this.shadowIdle = 0; // nothing moved: refresh moving actors' shadows at ~15 Hz instead of every frame
       }
-      p.needsUpdate = true;
+      this.renderer.shadowMap.needsUpdate = moved || this.shadowIdle === 0;
+    }
+    // View-distance culling: throttled (every CULL_INTERVAL frames, on camera movement, or when
+    // settings changed). Allocation-free in steady state.
+    if (this.cullDirty || ++this.cullFrame >= CULL_INTERVAL || cam.position.distanceToSquared(this.lastCullCam) >= CULL_MOVE_SQ) {
+      this.refreshCulling(cam);
+      this.cullFrame = 0;
+      this.lastCullCam.copy(cam.position);
+      this.cullDirty = false;
+    }
+    if (this.weather && this.weatherOffsets && this.weatherShelter) {
+      // Particles animate on the GPU (see buildWeather); the CPU only advances the shared time
+      // and refreshes the per-particle shelter flag a few times per second.
+      this.weatherTime = (this.weatherTime + dt) % WEATHER_PERIOD;
+      this.weatherTimeU.value = this.weatherTime;
+      this.shelterTimer += dt;
+      // First pass (lastShelterCam is NaN) or the camera has moved since the last evaluation.
+      const camMoved = Number.isNaN(this.lastShelterCam.x) || cam.position.distanceToSquared(this.lastShelterCam) >= 1;
+      if (this.shelterTimer >= SHELTER_INTERVAL && camMoved) {
+        // Recompute shelter at the particles' current GPU positions (base offset + velocity * time, wrapped).
+        const p = this.weather.geometry.getAttribute('aShelter') as THREE.BufferAttribute;
+        const sh = this.weatherShelter, w = this.weatherOffsets;
+        const v = this.weatherVel, cx = cam.position.x, cy = cam.position.y, cz = cam.position.z, t = this.weatherTime;
+        const T = this.map.terrain;
+        for (let i = 0; i < sh.length; i++) {
+          const j = i * 3;
+          const wx = wrap(w[j] + v.x * t, cx), wy = wrap(w[j + 1] + v.y * t, cy), wz = wrap(w[j + 2] + v.z * t, cz);
+          sh[i] = wy < this.roofAt(wx, wz) + 0.3 || (!T.isHole(wx, wz) && wy < T.heightAt(wx, wz)) ? 1 : 0;
+        }
+        p.needsUpdate = true;
+        this.shelterTimer = 0;
+        this.lastShelterCam.copy(cam.position);
+      }
     }
   }
 
@@ -740,5 +1045,7 @@ export class WorldView {
     disposeBeams();
     disposeLiquids();
     this.skyEnv?.dispose();
+    if (this.skyDomeEnv && this.skyDomeEnv !== this.skyEnv) this.skyDomeEnv.dispose();
+    this.skyDomeMat?.dispose();
   }
 }

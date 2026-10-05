@@ -543,6 +543,7 @@ export class Menus {
         (['low', 'medium', 'high', 'ultra'] as const).map((q) => h('option', { value: q, selected: settings.quality === q }, q.toUpperCase()))));
       row('Display Mode', h('button', { class: 'btn small', onclick: () => { if (document.fullscreenElement) void document.exitFullscreen(); else void document.documentElement.requestFullscreen(); } }, document.fullscreenElement ? 'Fullscreen → Windowed' : 'Windowed → Fullscreen'));
       row('Screen Percentage', range('renderScale', 0.4, 2, 0.05, pct, gfx));
+      row('Adaptive Resolution (holds the frame-rate limit)', check('adaptiveResolution', () => this.toast('Resolution now follows frame rate, capped by Screen Percentage')));
       row('Field of View', range('fov', 70, 130, 1, (v) => `${v}°`, gfx));
       row('Anti-Aliasing (MSAA)', check('antialias', () => { gfx(); this.toast('Fully applies after a reload when post-processing is off'); }));
       row('Frame Rate Limit', range('maxFps', 0, 300, 10, (v) => (v ? `${v} fps` : 'Unlimited')));

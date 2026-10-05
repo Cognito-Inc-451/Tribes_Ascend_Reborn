@@ -2,6 +2,18 @@ import * as THREE from 'three';
 import { ITEMS, WEAPON_FINISHES, projDef } from '@ar/shared';
 import { anims, SeqPlayer, type AnimSet } from './anim.js';
 import { models, staticModel, weaponModelKey, type ModelData } from './models.js';
+import { isSharedMaterial, markShared, ownMaterial } from './materials.js';
+
+/** Weapon templates built from fixed parameters are cached and shared across viewmodels;
+ *  `setViewModelStealth()` mutates them per weapon, so each viewmodel owns clones. */
+const matCache = new Map<string, THREE.Material>();
+function shared<T extends THREE.Material>(key: string, make: () => T): T {
+  const hit = matCache.get(key);
+  if (hit) return hit as T;
+  const m = markShared(make());
+  matCache.set(key, m);
+  return m;
+}
 
 /** Skinned instance of an imported model in its bind pose, bones by name. */
 function skinned(m: ModelData): { mesh: THREE.SkinnedMesh; bones: Map<string, THREE.Bone> } {
@@ -155,11 +167,11 @@ export function buildViewModel(itemId: string, finishId: string, who?: { armor: 
   const finish = WEAPON_FINISHES.find((f) => f.id === finishId);
   const tint = finish?.tint ?? 0x5a626c;
   // A little emissive fill keeps the weapon readable when the sun is behind the player.
-  const metal = new THREE.MeshStandardMaterial({ color: tint, metalness: Math.min(0.6, finish?.metalness ?? 0.6), roughness: 0.4, emissive: tint, emissiveIntensity: 0.22 });
-  const dark = new THREE.MeshStandardMaterial({ color: 0x30363d, metalness: 0.4, roughness: 0.55, emissive: 0x30363d, emissiveIntensity: 0.25 });
-  const glove = new THREE.MeshStandardMaterial({ color: 0x4a4236, metalness: 0.1, roughness: 0.8, emissive: 0x4a4236, emissiveIntensity: 0.2 });
+  const metal = ownMaterial(shared(`vm-metal|${tint}|${Math.min(0.6, finish?.metalness ?? 0.6)}`, () => new THREE.MeshStandardMaterial({ color: tint, metalness: Math.min(0.6, finish?.metalness ?? 0.6), roughness: 0.4, emissive: tint, emissiveIntensity: 0.22 })));
+  const dark = ownMaterial(shared('vm-dark', () => new THREE.MeshStandardMaterial({ color: 0x30363d, metalness: 0.4, roughness: 0.55, emissive: 0x30363d, emissiveIntensity: 0.25 })));
+  const glove = ownMaterial(shared('vm-glove', () => new THREE.MeshStandardMaterial({ color: 0x4a4236, metalness: 0.1, roughness: 0.8, emissive: 0x4a4236, emissiveIntensity: 0.2 })));
   const accentColor = projDef(itemId)?.color ?? (ITEMS[itemId]?.kind === 'lance' ? 0x9fe8ff : ITEMS[itemId]?.kind === 'repair' ? 0x60ff90 : 0xffb547);
-  const glow = new THREE.MeshBasicMaterial({ color: accentColor });
+  const glow = ownMaterial(shared(`vm-glow|${accentColor}`, () => new THREE.MeshBasicMaterial({ color: accentColor })));
 
   const box = (w: number, h: number, d: number, m: THREE.Material, x: number, y: number, z: number) => {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
@@ -350,5 +362,5 @@ export function disposeViewModel(vm: THREE.Object3D) {
     if (!m.userData.sharedGeometry) m.geometry.dispose();
     for (const mm of Array.isArray(m.material) ? m.material : [m.material]) mats.add(mm);
   });
-  for (const m of mats) m.dispose();
+  for (const m of mats) if (!isSharedMaterial(m)) m.dispose();
 }

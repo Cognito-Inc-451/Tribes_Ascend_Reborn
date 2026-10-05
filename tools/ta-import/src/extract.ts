@@ -60,10 +60,22 @@ function noCollide(name: string): boolean {
   return /leaf|leaves|foliage|grass|fern|smoke|fx_|_fx|decal|light_?shaft|lightbeam|glow|hologram|waterfall|fog|cloud|sky|waterplane|lavaplane/i.test(name);
 }
 
-/** Sky domes and star-field cards are replaced by the client sky shader. */
-const SKIP_MESH = /skydome|skybox|skysphere|sky_?hemi|starfield|shootingstar|_stars?_|nebula|outofbounds|gridplane|rimlight/i;
+/** Sky cards (star fields, nebula paintings, out-of-bounds backdrops) stay out of the map. */
+const SKIP_MESH = /starfield|shootingstar|_stars?_|nebula|outofbounds|gridplane|rimlight/i;
+/** Authored sky domes are kept: the client draws them unlit behind everything and lights the scene from them. */
+const SKY_MESH = /skydome|skybox|skysphere|sky_?hemi/i;
 /** Invisible in game, collision only (map-edge "creativity walls", blockers). */
 const HIDDEN_MESH = /creativitywall|walllimit|invisiblewall|invis_?wall|blocker|blockingmesh|collision_?only/i;
+
+/** Largest vertex distance from the origin, in metres — used to rank authored sky domes by size. */
+function meshRadius(p: Float32Array): number {
+  let r = 0;
+  for (let i = 0; i < p.length; i += 3) {
+    const d = p[i] * p[i] + p[i + 1] * p[i + 1] + p[i + 2] * p[i + 2];
+    if (d > r) r = d;
+  }
+  return Math.sqrt(r);
+}
 
 /** 3x3 column-major UE rotation (from FRotationMatrix rows) times per-axis scale, converted to map axes. */
 function transform(loc: Vec, rot: Rot, scale: Vec): Float32Array {
@@ -277,6 +289,8 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
     return info;
   };
   const groupOf = (mi: MatInfo) => ({ tex: mi.tex, ntex: mi.ntex >= 0 ? mi.ntex : undefined, stex: mi.stex >= 0 ? mi.stex : undefined, fx: mi.fx, tile: mi.tile, tint: mi.tint });
+  /** Authored sky domes found while resolving meshes; the best is chosen after the import walk. */
+  const skyCands: { mesh: number, radius: number, groups?: NonNullable<MeshAsset['groups']> }[] = [];
 
   const resolveMesh = (pkg: UPackage, ref: number, overrides: number[] = []): number => {
     let owner = pkg, exp: ExportEntry | undefined;
@@ -296,6 +310,8 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
       if (!groups || groups.every((g, k) => g === base.groups![k])) { meshIndex.set(ovKey, bi); return bi; }
       meshes.push({ ...base, groups });
       meshIndex.set(ovKey, meshes.length - 1);
+      // Painted clones are the domes that actually show art, so they must be candidates too.
+      if (base.sky) skyCands.push({ mesh: meshes.length - 1, radius: meshRadius(base.positions), groups });
       return meshes.length - 1;
     }
     if (ref > 0) exp = pkg.exports[ref - 1];
@@ -325,15 +341,19 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
     const indices = new Uint32Array(md.indices.length);
     for (let i = 0; i < md.indices.length; i += 3) { indices[i] = md.indices[i]; indices[i + 1] = md.indices[i + 2]; indices[i + 2] = md.indices[i + 1]; }
     const hidden = HIDDEN_MESH.test(md.name);
+    const sky = SKY_MESH.test(md.name);
     const groups = md.sections.length && md.uvs ? md.sections.map((s) => {
       const mi = matInfo(owner, s.material);
       return { start: s.firstIndex, count: s.numTriangles * 3, ...groupOf(mi) };
     }) : undefined;
     meshes.push({
       name: md.name, positions, indices, mat: meshMaterial(md.name), collide: hidden || !noCollide(md.name), hidden: hidden || undefined,
+      sky: sky || undefined,
       uvs: groups ? md.uvs! : undefined, uv2: groups ? uv2 : undefined, groups,
     });
     meshIndex.set(fullPath, meshes.length - 1);
+    // Remember every authored dome; the best one is picked once all meshes are in.
+    if (sky) skyCands.push({ mesh: meshes.length - 1, radius: meshRadius(positions), groups });
     return overrides.some((o) => o) ? resolveMesh(pkg, ref, overrides) : meshes.length - 1;
   };
 
@@ -663,8 +683,9 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
       if (/^SkyLight/.test(cls)) {
         const lc = P.get('LightComponent');
         const lp = isRef(lc) && lc.ref > 0 ? parseObject(pkg, pkg.exportData(pkg.exports[lc.ref - 1]))?.props : null;
-        const c = colorOf(lp?.get('LightColor'), 0xffffff), b = Math.min(1.5, num(lp?.get('Brightness'), 1));
-        env.ambientColor = (Math.round(((c >> 16) & 255) * b / 1.5) << 16) | (Math.round(((c >> 8) & 255) * b / 1.5) << 8) | Math.round((c & 255) * b / 1.5);
+        // Keep the authored sky tint and brightness separate; the client scales them.
+        env.ambientColor = colorOf(lp?.get('LightColor'), 0xffffff);
+        env.ambientIntensity = num(lp?.get('Brightness'), 1);
         continue;
       }
       if (cls === 'ExponentialHeightFog' || cls === 'HeightFog') {
@@ -672,6 +693,8 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
         const fp = isRef(fc) && fc.ref > 0 ? parseObject(pkg, pkg.exportData(pkg.exports[fc.ref - 1]))?.props : null;
         env.fogDensity = num(fp?.get('FogDensity'), 0.02);
         env.fogColor = colorOf(fp?.get('FogInscatteringColor') ?? fp?.get('LightInscatteringColor'), 0x8899aa);
+        // Sun-in-scattering colour drives the aerial-perspective glow toward the sun.
+        env.fogLightColor = colorOf(fp?.get('LightInscatteringColor'), env.fogColor);
         env.fogStart = num(fp?.get('StartDistance'), 0) * S;
         if (cls === 'ExponentialHeightFog') {
           env.fogHeight = loc.z * S;
@@ -857,6 +880,26 @@ export function importMap(files: string[], mode: ModeId, opts: ImportOptions): M
       lit++;
     }
     log(`  lightmaps: ${lmSources.length} atlases -> ${pages.map((p) => `${p.mips[0].w}x${p.mips[0].h}`).join(', ')}, ${lit} instances`);
+  }
+
+  // Choose the dome that reads best: painted first, then biggest, then any.
+  {
+    let best: (typeof skyCands)[number] | null = null, bestScore = -1;
+    for (const c of skyCands) {
+      const painted = c.groups?.some((g) => g.tex >= 0) ? 1e9 : 0;
+      const score = painted + Math.min(1e8, c.radius * 1e4);
+      if (score > bestScore) { bestScore = score; best = c; }
+    }
+    if (best) {
+      env.skyMesh = best.mesh;
+      const g0 = best.groups?.find((g) => g.tex >= 0) ?? best.groups?.[0];
+      if (g0 && g0.tex >= 0) env.skyTex = g0.tex;
+      // Material tint is a float triple (0..4); pack it to a colour the client can multiply the dome by.
+      if (g0?.tint) {
+        const c = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 255);
+        env.skyColor = (c(g0.tint[0]) << 16) | (c(g0.tint[1]) << 8) | c(g0.tint[2]);
+      }
+    }
   }
 
   log(`  meshes ${meshes.length}, instances ${instances.length}, entities ${entities.length}, textures ${textures.length}`);

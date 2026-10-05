@@ -9,6 +9,7 @@ import type { Session } from '../net/session.js';
 import { AssetModel, FlagModel, PlayerModel, teamColor, VehicleModel } from '../render/actors.js';
 import { Effects } from '../render/fx.js';
 import type { Renderer } from '../render/renderer.js';
+import { ADAPTIVE_RULE, adaptiveStep, initialAdaptiveState, type AdaptiveState } from '../render/adaptive.js';
 import { WorldView } from '../render/world.js';
 import { TextureStore } from '../render/textures.js';
 import { buildViewModel, disposeViewModel, setViewModelStealth, spinViewModel, type FirstPerson } from '../render/viewmodel.js';
@@ -77,6 +78,7 @@ export class GameClient {
   private strikes: { pos: Vec3; until: number; kind: string }[] = [];
   private lastFrameTime = 0;
   private fps = 0;
+  private adapt: AdaptiveState = initialAdaptiveState(1);
   private cmdHistory: InputCmd[] = [];
   private landSoundAt = 0;
   private reloadSnd = 0;
@@ -93,6 +95,8 @@ export class GameClient {
     audio.setAssetBases(assetBases(session.server));
     this.view = new WorldView(map, r.scene, this.textures, r.renderer);
     r.setSun(this.view.sunDirection);
+    this.view.onSkyEnv = (t) => r.setSkyEnvironment(t);
+    r.setSkyEnvironment(this.view.setSkyIBL());
     r.scene.add(this.fx.group);
     this.pred = new Predictor(this.world, !!session.server.options?.infiniteEnergy);
     // The server keeps our last input seq across map changes and drops anything at or below it.
@@ -369,6 +373,7 @@ export class GameClient {
     this.last = t;
     this.lastFrameTime = t;
     this.fps = this.fps * 0.95 + (1 / Math.max(1e-3, dt)) * 0.05;
+    this.updateAdaptive();
     this.input.pollGamepad(dt);
     this.handleActions();
     this.acc += dt;
@@ -378,6 +383,24 @@ export class GameClient {
     this.render(dt);
     this.updateMusic(t);
     this.input.endFrame();
+  }
+
+  /**
+   * Hold the frame-rate target by trimming render resolution below the player's slider.
+   * The controller only moves after a sustained trend, so brief hitches never change quality.
+   */
+  private updateAdaptive() {
+    if (!settings.adaptiveResolution) {
+      if (this.adapt.scale !== 1) { this.adapt = initialAdaptiveState(1); this.r.setAdaptiveScale(1); }
+      return;
+    }
+    // The frame gate caps measured fps a hair above the frame-rate limit, so aiming at the
+    // cap itself would let the controller ratchet down but never climb back. Target below it.
+    const cap = settings.maxFps > 0 ? Math.min(settings.maxFps, 120) : 0;
+    const target = cap > 0 ? Math.max(20, Math.round(cap * 0.9)) : ADAPTIVE_RULE.target;
+    const rule = target === ADAPTIVE_RULE.target ? ADAPTIVE_RULE : { ...ADAPTIVE_RULE, target };
+    this.adapt = adaptiveStep(this.adapt, this.fps, settings.renderScale, rule);
+    this.r.setAdaptiveScale(this.adapt.scale);
   }
 
   private combatUntil = 0;
@@ -1040,6 +1063,7 @@ export class GameClient {
       `transport  ${this.session.transport.kind}${this.fellBack ? ' (fallback)' : ''}`,
       `rtt        ${Math.round(this.session.rtt * 1000)} ms`,
       `fps        ${Math.round(this.fps)}`,
+      `render     ${Math.round(settings.renderScale * this.adapt.scale * 100)}%${this.adapt.scale < 0.995 ? ' (adaptive)' : ''}`,
       `snapshots  ${this.session.snapsIn}`,
       `in / out   ${(this.session.bytesIn / 1024).toFixed(0)} / ${(this.session.bytesOut / 1024).toFixed(0)} KB`,
       `corrections ${this.pred.corrections}`,
@@ -1064,7 +1088,9 @@ export class GameClient {
   dispose() {
     this.disposed = true;
     cancelAnimationFrame(this.raf);
+    this.view.onSkyEnv = null;
     this.view.dispose();
+    this.r.setSkyEnvironment(null);
     this.textures?.dispose();
     this.r.scene.remove(this.fx.group);
     this.fx.clear();

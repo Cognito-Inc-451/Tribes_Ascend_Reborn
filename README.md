@@ -47,6 +47,9 @@ To close, close the tab and the command prompt window (or press CTRL+C in it).
 To run the game again, "npm start" or "npm run play"
 
 If later there is an update on github, you can just type "git pull" from with the Tribes_Ascend_Reborn folder to update
+also run "npm run ta-import -- --all" again as it may also have been updated
+
+An installer / updater should automate all this soon
 ```
 
 ## Features

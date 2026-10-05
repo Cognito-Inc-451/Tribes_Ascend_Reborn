@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import { settings } from '../settings.js';
 
 /** Decodes the importer's ATX container (DXT1/3/5 or RGBA mip chains). */
-interface Atx { format: number; packed: boolean; mips: { w: number; h: number; data: Uint8Array<ArrayBuffer> }[] }
+export interface Atx { format: number; packed: boolean; mips: { w: number; h: number; data: Uint8Array<ArrayBuffer> }[] }
 
-function parseAtx(buf: ArrayBuffer): Atx | null {
+export function parseAtx(buf: ArrayBuffer): Atx | null {
   const v = new DataView(buf);
   if (buf.byteLength < 8 || v.getUint32(0, false) !== 0x41545831) return null;
   const format = v.getUint8(4), n = v.getUint8(5), packed = v.getUint8(6) === 1;
@@ -68,6 +68,29 @@ function decodeDxt(m: { w: number; h: number; data: Uint8Array }, format: number
   return out;
 }
 
+export interface MipLevel { data: Uint8Array<ArrayBuffer>; width: number; height: number }
+
+/**
+ * Rebuilds the exact WebGL mip chain (down to 1x1) from a cooked ATX chain.
+ * UE3 cooks every level below 4x4 as a 4x4 block, so the missing tail is
+ * re-sliced from the last cooked mip (its leading bytes are the top-left
+ * quadrant in block order). `complete` is false when the source chain is
+ * truncated so far that the tail cannot be re-sliced at all.
+ */
+export function buildMipChain(mips: { w: number, h: number, data: Uint8Array }[], blockBytes: number): { chain: MipLevel[], complete: boolean } {
+  const w0 = mips[0].w, h0 = mips[0].h;
+  const levels = Math.floor(Math.log2(Math.max(w0, h0))) + 1;
+  const chain: MipLevel[] = [];
+  for (let i = 0; i < levels; i++) {
+    const width = Math.max(1, w0 >> i), height = Math.max(1, h0 >> i);
+    const need = Math.ceil(width / 4) * Math.ceil(height / 4) * blockBytes;
+    const src = mips[Math.min(i, mips.length - 1)].data;
+    if (src.length < need) break;
+    chain.push({ data: src.subarray(0, need) as Uint8Array<ArrayBuffer>, width, height });
+  }
+  return { chain, complete: chain.length === levels };
+}
+
 let s3tc: boolean | null = null;
 let maxAniso = 1;
 
@@ -122,22 +145,21 @@ export class TextureStore {
       tex.minFilter = THREE.LinearMipmapLinearFilter;
     } else if (s3tc) {
       const fmt = atx.format === 1 ? THREE.RGB_S3TC_DXT1_Format : atx.format === 2 ? THREE.RGBA_S3TC_DXT3_Format : THREE.RGBA_S3TC_DXT5_Format;
-      // UE3 cooks every level below 4x4 as a 4x4 block; WebGL wants the exact chain down to 1x1.
       const blockBytes = atx.format === 1 ? 8 : 16;
-      const w0 = mips[0].w, h0 = mips[0].h;
-      const levels = Math.floor(Math.log2(Math.max(w0, h0))) + 1;
-      const chain: { data: Uint8Array; width: number; height: number }[] = [];
-      for (let i = 0; i < levels; i++) {
-        const width = Math.max(1, w0 >> i), height = Math.max(1, h0 >> i);
-        const need = Math.ceil(width / 4) * Math.ceil(height / 4) * blockBytes;
-        const src = mips[Math.min(i, mips.length - 1)].data;
-        if (src.length < need) break;
-        chain.push({ data: src.subarray(0, need), width, height });
+      const { chain, complete } = buildMipChain(mips, blockBytes);
+      if (!chain.length) {
+        // Corrupt/truncated source: decode the best mip on the CPU so filtering stays trilinear.
+        tex = new THREE.DataTexture(decodeDxt(mips[0], atx.format), mips[0].w, mips[0].h, THREE.RGBAFormat);
+        tex.generateMipmaps = true;
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+      } else {
+        // Complete chain: upload every level as-is. Truncated chain: upload what we have and let
+        // WebGL2 (texStorage2D + generateMipmap) synthesise the missing tail on the GPU, so the
+        // texture keeps trilinear + anisotropic filtering instead of dropping to LinearFilter.
+        tex = new THREE.CompressedTexture(chain as unknown as ImageData[], mips[0].w, mips[0].h, fmt as THREE.CompressedPixelFormat);
+        tex.minFilter = THREE.LinearMipmapLinearFilter;
+        tex.generateMipmaps = !complete;
       }
-      const complete = chain.length === levels;
-      tex = new THREE.CompressedTexture((complete ? chain : chain.slice(0, 1)) as unknown as ImageData[], w0, h0, fmt as THREE.CompressedPixelFormat);
-      tex.minFilter = complete ? THREE.LinearMipmapLinearFilter : THREE.LinearFilter;
-      tex.generateMipmaps = false;
     } else {
       const m = mips[0];
       tex = new THREE.DataTexture(decodeDxt(m, atx.format), m.w, m.h, THREE.RGBAFormat);

@@ -10,6 +10,8 @@ export interface Settings {
   loggedIn: boolean;
   quality: Quality;
   renderScale: number;
+  /** Let the renderer shrink/raise its own resolution to hold the frame-rate target. */
+  adaptiveResolution: boolean;
   fov: number;
   maxFps: number;
   shadows: boolean;
@@ -90,7 +92,8 @@ export const QUALITY_PRESETS: Record<Quality, Partial<Settings>> = {
     anisotropy: 8, waterQuality: 'high', post: 'light', hdr: true, ao: 'low', godrays: true, volumetricFog: true, ssr: false,
   },
   ultra: {
-    renderScale: Math.min(2, window.devicePixelRatio || 1), shadows: true, shadowQuality: 'ultra', bloom: true, antialias: true, viewDistance: 3200, particles: 1.4,
+    // A 2x pixel ratio on a HiDPI panel is a 4x pixel bill for a barely visible gain; 1.5 is the ceiling.
+    renderScale: Math.min(1.5, window.devicePixelRatio || 1), shadows: true, shadowQuality: 'ultra', bloom: true, antialias: true, viewDistance: 3200, particles: 1.4,
     weather: true, textureDetail: 'ultra', anisotropy: 16, waterQuality: 'high', post: 'light', hdr: true, ao: 'high', godrays: true, volumetricFog: true, ssr: true,
   },
 };
@@ -102,32 +105,37 @@ const DEFAULTS: Settings = {
   quality: 'ultra',
   ...(QUALITY_PRESETS.ultra as Required<Pick<Settings, 'renderScale' | 'shadows' | 'shadowQuality' | 'bloom' | 'antialias' | 'viewDistance' | 'particles' | 'weather' | 'textureDetail' | 'anisotropy' | 'waterQuality' | 'post' | 'hdr' | 'ao' | 'godrays' | 'volumetricFog' | 'ssr'>>),
   renderScale: 1,
+  adaptiveResolution: true,
   shadowQuality: 'high',
   viewDistance: 4000,
   particles: 1,
+  // 4x keeps grazing terrain readable at a fraction of the 8x/16x texture-sampling cost.
   anisotropy: 4,
+  // Full post chain on by default: the TA look needs SSAO, SSR and the graded post pass out of the box.
+  ao: 'high',
+  ssr: true,
   post: 'full',
   softShadows: true,
   bakedLighting: true,
-  bloomStrength: 0.7,
-  toneMapping: 'neutral',
+  bloomStrength: 0.95,
+  toneMapping: 'aces',
   dof: false,
-  motionBlur: 0,
-  contrast: 1.06,
-  saturation: 1.08,
-  vibrance: 0.12,
-  temperature: 0,
+  motionBlur: 0.1,
+  contrast: 0.95,
+  saturation: 1.28,
+  vibrance: 1,
+  temperature: 0.56,
   tint: 0,
-  grade: 'ascend',
-  vignette: 0.15,
+  grade: 'vivid',
+  vignette: 0,
   filmGrain: 0.02,
-  chromatic: 0,
-  sharpen: 0.15,
-  brightness: 1.12,
+  chromatic: 0.02,
+  sharpen: 0.02,
+  brightness: 1.2,
   tracers: true,
   minimap: true,
   minimapZoom: 1,
-  fov: 95,
+  fov: 100,
   maxFps: 60,
   sensitivity: 1,
   invertY: false,
@@ -138,7 +146,7 @@ const DEFAULTS: Settings = {
   hudScale: 1,
   showSpeed: true,
   showNetStats: false,
-  defaultsRev: 2,
+  defaultsRev: 5,
   forceDefaultSkins: false,
   masterVolume: 0.8,
   effectsVolume: 0.9,
@@ -153,9 +161,23 @@ const DEFAULTS: Settings = {
 };
 
 const KEY = 'ascend-reborn:settings:v1';
-const DEFAULTS_REV = 2;
+const DEFAULTS_REV = 5;
 const LOOK_KEYS = ['bloomStrength', 'toneMapping', 'motionBlur', 'contrast', 'saturation', 'vibrance', 'temperature', 'tint', 'grade', 'vignette',
   'filmGrain', 'chromatic', 'sharpen', 'brightness', 'crosshairColor', 'crosshairScale'] as const;
+/** Rev 3: quality-per-cost retune of the out-of-the-box defaults. */
+const PERF_KEYS = ['anisotropy', 'ao', 'ssr'] as const;
+/** Rev 4: UE3's grade is soft and hazy - drop the added punch so the new sky, fog and lightmaps read like the original. */
+const GRADE_KEYS = ['bloomStrength', 'contrast', 'saturation', 'vibrance', 'sharpen', 'brightness'] as const;
+/** Rev 5: the tuned in-game look - full post chain, ACES grade and the wide FOV the lighting port was matched against. */
+const TUNED_KEYS = ['anisotropy', 'ao', 'ssr', 'fov', 'bloomStrength', 'toneMapping', 'motionBlur', 'contrast',
+  'saturation', 'vibrance', 'temperature', 'grade', 'vignette', 'chromatic', 'sharpen', 'brightness'] as const;
+/** Applied in order; each revision is only pushed onto saves made before it, so player tweaks survive. */
+const MIGRATIONS: { rev: number, keys: readonly string[] }[] = [
+  { rev: 2, keys: LOOK_KEYS },
+  { rev: 3, keys: PERF_KEYS },
+  { rev: 4, keys: GRADE_KEYS },
+  { rev: 5, keys: TUNED_KEYS },
+];
 
 function load(): Settings {
   try {
@@ -169,11 +191,13 @@ function load(): Settings {
     // Older saves only had an on/off shadow switch.
     if (raw.shadowQuality === undefined && raw.shadows === false) s.shadowQuality = 'off';
     s.shadows = s.shadowQuality !== 'off';
-    // New default look (colour grading, crosshair): applied once to saves made with the previous defaults.
-    if ((raw.defaultsRev ?? 0) < DEFAULTS_REV) {
-      for (const k of LOOK_KEYS) (s as unknown as Record<string, unknown>)[k] = DEFAULTS[k];
-      s.defaultsRev = DEFAULTS_REV;
+    // New defaults are pushed onto saves made before each revision, once, so later player tweaks survive.
+    for (const m of MIGRATIONS) {
+      if ((raw.defaultsRev ?? 0) < m.rev) {
+        for (const k of m.keys) (s as unknown as Record<string, unknown>)[k] = (DEFAULTS as unknown as Record<string, unknown>)[k];
+      }
     }
+    s.defaultsRev = DEFAULTS_REV;
     return s;
   } catch {
     return structuredClone(DEFAULTS);

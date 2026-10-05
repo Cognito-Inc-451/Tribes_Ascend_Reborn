@@ -42,7 +42,7 @@ export function encodeMapData(m: MapData): Uint8Array {
   w.u32(meshes.length);
   for (const me of meshes) {
     const nv = me.positions.length / 3;
-    w.str(me.name).str(me.mat).u8((me.collide ? 1 : 0) | (me.hidden ? 2 : 0) | (me.uvs ? 4 : 0)).u32(nv);
+    w.str(me.name).str(me.mat).u8((me.collide ? 1 : 0) | (me.hidden ? 2 : 0) | (me.uvs ? 4 : 0) | (me.sky ? 8 : 0)).u32(nv);
     for (const v of me.positions) w.f32(v);
     w.u32(me.indices.length);
     if (nv < 65536) for (const i of me.indices) w.u16(i);
@@ -163,6 +163,7 @@ export function decodeMapData(data: Uint8Array): MapData {
   for (let i = 0; i < nMesh; i++) {
     const name = r.str(), mat = r.str(), flags = r.u8(), nv = r.u32();
     const collide = (flags & 1) !== 0, hidden = (flags & 2) !== 0;
+    const sky = (flags & 8) !== 0;
     const positions = new Float32Array(nv * 3);
     for (let k = 0; k < positions.length; k++) positions[k] = r.f32();
     const ni = r.u32();
@@ -174,7 +175,7 @@ export function decodeMapData(data: Uint8Array): MapData {
     const ng = r.u16();
     const groups: NonNullable<MeshAsset['groups']> = [];
     for (let k = 0; k < ng; k++) groups.push({ start: r.u32(), count: r.u32(), tex: r.i32() });
-    meshes.push({ name, mat, collide, hidden: hidden || undefined, positions, indices, uvs, groups: ng ? groups : undefined });
+    meshes.push({ name, mat, collide, hidden: hidden || undefined, sky: sky || undefined, positions, indices, uvs, groups: ng ? groups : undefined });
   }
   const instances: MeshInstance[] = [];
   const nInst = r.u32();

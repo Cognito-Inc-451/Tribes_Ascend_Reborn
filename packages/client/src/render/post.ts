@@ -1,9 +1,11 @@
 import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
-import { UnrealBloomPass } from 'three/examples/jsm/postprocessing/UnrealBloomPass.js';
 
-/** Everything the post chain can do; values come from settings (see Renderer.configure). */
-export interface PostOptions {
+/**
+ * The subset of options that changes the *shape* of the chain (render targets and shader defines).
+ * Everything else is a plain uniform and can be applied to a live pipeline with `update()`.
+ */
+export interface PostStructure {
   hdr: boolean;
   msaa: number;
   bloom: number;          // strength, 0 = off
@@ -12,6 +14,10 @@ export interface PostOptions {
   dof: boolean;
   motionBlur: number;     // shutter fraction, 0 = off
   ssr: boolean;           // screen-space reflections on water
+}
+
+/** Everything the post chain can do; values come from settings (see Renderer.configure). */
+export interface PostOptions extends PostStructure {
   exposure: number;
   contrast: number;
   saturation: number;
@@ -25,6 +31,42 @@ export interface PostOptions {
   grain: number;
   chromatic: number;
   sharpen: number;
+}
+
+/** Stable key for the structural shape of the chain; equal keys mean "no rebuild needed". */
+export function structuralKey(o: PostStructure): string {
+  return [o.hdr ? 1 : 0, o.msaa, o.ao, o.dof ? 1 : 0, o.ssr ? 1 : 0, o.bloom > 0 ? 1 : 0, o.godrays > 0 ? 1 : 0, o.motionBlur > 0 ? 1 : 0].join('|');
+}
+
+/** Buffer sizes for the chain: full / half (AO, DOF) / quarter (god rays, bloom near) / eighth (bloom wide). */
+export function chainSizes(w: number, h: number) {
+  const W = Math.max(1, Math.round(w)), H = Math.max(1, Math.round(h));
+  return {
+    w: W, h: H,
+    hw: Math.max(1, W >> 1), hh: Math.max(1, H >> 1),
+    qw: Math.max(1, W >> 2), qh: Math.max(1, H >> 2),
+    ww: Math.max(1, W >> 3), wh: Math.max(1, H >> 3),
+  };
+}
+
+/**
+ * Bloom response for a given strength. TA's bloom is a soft haze around highlights, not a glow:
+ * a high soft-knee threshold (only real highlights bloom) with a wide, low-intensity spread.
+ */
+export function bloomParams(strength: number): { threshold: number; knee: number; intensity: number } {
+  const s = Math.max(0, Math.min(2, strength));
+  return { threshold: 1.0, knee: 0.8, intensity: s * 0.85 };
+}
+
+/** Simple white balance: warm/cool along blue-amber, tint along green-magenta (multipliers in linear light). */
+export function whiteBalance(temperature: number, tint: number): [number, number, number] {
+  const t = Math.max(-1, Math.min(1, temperature)) * 0.12, g = Math.max(-1, Math.min(1, tint)) * 0.08;
+  return [1 + t + g * 0.5, 1 - g, 1 - t + g * 0.5];
+}
+
+/** Distance haze: how far out the world starts losing saturation and drifting cool (metres). */
+export function hazeParams(): { near: number; far: number; amount: number } {
+  return { near: 120, far: 900, amount: 0.45 };
 }
 
 const VERT = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
@@ -96,7 +138,7 @@ const GOD_MASK_FRAG = `varying vec2 vUv;${CLEAN}
     gl_FragColor = vec4(c * sky * glow, 1.0);
   }`;
 
-/** God rays, step 2: radial blur toward the sun (run twice with different step sizes). */
+/** God rays, step 2: radial blur toward the sun (run three times with shrinking step sizes). */
 const GOD_BLUR_FRAG = `varying vec2 vUv;
   uniform sampler2D tSrc; uniform vec2 uSun; uniform float uStep;
   void main() {
@@ -118,11 +160,15 @@ const DOF_BLUR_FRAG = `varying vec2 vUv;${CLEAN}
     gl_FragColor = vec4(acc / 16.0, 1.0);
   }`;
 
-/** HDR composite: water SSR, ambient occlusion, depth of field and god rays. */
+/**
+ * HDR composite: water SSR, ambient occlusion, depth of field, god rays and the distance haze, in one pass.
+ * The haze (TA's signature) desaturates and cools distant geometry so the world fades into the sky.
+ */
 const COMPOSITE_FRAG = `varying vec2 vUv; ${VIEWPOS}${CLEAN}
   uniform sampler2D tColor; uniform sampler2D tAO; uniform sampler2D tGod; uniform sampler2D tDof;
   uniform mat4 uProj; uniform vec3 uViewUp; uniform float uTime;
   uniform float uAO; uniform vec3 uGod; uniform vec3 uDof; uniform float uSSR;
+  uniform vec3 uHaze;  // x = near m, y = far m, z = amount
   void main() {
     vec4 src = texture2D(tColor, vUv);
     // NaN/Inf pixels would turn into growing black blocks in the bloom mip chain.
@@ -162,17 +208,73 @@ const COMPOSITE_FRAG = `varying vec2 vUv; ${VIEWPOS}${CLEAN}
     #ifdef USE_GOD
     c += clean3(texture2D(tGod, vUv).rgb) * uGod;
     #endif
+    // Distance haze: pull distant pixels toward a desaturated, cool-tinted version of themselves.
+    float hf = smoothstep(uHaze.x, uHaze.y, dist) * step(d, 0.99999) * uHaze.z;
+    float hl = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    vec3 cool = mix(vec3(hl), c, 0.72) * vec3(0.94, 0.985, 1.07);
+    c = mix(c, cool, hf);
     gl_FragColor = vec4(clean3(c), 1.0);
   }`;
 
-/** Display pass: motion blur, chromatic aberration, sharpen, white balance, tone mapping, grade, vignette, grain. */
-const FINAL_FRAG = `varying vec2 vUv;
+/** Bloom, step 1: soft-knee highlight extract, 5-tap downsample from full res into the quarter-res buffer. */
+const BLOOM_BRIGHT_FRAG = `varying vec2 vUv;${CLEAN}
+  uniform sampler2D tColor; uniform vec2 uTexel; uniform float uThreshold; uniform float uKnee;
+  void main() {
+    vec2 t = uTexel * 2.0;
+    vec3 c = clean3(texture2D(tColor, vUv).rgb)
+      + clean3(texture2D(tColor, vUv + vec2(t.x, t.y)).rgb)
+      + clean3(texture2D(tColor, vUv - vec2(t.x, t.y)).rgb)
+      + clean3(texture2D(tColor, vUv + vec2(t.x, -t.y)).rgb)
+      + clean3(texture2D(tColor, vUv - vec2(t.x, -t.y)).rgb);
+    c = min(c / 5.0, vec3(48.0));
+    float l = max(c.r, max(c.g, c.b));
+    float lo = max(uThreshold - uKnee, 0.0), hi = max(uThreshold + uKnee, lo + 1e-4);
+    float k = clamp((l - lo) / (hi - lo), 0.0, 1.0);
+    float w = k * k * clamp((l - uThreshold) / max(l, 1e-4), 0.0, 1.0);
+    gl_FragColor = vec4(max(c * w, vec3(0.0)), 1.0);
+  }`;
+
+/** Separable 9-tap gaussian; `uDir` carries both direction and radius (in source texels). */
+const BLOOM_BLUR_FRAG = `varying vec2 vUv;${CLEAN}
+  uniform sampler2D tSrc; uniform vec2 uDir;
+  void main() {
+    vec3 acc = clean3(texture2D(tSrc, vUv).rgb) * 0.297; float w = 0.297;
+    for (int i = 1; i < 5; i++) {
+      float k = exp(-float(i * i) * 0.35);
+      vec2 d = uDir * float(i);
+      acc += clean3(texture2D(tSrc, vUv + d).rgb) * k + clean3(texture2D(tSrc, vUv - d).rgb) * k;
+      w += 2.0 * k;
+    }
+    gl_FragColor = vec4(acc / w, 1.0);
+  }`;
+
+/** Quarter -> eighth res consolidation (5-tap cross), seeds the wide haze level. */
+const BLOOM_DOWN_FRAG = `varying vec2 vUv;${CLEAN}
+  uniform sampler2D tSrc; uniform vec2 uTexel;
+  void main() {
+    vec2 t = uTexel * 1.5;
+    vec3 c = clean3(texture2D(tSrc, vUv).rgb)
+      + clean3(texture2D(tSrc, vUv + vec2(t.x, 0.0)).rgb)
+      + clean3(texture2D(tSrc, vUv - vec2(t.x, 0.0)).rgb)
+      + clean3(texture2D(tSrc, vUv + vec2(0.0, t.y)).rgb)
+      + clean3(texture2D(tSrc, vUv - vec2(0.0, t.y)).rgb);
+    gl_FragColor = vec4(max(c / 5.0, vec3(0.0)), 1.0);
+  }`;
+
+/**
+ * Display pass: motion blur, chromatic aberration, sharpen, bloom composite, white balance, tone mapping,
+ * grade, vignette, grain. One full-resolution pass; the bloom buffers are sampled here, never composited on GPU.
+ */
+const FINAL_FRAG = `varying vec2 vUv;${CLEAN}
   uniform sampler2D tColor; uniform sampler2D tDepth; uniform vec2 uTexel;
   uniform mat4 uInvViewProj; uniform mat4 uPrevViewProj; uniform float uMotion; uniform float uNearCut;
   uniform float uChromatic; uniform float uSharpen; uniform vec3 uWhite; uniform float uExposure;
   uniform float uContrast; uniform float uSaturation; uniform float uVibrance;
   uniform vec3 uLift; uniform vec3 uGamma; uniform vec3 uGain;
   uniform float uVignette; uniform float uGrain; uniform float uTime;
+  #ifdef USE_BLOOM
+  uniform sampler2D tBloomNear; uniform sampler2D tBloomWide; uniform float uBloom;
+  #endif
   void main() {
     vec2 uv = vUv;
     vec3 c = texture2D(tColor, uv).rgb;
@@ -199,6 +301,11 @@ const FINAL_FRAG = `varying vec2 vUv;
       c.r = mix(c.r, texture2D(tColor, uv + off).r, 0.85);
       c.b = mix(c.b, texture2D(tColor, uv - off).b, 0.85);
     }
+    #ifdef USE_BLOOM
+    // Near level keeps highlight definition, wide level is the soft haze; blend, then add in linear HDR.
+    vec3 bl = mix(clean3(texture2D(tBloomNear, uv).rgb), clean3(texture2D(tBloomWide, uv).rgb), 0.55);
+    c += bl * uBloom;
+    #endif
     c *= uWhite * uExposure;
     gl_FragColor = vec4(c, 1.0);
     #include <tonemapping_fragment>
@@ -223,9 +330,10 @@ function shader(frag: string, uniforms: Record<string, THREE.IUniform>, defines:
 }
 
 /**
- * Custom HDR post chain. One scene render (with depth) feeds depth-only SSAO, screen-space god rays, water SSR,
- * DOF, bloom and camera motion blur; the display pass tone maps and grades. Everything is optional and the
- * expensive buffers run at half or quarter resolution.
+ * Custom HDR post chain. One scene render (with depth) feeds depth-only SSAO, screen-space god rays,
+ * water SSR, DOF and a two-level bloom; a single composite pass folds in the distance haze, and a
+ * single display pass composites the bloom and tone maps/grades. All auxiliary buffers are half,
+ * quarter or eighth resolution, and the chain is rebuilt only when its structural key changes.
  */
 export class PostPipeline {
   private scene: THREE.WebGLRenderTarget;
@@ -235,26 +343,36 @@ export class PostPipeline {
   private godA: THREE.WebGLRenderTarget | null = null;
   private godB: THREE.WebGLRenderTarget | null = null;
   private dofRT: THREE.WebGLRenderTarget | null = null;
-  private bloom: UnrealBloomPass | null = null;
+  private bloomNear: THREE.WebGLRenderTarget | null = null;
+  private bloomNearB: THREE.WebGLRenderTarget | null = null;
+  private bloomWide: THREE.WebGLRenderTarget | null = null;
+  private bloomWideB: THREE.WebGLRenderTarget | null = null;
   private quad = new FullScreenQuad();
   private aoMat: THREE.ShaderMaterial | null = null;
   private aoBlurMat: THREE.ShaderMaterial | null = null;
   private godMaskMat: THREE.ShaderMaterial | null = null;
   private godBlurMat: THREE.ShaderMaterial | null = null;
   private dofMat: THREE.ShaderMaterial | null = null;
+  private bloomBrightMat: THREE.ShaderMaterial | null = null;
+  private bloomBlurMat: THREE.ShaderMaterial | null = null;
+  private bloomDownMat: THREE.ShaderMaterial | null = null;
   private compMat: THREE.ShaderMaterial;
   private finalMat: THREE.ShaderMaterial;
   private prevViewProj = new THREE.Matrix4();
   private hasPrev = false;
   private frame = 0;
-  private w = 1;
-  private h = 1;
+  private sizes = chainSizes(1, 1);
+  private key: string;
+  private sat = 1;
+  private opts: PostOptions;
   /** Sun direction (towards the sun) and whether god rays should show for this map. */
   sunDir = new THREE.Vector3(0, 1, 0);
   /** Depth-of-field focus override in metres (scoped zoom), 0 = automatic far-field blur only. */
   focus = 0;
 
-  constructor(private renderer: THREE.WebGLRenderer, readonly o: PostOptions) {
+  constructor(private renderer: THREE.WebGLRenderer, o: PostOptions) {
+    this.opts = o;
+    this.key = structuralKey(o);
     const type = o.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType;
     this.scene = new THREE.WebGLRenderTarget(1, 1, { type, samples: o.msaa, depthTexture: new THREE.DepthTexture(1, 1, THREE.UnsignedIntType) });
     this.comp = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
@@ -276,46 +394,104 @@ export class PostPipeline {
       this.dofRT = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
       this.dofMat = shader(DOF_BLUR_FRAG, { tColor: { value: this.scene.texture }, uTexel: { value: new THREE.Vector2() } });
     }
+    const bp = bloomParams(o.bloom);
+    if (o.bloom > 0) {
+      this.bloomNear = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
+      this.bloomNearB = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
+      this.bloomWide = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
+      this.bloomWideB = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
+      this.bloomBrightMat = shader(BLOOM_BRIGHT_FRAG, { tColor: { value: this.comp.texture }, uTexel: { value: new THREE.Vector2() }, uThreshold: { value: bp.threshold }, uKnee: { value: bp.knee } });
+      this.bloomBlurMat = shader(BLOOM_BLUR_FRAG, { tSrc: { value: null }, uDir: { value: new THREE.Vector2() } });
+      this.bloomDownMat = shader(BLOOM_DOWN_FRAG, { tSrc: { value: this.bloomNear.texture }, uTexel: { value: new THREE.Vector2() } });
+    }
     const defs: Record<string, string> = {};
     if (o.ao) defs.USE_AO = '';
     if (o.godrays > 0) defs.USE_GOD = '';
     if (o.dof) defs.USE_DOF = '';
     if (o.ssr) defs.USE_SSR = '';
+    const haze = hazeParams();
     this.compMat = shader(COMPOSITE_FRAG, {
       ...common, tColor: { value: this.scene.texture }, tAO: { value: this.aoBlurRT?.texture ?? null }, tGod: { value: this.godB?.texture ?? null },
       tDof: { value: this.dofRT?.texture ?? null }, uProj: { value: new THREE.Matrix4() }, uViewUp: { value: new THREE.Vector3(0, 1, 0) },
       uTime: { value: 0 }, uAO: { value: o.ao === 2 ? 0.85 : 0.7 }, uGod: { value: new THREE.Vector3() }, uDof: { value: new THREE.Vector3(260, 900, 0) }, uSSR: { value: 1 },
+      uHaze: { value: new THREE.Vector3(haze.near, haze.far, haze.amount) },
     }, defs);
-    if (o.bloom > 0) this.bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), o.bloom, 0.4, 0.9);
+    const finalDefs: Record<string, string> = {};
+    if (o.motionBlur > 0) finalDefs.USE_MOTION = '';
+    if (o.bloom > 0) finalDefs.USE_BLOOM = '';
     const white = whiteBalance(o.temperature, o.tint);
     this.finalMat = shader(FINAL_FRAG, {
       tColor: { value: this.comp.texture }, tDepth: { value: this.scene.depthTexture }, uTexel: { value: new THREE.Vector2() },
       uInvViewProj: { value: new THREE.Matrix4() }, uPrevViewProj: { value: new THREE.Matrix4() }, uMotion: { value: 0 }, uNearCut: { value: 1.5 },
-      uChromatic: { value: o.chromatic }, uSharpen: { value: o.sharpen }, uWhite: { value: white }, uExposure: { value: o.exposure },
+      uChromatic: { value: o.chromatic }, uSharpen: { value: o.sharpen }, uWhite: { value: new THREE.Vector3(...white) }, uExposure: { value: o.exposure },
       uContrast: { value: o.contrast }, uSaturation: { value: o.saturation }, uVibrance: { value: o.vibrance },
       uLift: { value: o.lift.clone() }, uGamma: { value: o.gamma.clone() }, uGain: { value: o.gain.clone() },
       uVignette: { value: o.vignette }, uGrain: { value: o.grain }, uTime: { value: 0 },
-    }, o.motionBlur > 0 ? { USE_MOTION: '' } : {}, true);
+      tBloomNear: { value: this.bloomNear?.texture ?? null }, tBloomWide: { value: this.bloomWide?.texture ?? null }, uBloom: { value: bp.intensity },
+    }, finalDefs, true);
+    this.setSize(1, 1);
   }
 
+  /** Structural key of the live pipeline; compare with `structuralKey(options)` to decide on a rebuild. */
+  get structuralKey(): string { return this.key; }
+
   setSize(w: number, h: number) {
-    this.w = Math.max(1, Math.round(w)); this.h = Math.max(1, Math.round(h));
-    const hw = Math.max(1, this.w >> 1), hh = Math.max(1, this.h >> 1), qw = Math.max(1, this.w >> 2), qh = Math.max(1, this.h >> 2);
-    this.scene.setSize(this.w, this.h);
-    this.comp.setSize(this.w, this.h);
-    this.aoRT?.setSize(hw, hh); this.aoBlurRT?.setSize(hw, hh);
-    this.godA?.setSize(qw, qh); this.godB?.setSize(qw, qh);
-    this.dofRT?.setSize(hw, hh);
-    this.bloom?.setSize(this.w, this.h);
-    this.finalMat.uniforms.uTexel.value.set(1 / this.w, 1 / this.h);
-    if (this.aoMat) this.aoMat.uniforms.uTexel.value.set(1 / this.w, 1 / this.h);
-    if (this.aoBlurMat) this.aoBlurMat.uniforms.uTexel.value.set(1 / hw, 1 / hh);
-    if (this.dofMat) this.dofMat.uniforms.uTexel.value.set(1 / hw, 1 / hh);
+    const s = chainSizes(w, h);
+    this.sizes = s;
+    this.scene.setSize(s.w, s.h);
+    this.comp.setSize(s.w, s.h);
+    this.aoRT?.setSize(s.hw, s.hh); this.aoBlurRT?.setSize(s.hw, s.hh);
+    this.godA?.setSize(s.qw, s.qh); this.godB?.setSize(s.qw, s.qh);
+    this.dofRT?.setSize(s.hw, s.hh);
+    this.bloomNear?.setSize(s.qw, s.qh); this.bloomNearB?.setSize(s.qw, s.qh);
+    this.bloomWide?.setSize(s.ww, s.wh); this.bloomWideB?.setSize(s.ww, s.wh);
+    this.finalMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+    if (this.aoMat) this.aoMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+    if (this.aoBlurMat) this.aoBlurMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
+    if (this.dofMat) this.dofMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
+    if (this.bloomBrightMat) this.bloomBrightMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+    if (this.bloomDownMat) this.bloomDownMat.uniforms.uTexel.value.set(1 / s.qw, 1 / s.qh);
     this.hasPrev = false;
   }
 
+  /**
+   * Apply non-structural option changes (every slider) to the live pipeline.
+   * Returns false when the structural key differs and a rebuild is required.
+   */
+  update(o: PostOptions): boolean {
+    const key = structuralKey(o);
+    if (key !== this.key) return false;
+    this.opts = o;
+    const fu = this.finalMat.uniforms;
+    const white = whiteBalance(o.temperature, o.tint);
+    (fu.uWhite.value as THREE.Vector3).set(white[0], white[1], white[2]);
+    fu.uExposure.value = o.exposure;
+    fu.uContrast.value = o.contrast;
+    fu.uSaturation.value = o.saturation * this.sat;
+    fu.uVibrance.value = o.vibrance;
+    fu.uChromatic.value = o.chromatic;
+    fu.uSharpen.value = o.sharpen;
+    fu.uVignette.value = o.vignette;
+    fu.uGrain.value = o.grain;
+    (fu.uLift.value as THREE.Vector3).copy(o.lift);
+    (fu.uGamma.value as THREE.Vector3).copy(o.gamma);
+    (fu.uGain.value as THREE.Vector3).copy(o.gain);
+    if (this.bloomBrightMat && this.bloomNear) {
+      const bp = bloomParams(o.bloom);
+      this.bloomBrightMat.uniforms.uThreshold.value = bp.threshold;
+      this.bloomBrightMat.uniforms.uKnee.value = bp.knee;
+      fu.uBloom.value = bp.intensity;
+    }
+    this.compMat.uniforms.uAO.value = o.ao === 2 ? 0.85 : 0.7;
+    this.compMat.uniforms.uSSR.value = 1;
+    return true;
+  }
+
   /** Greyscale while dead/waiting (TA desaturates the world). */
-  setSaturation(k: number) { this.finalMat.uniforms.uSaturation.value = this.o.saturation * k; }
+  setSaturation(k: number) {
+    this.sat = k;
+    this.finalMat.uniforms.uSaturation.value = this.opts.saturation * k;
+  }
 
   private pass(mat: THREE.ShaderMaterial, target: THREE.WebGLRenderTarget | null) {
     this.quad.material = mat;
@@ -326,6 +502,7 @@ export class PostPipeline {
   render(scene: THREE.Scene, camera: THREE.PerspectiveCamera, dt: number) {
     const r = this.renderer;
     const t = performance.now() / 1000;
+    const s = this.sizes;
     this.frame++;
     camera.updateMatrixWorld();
     const invProj = camera.projectionMatrixInverse;
@@ -347,20 +524,20 @@ export class PostPipeline {
       const fwd = camera.getWorldDirection(_v);
       const facing = fwd.dot(this.sunDir);
       if (facing > 0.05) {
-        const s = _v2.copy(camera.position).addScaledVector(this.sunDir, 2000).project(camera);
-        const sun = new THREE.Vector2(s.x * 0.5 + 0.5, s.y * 0.5 + 0.5);
+        const p = _v2.copy(camera.position).addScaledVector(this.sunDir, 2000).project(camera);
+        const sun = _vz.set(p.x * 0.5 + 0.5, p.y * 0.5 + 0.5);
         this.godMaskMat.uniforms.uSun.value.copy(sun);
-        this.godMaskMat.uniforms.uAspect.value = this.w / this.h;
+        this.godMaskMat.uniforms.uAspect.value = s.w / s.h;
         this.pass(this.godMaskMat, this.godA);
         this.godBlurMat.uniforms.uSun.value.copy(sun);
         this.godBlurMat.uniforms.tSrc.value = this.godA.texture; this.godBlurMat.uniforms.uStep.value = 0.9;
         this.pass(this.godBlurMat, this.godB);
         this.godBlurMat.uniforms.tSrc.value = this.godB.texture; this.godBlurMat.uniforms.uStep.value = 0.35;
         this.pass(this.godBlurMat, this.godA);
-        // Keep the final result in godB for the composite.
+        // Keep the final result in godB, which the composite samples.
         this.godBlurMat.uniforms.tSrc.value = this.godA.texture; this.godBlurMat.uniforms.uStep.value = 0.12;
         this.pass(this.godBlurMat, this.godB);
-        const k = this.o.godrays * THREE.MathUtils.smoothstep(facing, 0.05, 0.6);
+        const k = this.opts.godrays * THREE.MathUtils.smoothstep(facing, 0.05, 0.6);
         god.set(k, k, k);
       }
     }
@@ -373,15 +550,31 @@ export class PostPipeline {
     cu.uTime.value = t;
     (cu.uDof.value as THREE.Vector3).z = this.focus;
     this.pass(this.compMat, this.comp);
-    this.bloom?.render(r, this.comp, this.comp, dt, false);
+
+    // Bloom: quarter-res highlight extract + separable blur, consolidated to eighth res for the wide haze.
+    if (this.bloomBrightMat && this.bloomBlurMat && this.bloomDownMat && this.bloomNear && this.bloomNearB && this.bloomWide && this.bloomWideB) {
+      this.bloomBrightMat.uniforms.tColor.value = this.comp.texture;
+      this.pass(this.bloomBrightMat, this.bloomNear);
+      const dir = this.bloomBlurMat.uniforms.uDir.value as THREE.Vector2;
+      this.bloomBlurMat.uniforms.tSrc.value = this.bloomNear.texture; dir.set(1.4 / s.qw, 0);
+      this.pass(this.bloomBlurMat, this.bloomNearB);
+      this.bloomBlurMat.uniforms.tSrc.value = this.bloomNearB.texture; dir.set(0, 1.4 / s.qh);
+      this.pass(this.bloomBlurMat, this.bloomNear);
+      this.bloomDownMat.uniforms.tSrc.value = this.bloomNear.texture;
+      this.pass(this.bloomDownMat, this.bloomWide);
+      this.bloomBlurMat.uniforms.tSrc.value = this.bloomWide.texture; dir.set(0, 2.6 / s.wh);
+      this.pass(this.bloomBlurMat, this.bloomWideB);
+      this.bloomBlurMat.uniforms.tSrc.value = this.bloomWideB.texture; dir.set(2.6 / s.ww, 0);
+      this.pass(this.bloomBlurMat, this.bloomWide);
+    }
 
     const fu = this.finalMat.uniforms;
     const viewProj = _m.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    if (this.o.motionBlur > 0) {
+    if (this.opts.motionBlur > 0) {
       fu.uInvViewProj.value.copy(viewProj).invert();
       fu.uPrevViewProj.value.copy(this.hasPrev ? this.prevViewProj : viewProj);
       // Shutter as a fraction of a 60 Hz frame, independent of the actual frame rate.
-      fu.uMotion.value = this.o.motionBlur * Math.min(2, (1 / 60) / Math.max(1 / 240, dt));
+      fu.uMotion.value = this.opts.motionBlur * Math.min(2, (1 / 60) / Math.max(1 / 240, dt));
     }
     this.prevViewProj.copy(viewProj);
     this.hasPrev = true;
@@ -390,18 +583,13 @@ export class PostPipeline {
   }
 
   dispose() {
-    for (const rt of [this.scene, this.comp, this.aoRT, this.aoBlurRT, this.godA, this.godB, this.dofRT]) rt?.dispose();
+    for (const rt of [this.scene, this.comp, this.aoRT, this.aoBlurRT, this.godA, this.godB, this.dofRT,
+      this.bloomNear, this.bloomNearB, this.bloomWide, this.bloomWideB]) rt?.dispose();
     this.scene.depthTexture?.dispose();
-    for (const m of [this.aoMat, this.aoBlurMat, this.godMaskMat, this.godBlurMat, this.dofMat, this.compMat, this.finalMat]) m?.dispose();
-    this.bloom?.dispose();
+    for (const m of [this.aoMat, this.aoBlurMat, this.godMaskMat, this.godBlurMat, this.dofMat,
+      this.bloomBrightMat, this.bloomBlurMat, this.bloomDownMat, this.compMat, this.finalMat]) m?.dispose();
     this.quad.dispose();
   }
 }
 
-const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _m = new THREE.Matrix4();
-
-/** Simple white balance: warm/cool along blue-amber, tint along green-magenta (multipliers in linear light). */
-function whiteBalance(temperature: number, tint: number): THREE.Vector3 {
-  const t = THREE.MathUtils.clamp(temperature, -1, 1) * 0.12, g = THREE.MathUtils.clamp(tint, -1, 1) * 0.08;
-  return new THREE.Vector3(1 + t + g * 0.5, 1 - g, 1 - t + g * 0.5);
-}
+const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _vz = new THREE.Vector2(), _m = new THREE.Matrix4();
