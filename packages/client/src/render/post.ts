@@ -11,7 +11,7 @@ export interface PostStructure {
   bloom: number;          // strength, 0 = off
   ao: 0 | 1 | 2;          // off / SSAO 8 taps / SSAO 16 taps
   godrays: number;        // intensity, 0 = off
-  dof: boolean;
+  dof: number;            // strength, 0 = off
   motionBlur: number;     // shutter fraction, 0 = off
   ssr: boolean;           // screen-space reflections on water
 }
@@ -35,7 +35,7 @@ export interface PostOptions extends PostStructure {
 
 /** Stable key for the structural shape of the chain; equal keys mean "no rebuild needed". */
 export function structuralKey(o: PostStructure): string {
-  return [o.hdr ? 1 : 0, o.msaa, o.ao, o.dof ? 1 : 0, o.ssr ? 1 : 0, o.bloom > 0 ? 1 : 0, o.godrays > 0 ? 1 : 0, o.motionBlur > 0 ? 1 : 0].join('|');
+  return [o.hdr ? 1 : 0, o.msaa, o.ao, o.dof > 0 ? 1 : 0, o.ssr ? 1 : 0, o.bloom > 0 ? 1 : 0, o.godrays > 0 ? 1 : 0, o.motionBlur > 0 ? 1 : 0].join('|');
 }
 
 /** Buffer sizes for the chain: full / half (AO, DOF) / quarter (god rays, bloom near) / eighth (bloom wide). */
@@ -53,9 +53,13 @@ export function chainSizes(w: number, h: number) {
  * Bloom response for a given strength. TA's bloom is a soft haze around highlights, not a glow:
  * a high soft-knee threshold (only real highlights bloom) with a wide, low-intensity spread.
  */
-export function bloomParams(strength: number): { threshold: number; knee: number; intensity: number } {
+export function bloomParams(strength: number, hdr = true): { threshold: number; knee: number; intensity: number } {
   const s = Math.max(0, Math.min(2, strength));
-  return { threshold: 1.0, knee: 0.8, intensity: s * 0.85 };
+  /* 8-bit linear targets clip at 1.0, so the knee/threshold must sit below the ceiling
+     or nothing passes the bright-pass and bloom silently disappears. */
+  return hdr
+    ? { threshold: 1.0, knee: 0.8, intensity: s * 0.85 }
+    : { threshold: 0.72, knee: 0.25, intensity: s * 0.95 };
 }
 
 /** Simple white balance: warm/cool along blue-amber, tint along green-magenta (multipliers in linear light). */
@@ -168,6 +172,7 @@ const COMPOSITE_FRAG = `varying vec2 vUv; ${VIEWPOS}${CLEAN}
   uniform sampler2D tColor; uniform sampler2D tAO; uniform sampler2D tGod; uniform sampler2D tDof;
   uniform mat4 uProj; uniform vec3 uViewUp; uniform float uTime;
   uniform float uAO; uniform vec3 uGod; uniform vec3 uDof; uniform float uSSR;
+  uniform float uDofAmt;    // 0..1 depth-of-field strength from the slider
   uniform vec3 uHaze;  // x = near m, y = far m, z = amount
   void main() {
     vec4 src = texture2D(tColor, vUv);
@@ -202,7 +207,7 @@ const COMPOSITE_FRAG = `varying vec2 vUv; ${VIEWPOS}${CLEAN}
     c *= mix(1.0, ao, uAO * (1.0 - smoothstep(70.0, 150.0, dist)) * step(d, 0.99999));
     #endif
     #ifdef USE_DOF
-    float coc = smoothstep(uDof.x, uDof.x + uDof.y, dist) + (uDof.z > 0.0 ? 1.0 - smoothstep(uDof.z * 0.35, uDof.z * 0.8, dist) : 0.0);
+    float coc = (smoothstep(uDof.x, uDof.x + uDof.y, dist) + (uDof.z > 0.0 ? 1.0 - smoothstep(uDof.z * 0.35, uDof.z * 0.8, dist) : 0.0)) * uDofAmt;
     c = mix(c, clean3(texture2D(tDof, vUv).rgb), clamp(coc, 0.0, 1.0) * step(1.2, dist));
     #endif
     #ifdef USE_GOD
@@ -373,10 +378,14 @@ export class PostPipeline {
   constructor(private renderer: THREE.WebGLRenderer, o: PostOptions) {
     this.opts = o;
     this.key = structuralKey(o);
+    /* HDR off only narrows the chain to 8-bit; the targets stay *linear* in both modes.
+       three.js writes raw linear values into render targets (it never sRGB-encodes them),
+       and an sRGB-flagged 8-bit target uploads as SRGB8_ALPHA8, which *decodes* on every
+       sample: midtones get squared, anything above 1 is already clipped, water collapses
+       to black and players go dark. The final pass is the sole tone-mapper/encoder. */
     const type = o.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType;
     this.scene = new THREE.WebGLRenderTarget(1, 1, { type, samples: o.msaa, depthTexture: new THREE.DepthTexture(1, 1, THREE.UnsignedIntType) });
     this.comp = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
-    if (!o.hdr) this.scene.texture.colorSpace = this.comp.texture.colorSpace = THREE.SRGBColorSpace;
     const common = { tDepth: { value: this.scene.depthTexture }, uInvProj: { value: new THREE.Matrix4() } };
     if (o.ao) {
       this.aoRT = new THREE.WebGLRenderTarget(1, 1, { depthBuffer: false });
@@ -390,11 +399,11 @@ export class PostPipeline {
       this.godMaskMat = shader(GOD_MASK_FRAG, { tColor: { value: this.scene.texture }, tDepth: { value: this.scene.depthTexture }, uSun: { value: new THREE.Vector2() }, uAspect: { value: 1 } });
       this.godBlurMat = shader(GOD_BLUR_FRAG, { tSrc: { value: null }, uSun: { value: new THREE.Vector2() }, uStep: { value: 1 } });
     }
-    if (o.dof) {
+    if (o.dof > 0) {
       this.dofRT = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
       this.dofMat = shader(DOF_BLUR_FRAG, { tColor: { value: this.scene.texture }, uTexel: { value: new THREE.Vector2() } });
     }
-    const bp = bloomParams(o.bloom);
+    const bp = bloomParams(o.bloom, o.hdr);
     if (o.bloom > 0) {
       this.bloomNear = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
       this.bloomNearB = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
@@ -407,13 +416,13 @@ export class PostPipeline {
     const defs: Record<string, string> = {};
     if (o.ao) defs.USE_AO = '';
     if (o.godrays > 0) defs.USE_GOD = '';
-    if (o.dof) defs.USE_DOF = '';
+    if (o.dof > 0) defs.USE_DOF = '';
     if (o.ssr) defs.USE_SSR = '';
     const haze = hazeParams();
     this.compMat = shader(COMPOSITE_FRAG, {
       ...common, tColor: { value: this.scene.texture }, tAO: { value: this.aoBlurRT?.texture ?? null }, tGod: { value: this.godB?.texture ?? null },
       tDof: { value: this.dofRT?.texture ?? null }, uProj: { value: new THREE.Matrix4() }, uViewUp: { value: new THREE.Vector3(0, 1, 0) },
-      uTime: { value: 0 }, uAO: { value: o.ao === 2 ? 0.85 : 0.7 }, uGod: { value: new THREE.Vector3() }, uDof: { value: new THREE.Vector3(260, 900, 0) }, uSSR: { value: 1 },
+      uTime: { value: 0 }, uAO: { value: o.ao === 2 ? 0.85 : 0.7 }, uGod: { value: new THREE.Vector3() }, uDof: { value: new THREE.Vector3(260 - 170 * Math.min(1, o.dof), 900 - 500 * Math.min(1, o.dof), 0) }, uDofAmt: { value: Math.min(1, o.dof) }, uSSR: { value: 1 },
       uHaze: { value: new THREE.Vector3(haze.near, haze.far, haze.amount) },
     }, defs);
     const finalDefs: Record<string, string> = {};
@@ -477,13 +486,17 @@ export class PostPipeline {
     (fu.uGamma.value as THREE.Vector3).copy(o.gamma);
     (fu.uGain.value as THREE.Vector3).copy(o.gain);
     if (this.bloomBrightMat && this.bloomNear) {
-      const bp = bloomParams(o.bloom);
+      const bp = bloomParams(o.bloom, this.opts.hdr);
       this.bloomBrightMat.uniforms.uThreshold.value = bp.threshold;
       this.bloomBrightMat.uniforms.uKnee.value = bp.knee;
       fu.uBloom.value = bp.intensity;
     }
     this.compMat.uniforms.uAO.value = o.ao === 2 ? 0.85 : 0.7;
     this.compMat.uniforms.uSSR.value = 1;
+    // DOF strength: higher values focus closer and blur harder. 0 = off (chain rebuilt without USE_DOF).
+    const dof = Math.min(1, Math.max(0, o.dof));
+    this.compMat.uniforms.uDofAmt.value = dof;
+    (this.compMat.uniforms.uDof.value as THREE.Vector3).set(260 - 170 * dof, 900 - 500 * dof, this.focus);
     return true;
   }
 

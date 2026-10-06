@@ -206,6 +206,8 @@ export function skinMaterial(skin: ArmorSkin): THREE.MeshStandardMaterial {
     map: patternTexture(skin.pattern, skin.base, skin.secondary, skin.patternScale, skin.id.length),
     roughness: skin.material === 'metal' ? 0.45 : skin.material === 'weathered' ? 0.8 : 0.7,
     metalness: skin.material === 'metal' ? 0.55 : 0.15,
+    // The sky IBL is the only ambient on players; skins sit a touch above 1 so shade isn't flat.
+    envMapIntensity: skin.material === 'metal' ? 1.35 : 1.2,
   });
   m.userData[SHARED] = true;
   skinCache.set(skin.id, m);

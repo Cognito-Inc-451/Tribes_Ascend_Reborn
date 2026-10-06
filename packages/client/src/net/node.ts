@@ -22,6 +22,32 @@ export async function fetchPeers(): Promise<{ servers: BrowserServer[]; stats: D
   }
 }
 
+/** A game running on this PC, from the node's point of view. */
+export interface HostedGame { id: string; name: string; humans: number; port: number }
+
+/** Games hosted from this PC right now (empty list when the node is unreachable). */
+export async function fetchHosted(): Promise<HostedGame[]> {
+  try {
+    const r = await fetch(`${NODE_URL}/hosted`, { cache: 'no-store', signal: AbortSignal.timeout(2500) });
+    if (!r.ok) return [];
+    const j = (await r.json()) as { games?: HostedGame[] };
+    return j.games ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Ask the node to shut a hosted game down; returns an error message, or '' on success. */
+export async function closeHosted(id: string): Promise<string> {
+  try {
+    const r = await fetch(`${NODE_URL}/hosted-close`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ id }), signal: AbortSignal.timeout(10000) });
+    const res = (await r.json().catch(() => ({}))) as { error?: string };
+    return r.ok ? '' : (res.error ?? `HTTP ${r.status}`);
+  } catch (e) {
+    return String((e as Error).message ?? e);
+  }
+}
+
 export interface VoiceManifest { packs: { id: string; name: string; lines: string[] }[]; announcer: string[]; music?: string[]; sfx?: Record<string, number> }
 let manifest: Promise<VoiceManifest | null> | null = null;
 export function voiceManifest(): Promise<VoiceManifest | null> {

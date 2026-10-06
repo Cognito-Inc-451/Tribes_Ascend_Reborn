@@ -1,10 +1,11 @@
 import {
-  ACTION_LABELS, ARMOR_BLURB, BANNERS, CLASSES, EMBLEMS, ITEMS, JET_TRAILS, LAYOUT_BY_ID, MODES, NAMEPLATES, PERKS, PERKS_A, PERKS_B,
-  PROTOCOL_VERSION, randomTip, WEAPON_FINISHES, validateLoadout, type Action, type GameOptions, type Loadout, type ModeId, type ServerInfo,
+  ACTION_LABELS, ARMOR_BLURB, BANNERS, CLASSES, EMBLEMS, ITEMS, JET_STYLES, JET_STYLE_IDS, JET_TRAILS, LAYOUT_BY_ID, MODES, NAMEPLATES, PERKS, PERKS_A, PERKS_B,
+  PROTOCOL_VERSION, randomTip, WEAPON_FINISHES, jetStyleFor, validateLoadout,
+  type Action, type GameOptions, type JetStyle, type Loadout, type ModeId, type ServerInfo,
 } from '@ar/shared';
 import { audio } from '../audio/audio.js';
 import type { Input } from '../input/input.js';
-import { fetchPeers, NODE_URL, type BrowserServer, type DiscoveryStats } from '../net/node.js';
+import { closeHosted, fetchHosted, fetchPeers, NODE_URL, type BrowserServer, type DiscoveryStats, type HostedGame } from '../net/node.js';
 import { social, type ChatMsg } from '../net/social.js';
 import { loadStats, resetStats } from '../game/stats.js';
 import { expectedTransport, browserSupportsWebTransport } from '../net/transport.js';
@@ -31,7 +32,7 @@ function keyHint(key: string, label: string, fn: () => void): HTMLElement {
 
 export function rulesText(o: GameOptions): string {
   const r: string[] = [];
-  if (o.botsPerTeam !== undefined) r.push(`${o.botsPerTeam} bots per team (${o.botDifficulty ?? 'adept'})`);
+  if (o.botsPerTeam !== undefined) r.push(`${o.botsPerTeam} bots per team (${o.botDifficulty ?? 'recruit'})`);
   if (o.infiniteAmmo) r.push('Infinite ammo');
   if (o.infiniteEnergy) r.push('Infinite energy');
   if (o.noFallDamage) r.push('No fall damage');
@@ -246,7 +247,7 @@ export class Menus {
 
   // ---------------- host game
   private hostCfg: { mode: ModeId; map: string; source: 'original' | 'reborn'; options: Required<Omit<GameOptions, 'timeLimit' | 'scoreLimit'>> & { timeLimit: number; scoreLimit: number } } = {
-    mode: 'ctf', map: '', source: 'original', options: { botsPerTeam: 10, botDifficulty: 'adept', infiniteAmmo: false, infiniteEnergy: false, noFallDamage: false, infiniteCallIns: false, vehicles: true, creditMultiplier: 1, gravity: 1, timeLimit: -1, scoreLimit: -1 },
+    mode: 'ctf', map: '', source: 'original', options: { botsPerTeam: 10, botDifficulty: 'recruit', infiniteAmmo: false, infiniteEnergy: false, noFallDamage: false, infiniteCallIns: false, vehicles: true, creditMultiplier: 1, gravity: 1, timeLimit: -1, scoreLimit: -1 },
   };
   private mapList: { id: string; name: string; mode: string }[] | null = null;
 
@@ -306,11 +307,47 @@ export class Menus {
   private hasOriginal() { return (this.mapList ?? []).some((m) => m.mode === this.hostCfg.mode); }
 
   private launching = false;
+
+  /** Modal asking whether to shut down this PC's empty games before launching a new one. */
+  private askCloseEmpty(games: HostedGame[]): Promise<'close' | 'keep' | 'cancel'> {
+    return new Promise((resolve) => {
+      const done = (r: 'close' | 'keep' | 'cancel') => {
+        overlay.remove();
+        window.removeEventListener('keydown', onKey, true);
+        resolve(r);
+      };
+      const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); done('cancel'); } };
+      const overlay = h('div', { style: 'position:fixed;inset:0;z-index:40;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.62)' },
+        h('div', { class: 'ta-window', style: 'width:min(620px,92vw)' },
+          h('div', { class: 'ta-window-head' }, 'GAMES ON THIS PC', h('span', { class: 'hint' }, `${games.length} empty \u00b7 no players`)),
+          h('div', { class: 'ta-detail' },
+            h('p', null, 'These games on this PC have nobody in them. Each one keeps a port and a running game loop alive.'),
+            h('ul', { class: 'ta-rules' }, games.map((g) => h('li', null, `${g.name} \u00b7 port ${g.port}`)))),
+          h('div', { class: 'ta-window-foot' }, h('span', null, 'Esc to cancel'),
+            h('span', null,
+              h('button', { class: 'ta-mini', onclick: () => done('cancel') }, 'CANCEL'), ' ',
+              h('button', { class: 'ta-mini', onclick: () => done('keep') }, 'KEEP THEM'), ' ',
+              h('button', { class: 'ta-submit', style: 'padding:.45em 1.1em', onclick: () => done('close') }, `CLOSE ${games.length} AND LAUNCH`)))));
+      this.ui.append(overlay);
+      window.addEventListener('keydown', onKey, true);
+    });
+  }
+
   private async launch() {
     if (this.launching) return;
     this.launching = true;
     const c = this.hostCfg, o = c.options;
     const maps = this.hostMaps();
+    // Launching a 2nd game from this PC is a good moment to shut down any empty ones.
+    const empty = (await fetchHosted()).filter((g) => g.humans === 0);
+    if (empty.length) {
+      const ask = await this.askCloseEmpty(empty);
+      if (ask === 'cancel') { this.launching = false; return; }
+      if (ask === 'close') {
+        const errs = (await Promise.all(empty.map((g) => closeHosted(g.id)))).filter(Boolean);
+        this.toast(errs.length ? `Closed ${empty.length - errs.length} game(s) \u00b7 ${errs[0]}` : `Closed ${empty.length} empty game(s)`);
+      }
+    }
     const body = {
       name: `${settings.name}'s ${MODES[c.mode].name}`, mode: c.mode, maxPlayers: 32,
       maps: c.map ? [c.map] : maps.map((m) => m.id).slice(0, 16),
@@ -507,8 +544,14 @@ export class Menus {
         onclick: () => { (c[key] as string) = x.id; saveSettings(); this.showLoadout(clsId, 'more'); },
       }, swatch ? h('span', { style: `display:inline-block;width:10px;height:10px;margin-right:6px;background:${swatch(x)}` }) : null, x.name))));
     const hex = (n: number) => `#${n.toString(16).padStart(6, '0')}`;
+    const jet = settings.jetStyles;
+    const jetPick = h('select', { onchange: (e: Event) => { jet[clsId] = (e.target as HTMLSelectElement).value as JetStyle; saveSettings(); } },
+      JET_STYLE_IDS.map((id) => h('option', { value: id, selected: jetStyleFor(jet, clsId) === id }, JET_STYLES[id].name)));
     return h('div', null,
-      pick('WEAPON FINISH', WEAPON_FINISHES, 'weaponFinish', (w) => hex(w.tint)), pick('JET TRAIL', JET_TRAILS, 'jetTrail'), pick('EMBLEM', EMBLEMS, 'emblem'),
+      pick('WEAPON FINISH', WEAPON_FINISHES, 'weaponFinish', (w) => hex(w.tint)), pick('JET TRAIL', JET_TRAILS, 'jetTrail'),
+      h('div', { class: 'slot-row' }, h('div', { class: 'ta-label' }, 'JETPACK PLUME'), h('div', { class: 'opts' }, jetPick,
+        h('div', { class: 'opt', onclick: () => { delete jet[clsId]; saveSettings(); this.showLoadout(clsId, 'more'); } }, 'Class default'))),
+      pick('EMBLEM', EMBLEMS, 'emblem'),
       pick('NAMEPLATE', NAMEPLATES, 'nameplate'), pick('BANNER', BANNERS, 'banner', (b) => hex(b.from)));
   }
 
@@ -573,7 +616,7 @@ export class Menus {
       row('Tone Mapping', select('toneMapping', [['aces', 'ACES Filmic'], ['agx', 'AgX'], ['neutral', 'Khronos Neutral'], ['cineon', 'Cineon']], gfx));
       row('Bloom', check('bloom', needsPost));
       row('Bloom Intensity', range('bloomStrength', 0.1, 1.5, 0.05, (v) => v.toFixed(2), needsPost));
-      row('Depth of Field', check('dof', needsPost));
+      row('Depth of Field', range('dof', 0, 1, 0.05, (v) => (v ? `${pct(v)} (focus ${Math.round(260 - 170 * v)} m)` : 'Off'), needsPost));
       row('Motion Blur', range('motionBlur', 0, 1, 0.05, (v) => (v ? pct(v) : 'Off'), needsPost));
 
       head('COLOR');

@@ -4,7 +4,7 @@ import { settings } from '../settings.js';
 import { FOG_UNIFORMS, withFog } from './fog.js';
 import { forceFieldMaterial, forceFieldTime } from './forcefield.js';
 import { beamMaterial, BEAM_MESH, coneAxis, disposeBeams } from './beams.js';
-import { disposeLiquids, lavaMaterial, waterMaterial } from './liquids.js';
+import { disposeLiquids, lavaMaterial, refreshWaterEnv, waterMaterial } from './liquids.js';
 import { matFor, surfaceMaterial } from './materials.js';
 import { NORMAL_STRENGTH } from './models.js';
 import { SHADOW_RES } from './renderer.js';
@@ -205,6 +205,7 @@ export class WorldView {
   onSkyEnv: ((tex: THREE.Texture | null) => void) | null = null;
   private shadowSnap = new THREE.Vector3(NaN, NaN, NaN);
   private shadowIdle = 0;
+  private lastShadowFocus = new THREE.Vector3(NaN, NaN, NaN);
   /** Map force-field instances by blocker index, so they can drop with their generator. */
   private blockerSlots: { im: THREE.InstancedMesh; k: number; m: THREE.Matrix4; up: boolean }[] = [];
   /** Instanced groups culled per instance by the view-distance setting. */
@@ -348,13 +349,23 @@ export class WorldView {
     // wasting depth precision (shadow acne / peter-panning) for nothing.
     c.near = 1; c.far = ext * 2 + SHADOW_HEADROOM;
     c.updateProjectionMatrix();
-    this.sun.shadow.bias = -0.0004;
-    this.sun.shadow.normalBias = 0.6;
+    // Positive tolerance of ~1 shadow texel at every quality level (texel / (far - near) is ~0.0004 for the
+    // extents below): a fragment must be a full texel behind the recorded depth to count as shadowed. The sign
+    // matters - a negative bias puts light-facing surfaces on the acne cliff, where one texel of depth noise
+    // flips a face from lit to fully shadowed.
+    this.sun.shadow.bias = 0.0004;
+    // 0.6 metres of normal bias (what it used to be) slides a skinned actor's own shadow off its body and
+    // back on again as the skeleton moves - the whole roster darkens at once, which is the "players flash
+    // black" report. A bias of a few centimetres is enough to beat acne at this texel size.
+    this.sun.shadow.normalBias = 0.05;
     this.sun.shadow.radius = settings.softShadows ? 2.5 : 1;
-    // UE3-style shadows keep sky/bounce light: a shadowed surface loses ~45% of direct sun, not all of it.
-    this.sun.shadow.intensity = 0.55;
-    // Shadows are re-rendered on demand (see update()): static world geometry dominates the scene, so
-    // refreshing the map every frame was pure waste.
+    // UE3-style shadows keep sky/bounce light: `shadow.intensity` is how much of the *direct* sun a shadowed
+    // surface loses (three: mix(1.0, shadow, intensity)), so a lower number lifts everything in shadow. 0.5
+    // matches the original's soft outdoor shading and keeps a shadowed player readable instead of black.
+    this.sun.shadow.intensity = 0.5;
+    // Shadows refresh on demand (see update()): static world geometry dominates the scene, so refreshing the
+    // map every frame was pure waste. The map is only valid for the frustum position it was rendered from, so
+    // update() must refresh on every frame where actors are visible - a stale map is a scene-wide darkening.
     if (this.renderer) this.renderer.shadowMap.autoUpdate = false;
   }
 
@@ -447,11 +458,18 @@ export class WorldView {
       mat.needsUpdate = true;
       this.skyDomeTex = tx;
       // The painted sky is the scene's ambient light source: rebake the IBL now that the art is in.
+      // Bake the new environment *before* dropping the old one: buildSkyEnv() disposes the previous
+      // render target, so a failed bake (it returns null) must leave the current environment untouched
+      // rather than handing the renderer a null env - that is what made players flash dark mid-match.
+      // Cached water materials keep a reference to the old texture too, so repoint them at the new one
+      // in the same synchronous step; a water shader sampling a disposed texture renders black.
       if (this.renderer) {
-        this.skyDomeEnv?.dispose();
-        this.skyDomeEnv = null;
-        this.skyEnv = this.buildSkyEnv();
-        this.onSkyEnv?.(this.skyEnv);
+        const next = this.buildSkyEnv();
+        if (next) {
+          this.skyEnv = next;
+          refreshWaterEnv(next);
+          this.onSkyEnv?.(next);
+        }
       }
     });
     return m;
@@ -998,7 +1016,18 @@ if ( aShelter > 0.5 ) transformed.y = -1e5;`);
       } else if (++this.shadowIdle >= SHADOW_IDLE_FRAMES) {
         this.shadowIdle = 0; // nothing moved: refresh moving actors' shadows at ~15 Hz instead of every frame
       }
-      this.renderer.shadowMap.needsUpdate = moved || this.shadowIdle === 0;
+      // A shadow map is the only depth record of every caster, so a stale map is wrong for everything that
+      // moved since the last render: a player walking away from the light ends up *behind* their own recorded
+      // depth and is judged fully in shadow - the whole body goes black, then pops back when the map catches
+      // up. Refresh whenever the view focus moves (the player and their neighbours are in motion) and keep a
+      // 15 Hz cadence for the static-view case, where only bots are moving.
+      const focusMoved = !this.lastShadowFocus.equals(focus);
+      if (focusMoved) this.lastShadowFocus.copy(focus);
+      // Texel-snapping only hides the *shadow* swim; it does not stop the casters moving. Snap the view focus to
+      // the same grid and a walking player is a no-op, so a refresh gated on focus movement never fired and the
+      // map stayed stale - every actor that moved since the last refresh read as fully shadowed, which is the
+      // "all players go black at once, then pop back" flicker. Refresh every frame the map is in use.
+      this.renderer.shadowMap.needsUpdate = true;
     }
     // View-distance culling: throttled (every CULL_INTERVAL frames, on camera movement, or when
     // settings changed). Allocation-free in steady state.

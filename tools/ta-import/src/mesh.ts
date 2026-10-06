@@ -16,27 +16,53 @@ function halfToFloat(h: number): number {
 }
 
 /**
- * LOD0 Elements end right before the position buffer: count, then per element
- * Material, 3 bools, FirstIndex, NumTriangles, MinVertex, MaxVertex, MaterialIndex, Fragments[], u8.
+ * LOD0 Elements sit right before the position buffer as: element count, then each element
+ * (Material, 3 bools, FirstIndex, NumTriangles, MinVertex, MaxVertex, MaterialIndex, Fragments[], u8).
+ * Only the count header precedes the whole chain, so the chain is recovered from its tail: the last
+ * element ends at `end`, and walking back over records of size 40 + Fragments*8 + 1 stops when the int32
+ * before a record equals the elements collected so far - that int32 is the chain's count header.
+ * Scanning forward from a guessed offset only ever finds a tail slice, which is why roofs/bridges lost geometry.
  */
 function findSections(view: DataView, end: number, nIdx: number): MeshSection[] {
-  for (let o = end - 45; o >= Math.max(0, end - 6000); o--) {
-    const c = view.getInt32(o, true);
-    if (c < 1 || c > 64) continue;
-    let p = o + 4;
-    const out: MeshSection[] = [];
-    let ok = true;
-    for (let i = 0; i < c && ok; i++) {
-      if (p + 41 > end) { ok = false; break; }
-      const mat = view.getInt32(p, true);
-      const b1 = view.getInt32(p + 4, true), b2 = view.getInt32(p + 8, true), b3 = view.getInt32(p + 12, true);
-      const first = view.getInt32(p + 16, true), tris = view.getInt32(p + 20, true);
-      const frags = view.getInt32(p + 36, true);
-      if (b1 > 1 || b2 > 1 || b3 > 1 || b1 < 0 || b2 < 0 || b3 < 0 || first < 0 || tris < 0 || first + tris * 3 > nIdx || frags < 0 || frags > 64) { ok = false; break; }
-      out.push({ material: mat, firstIndex: first, numTriangles: tris });
-      p += 40 + frags * 8 + 1;
+  const valid = (p: number) => {
+    if (p < 4 || p + 41 > end) return null;
+    const mat = view.getInt32(p, true);
+    const b1 = view.getInt32(p + 4, true), b2 = view.getInt32(p + 8, true), b3 = view.getInt32(p + 12, true);
+    const first = view.getInt32(p + 16, true), tris = view.getInt32(p + 20, true);
+    const frags = view.getInt32(p + 36, true);
+    if (b1 > 1 || b2 > 1 || b3 > 1 || b1 < 0 || b2 < 0 || b3 < 0 || first < 0 || tris < 0 || first + tris * 3 > nIdx || frags < 0 || frags > 64) return null;
+    return { section: { material: mat, firstIndex: first, numTriangles: tris }, size: 40 + frags * 8 + 1 };
+  };
+  // Reachable[k] = offsets where a run of exactly k valid elements (ending at `end`) can start.
+  const reachable: number[][] = [[end]];
+  for (let k = 1; k <= 256; k++) {
+    const prev = reachable[k - 1];
+    if (!prev.length) break;
+    const next = new Set<number>();
+    for (const pos of prev) {
+      for (let s = 41; s <= 41 + 64 * 8; s += 8) {
+        const el = valid(pos - s);
+        if (el && el.size === s) next.add(pos - s);
+      }
     }
-    if (ok && p === end) return out;
+    reachable[k] = [...next];
+    if (!next.size) break;
+  }
+  // The chain is complete when the int32 before its start equals the element count; prefer the longest.
+  for (let k = reachable.length - 1; k >= 1; k--) {
+    const start = reachable[k].find((p) => p >= 4 && view.getInt32(p - 4, true) === k);
+    if (start === undefined) continue;
+    const out: MeshSection[] = [];
+    let pos = end;
+    for (let i = 0; i < k; i++) {
+      let found = false;
+      for (let s = 41; s <= 41 + 64 * 8; s += 8) {
+        const el = valid(pos - s);
+        if (el && el.size === s) { out.unshift(el.section); pos -= s; found = true; break; }
+      }
+      if (!found) break;
+    }
+    if (out.length === k && pos === start) return out;
   }
   return [];
 }

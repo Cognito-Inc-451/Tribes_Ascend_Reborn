@@ -37,7 +37,7 @@ const TONE: Record<typeof settings.toneMapping, THREE.ToneMapping> = {
 export const SHADOW_RES: Record<typeof settings.shadowQuality, number> = { off: 0, low: 1024, medium: 2048, high: 2048, ultra: 4096 };
 
 /** Ambient intensity with the sky-based IBL installed, versus the neutral studio fallback. */
-const SKY_ENV_INTENSITY = 0.55;
+const SKY_ENV_INTENSITY = 0.7;
 const STUDIO_ENV_INTENSITY = 0.35;
 
 export class Renderer {
@@ -154,6 +154,18 @@ export class Renderer {
   private applySaturation() {
     this.post?.setSaturation(this.sat);
     this.canvas.style.filter = !this.post && this.sat < 0.99 ? `grayscale(${(1 - this.sat).toFixed(2)})` : '';
+  }
+
+  /** `?gfxlog`: every scene-wide brightness knob at once, for live flicker attribution. */
+  brightnessState() {
+    return {
+      sat: this.sat,
+      exposure: this.renderer.toneMappingExposure,
+      env: this.scene.environmentIntensity,
+      sky: !!this.skyEnv,
+      scale: this.adaptScale,
+      post: !!this.post,
+    };
   }
 
   resize() {

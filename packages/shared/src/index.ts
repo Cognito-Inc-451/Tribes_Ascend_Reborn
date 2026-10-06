@@ -8,6 +8,7 @@ export * from './data/modes.js';
 export * from './data/keybinds.js';
 export * from './data/vgs.js';
 export * from './data/cosmetics.js';
+export * from './data/jetpacks.js';
 export * from './data/tips.js';
 export * from './sim/terrain.js';
 export * from './sim/collision.js';

@@ -18,6 +18,9 @@ const MIME: Record<string, string> = {
 export interface LocalNodeOptions {
   port: number; nodeId: string; name: string; servers: GameServer[]; assetsDir: string; clientDir: string | null; discovery: Discovery;
   social: Social; host: (req: HostRequest) => Promise<GameServer>; hasOriginal: (map: string, mode: ModeId) => boolean;
+  /** Games launched from the in-game HOST GAME menu, and a way to shut one down (empty ones only). */
+  hosted?: () => { id: string; name: string; humans: number; port: number }[];
+  close?: (id: string) => string;
   log: (s: string) => void;
   /** Relay for NATed hosts (only offered while this node is reachable from the internet). */
   relay?: RelayServer | null; relayOffered?: () => boolean;
@@ -93,6 +96,10 @@ export class LocalNode {
       if (!isLoopback(req.socket.remoteAddress)) { res.writeHead(403).end(); return; }
       return this.json(res, { nodeId: this.o.nodeId, discovery: this.o.discovery.stats(), servers: [...this.local(), ...this.o.discovery.servers()] });
     }
+    if (p === '/hosted') {
+      if (!isLoopback(req.socket.remoteAddress)) { res.writeHead(403).end(); return; }
+      return this.json(res, { games: this.o.hosted?.() ?? [] });
+    }
 
     let m = /^\/assets\/tex\/([A-Za-z0-9_]{1,96})(\.hi)?\.atx$/.exec(p);
     if (m) {
@@ -151,6 +158,15 @@ export class LocalNode {
         this.json(res, { ...gs.info(), assetsUrl: `http://localhost:${this.o.port}`, origin: 'local', nodeId: this.o.nodeId, host: 'localhost' });
         return;
       }
+      if (p === '/hosted-close') {
+        if (!isLoopback(req.socket.remoteAddress) || !localOrigin(req.headers.origin)) { res.writeHead(403).end(); return; }
+        const body = await this.readBody(req, 256);
+        const id = (body as { id?: unknown })?.id;
+        if (typeof id !== 'string') { res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'bad request' })); return; }
+        const err = this.o.close?.(id) ?? 'no games hosted from this menu';
+        res.writeHead(err ? 400 : 200, { 'content-type': 'application/json' }).end(JSON.stringify(err ? { error: err } : { closed: id }));
+        return;
+      }
       res.writeHead(404).end();
     } catch (e) {
       if (!res.headersSent) res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: (e as Error).message }));
@@ -174,7 +190,7 @@ export class LocalNode {
     return {
       name: name || `${this.o.name}'s ${MODES[mode].name}`, mode, maps, mapSource, maxPlayers: num(b.maxPlayers, 2, 32, 16),
       options: {
-        botsPerTeam: num(o.botsPerTeam, 0, 16, 10), botDifficulty: diffs.includes(o.botDifficulty as never) ? (o.botDifficulty as GameOptions['botDifficulty']) : 'adept',
+        botsPerTeam: num(o.botsPerTeam, 0, 16, 10), botDifficulty: diffs.includes(o.botDifficulty as never) ? (o.botDifficulty as GameOptions['botDifficulty']) : 'recruit',
         infiniteAmmo: o.infiniteAmmo === true, infiniteEnergy: o.infiniteEnergy === true, noFallDamage: o.noFallDamage === true,
         infiniteCallIns: o.infiniteCallIns === true, vehicles: o.vehicles !== false,
         creditMultiplier: typeof o.creditMultiplier === 'number' && Number.isFinite(o.creditMultiplier) ? Math.max(0.25, Math.min(10, o.creditMultiplier)) : 1,

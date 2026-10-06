@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import {
-  AF, ASSET_TYPES, ASSETS, BTN, buildCollisionWorld, CLASSES, DT, ITEM_IDS, ITEM_INDEX, ITEMS, MODES, PF, PHASE, projDef, TEAM_NAMES, VEHICLE_TYPES, VEHICLES, VGS_BY_ID, dirFromAngles, GRAVITY,
-  makeOBB, type AssetSnap, type CollisionWorld, type InputCmd, type Loadout, type MapData, type ModeId, type PlayerSnap, type S2C, type Snapshot, type Vec3,
+  AF, ASSET_TYPES, ASSETS, BTN, buildCollisionWorld, CLASSES, DT, ITEM_IDS, ITEM_INDEX, ITEMS, MODES, PF, PHASE, projDef, TEAM_NAMES, VEHICLE_TYPES, VEHICLES, VGS_BY_ID, dirFromAngles, GRAVITY, jetStyleFor,
+  makeOBB, type AssetSnap, type CollisionWorld, type InputCmd, type JetStyle, type Loadout, type MapData, type ModeId, type PlayerSnap, type S2C, type Snapshot, type Vec3,
 } from '@ar/shared';
 import { audio } from '../audio/audio.js';
 import type { Input } from '../input/input.js';
@@ -26,12 +26,15 @@ import { StatsRecorder } from './stats.js';
 
 const INTERP = 0.1;
 
+/** `?gfxlog`: log every change to the scene-wide brightness knobs, for live flicker attribution. */
+const GFX_LOG = typeof location !== 'undefined' && new URLSearchParams(location.search).has('gfxlog');
+
 export interface ClientHooks {
   leave(reason?: string): void;
   openSettings(): void;
 }
 
-interface PlayerView { model: PlayerModel; cls: number; team: number; cosKey: string }
+interface PlayerView { model: PlayerModel; cls: number; team: number; cosKey: string; jetStyle: JetStyle }
 
 export class GameClient {
   readonly world: CollisionWorld;
@@ -84,6 +87,7 @@ export class GameClient {
   private reloadSnd = 0;
   private drawnWeapon = '';
   private wasOnGround = true;
+  private wasFalling = false;
   private fellBack: boolean;
 
   constructor(private r: Renderer, private input: Input, ui: HTMLElement, private session: Session, readonly map: MapData, private hooks: ClientHooks, fellBack: boolean) {
@@ -175,6 +179,10 @@ export class GameClient {
   /** TA first-person arms/weapon of the held item, once loaded. */
   private get fp(): FirstPerson | undefined { return this.viewModel.children[0]?.userData.fp as FirstPerson | undefined; }
   private lastReload = 0;
+  /** `?gfxlog`: timestamp the snapshot has been reporting us dead (0 = alive); 0 when alive. */
+  private deadSince = 0;
+  /** `?gfxlog`: last logged brightness line, so the log only fires on change. */
+  private gfxLine = '';
 
   // ------------------------------------------------------------------ input
   private captureKey(code: string, e: KeyboardEvent | null): boolean {
@@ -758,10 +766,12 @@ export class GameClient {
       const isMe = p.id === myId;
       const info = this.pinfo(p.id);
       const cosKey = JSON.stringify(info?.cosmetics ?? {});
+      const clsId = CLASSES[p.cls]?.id ?? this.cls;
+      const jetStyle = jetStyleFor(settings.jetStyles, clsId);
       let v = this.players.get(p.id);
-      if (!v || v.cls !== p.cls || v.team !== p.team || v.cosKey !== cosKey) {
+      if (!v || v.cls !== p.cls || v.team !== p.team || v.cosKey !== cosKey || v.jetStyle !== jetStyle) {
         if (v) { this.r.scene.remove(v.model.root); v.model.dispose(); }
-        v = { model: new PlayerModel(p.cls, p.team, info?.cosmetics ?? settings.cosmetics), cls: p.cls, team: p.team, cosKey };
+        v = { model: new PlayerModel(p.cls, p.team, info?.cosmetics ?? settings.cosmetics, jetStyle), cls: p.cls, team: p.team, cosKey, jetStyle };
         this.players.set(p.id, v);
         this.r.scene.add(v.model.root);
       }
@@ -774,7 +784,9 @@ export class GameClient {
       v.model.update(dt, isMe ? this.input.yaw : yaw, isMe ? this.input.pitch : pitch, flags, speed, flagCarried ? flagCarried.team : null, isMe ? this.pred.state.vel : p.vel);
       v.model.setWeapon(isMe ? (this.slot === 1 ? this.loadout.secondary : this.loadout.primary) : ITEM_IDS[p.item] ?? '');
       v.model.root.visible = !isMe || this.thirdPerson;
-      if ((flags & PF.JETTING) && Math.random() < 0.7 * settings.particles) this.fx.jetPuff({ x: rp.x, y: rp.y + 0.9, z: rp.z }, isMe ? this.pred.state.vel : p.vel, teamColor(p.team));
+      if ((flags & PF.JETTING) && jetStyle !== 'off' && Math.random() < 0.9 * settings.particles) {
+        this.fx.jetPuff({ x: rp.x, y: rp.y + 1.05, z: rp.z }, isMe ? this.pred.state.vel : p.vel, teamColor(p.team), jetStyle);
+      }
       if ((flags & PF.SKIING) && (flags & PF.ON_GROUND) && speed > 20 && Math.random() < 0.4) this.fx.skiSpark(rp, isMe ? this.pred.state.vel : p.vel);
     }
     for (const [id, v] of this.players) if (!seen.has(id)) { this.r.scene.remove(v.model.root); v.model.dispose(); this.players.delete(id); }
@@ -901,13 +913,37 @@ export class GameClient {
         const hit = this.world.raycast(eye, want);
         const k = hit ? Math.max(0.1, hit.t - 0.05) : 1;
         cam.position.set(eye.x + (want.x - eye.x) * k, eye.y + (want.y - eye.y) * k, eye.z + (want.z - eye.z) * k);
-      } else cam.position.set(eye.x, eye.y, eye.z);
-      cam.rotation.set(pitch, yaw, 0, 'YXZ');
+        // Aim at the eye so the character stays centered even when the chase cam is pulled in by geometry.
+        cam.lookAt(eye.x, eye.y, eye.z);
+      } else {
+        // TA's walk shake lives on the *camera*: a footfall bob and a hair of roll. Keeping it here
+        // (instead of on the viewmodel) means the weapon and its ammo readout stay steady on screen.
+        // Gated to walking pace on level ground: sprinting/jetting must stay rock steady, and a slope already
+        // moves the eye on its own, so shaking there reads as a view wobble rather than a footfall.
+        const speed = Math.hypot(this.pred.state.vel.x, this.pred.state.vel.z);
+        const flat = Math.min(1, Math.max(0, (this.pred.state.groundNormal.y - 0.85) / 0.12));
+        const walkGate = Math.min(1, Math.max(0, (speed - 1.5) / 5)) * flat;
+        const shake = this.pred.state.onGround && !this.pred.state.skiing ? Math.sin(performance.now() / 240) * walkGate : 0;
+        // Flat-ground walking must not move the camera at all; keep a whisper of bob only on rough ground.
+        const rough = 1 - flat;
+        cam.position.set(eye.x, eye.y + shake * 0.018 * rough, eye.z);
+        cam.rotation.set(pitch, yaw, shake * 0.0015 * rough, 'YXZ');
+      }
     }
     this.recoil *= Math.exp(-dt * 10);
-    const bob = this.pred.state.onGround && !this.pred.state.skiing ? Math.sin(performance.now() / 110) * Math.min(1, Math.hypot(this.pred.state.vel.x, this.pred.state.vel.z) / 10) * 0.012 : 0;
-    this.viewModel.position.set(0, bob, this.recoil * 0.08);
-    this.viewModel.rotation.x = this.recoil * 0.12;
+    // Viewmodel bob kept gentle: TA's first-person weapon drifts only a couple of pixels while walking. A
+    // faster, taller sine read as a view shake, and the panel parented to the weapon bone shook with it.
+    //
+    // Gated to rough ground, like the camera shake above: on a flat floor the eye is steady, so any weapon
+    // drift is the only motion in frame - at 5 mm and ~3 Hz that is exactly the "micro vibration when running
+    // on a flat surface" report. `flat` is derived from the server's ground normal, which jitters by a few
+    // hundredths even on a true plane, so the gate is squared to crush that residual.
+    const walkSpeed = Math.hypot(this.pred.state.vel.x, this.pred.state.vel.z);
+    const groundFlat = Math.min(1, Math.max(0, (this.pred.state.groundNormal.y - 0.985) / 0.012));
+    const bobGate = Math.min(1, Math.max(0, (walkSpeed - 2.5) / 8)) * (1 - groundFlat) * (1 - groundFlat);
+    const bob = this.pred.state.onGround && !this.pred.state.skiing ? Math.sin(performance.now() / 190) * bobGate * 0.004 : 0;
+    this.viewModel.position.set(0, bob, this.recoil * 0.06);
+    this.viewModel.rotation.x = this.recoil * 0.07;
     if (this.viewModel.visible) {
       this.syncViewModel();
       spinViewModel(this.viewModel, this.session.latest?.self?.spin ?? 0, dt);
@@ -917,7 +953,7 @@ export class GameClient {
         if (rl > 0 && this.lastReload === 0) fp.player.play('reload', false, 0.1);
         this.lastReload = rl;
         const am = self?.ammo[this.slot];
-        fp.update(dt, am?.[0] ?? 0, am?.[1] ?? 0);
+        fp.update(dt, am?.[0] ?? 0, am?.[1] ?? 0, Math.max(rl, self?.spin ?? 0, self?.charge ?? 0));
       }
       setViewModelStealth(this.viewModel, !!me && (me.flags & PF.STEALTH) !== 0, performance.now() / 1000);
     }
@@ -930,8 +966,15 @@ export class GameClient {
     audio.setLoop('ski', alive && this.pred.state.skiing && this.pred.state.onGround ? Math.min(0.3, speedMs / 120) : 0, 2500 + speedMs * 30);
     audio.setLoop('wind', alive ? Math.min(0.35, Math.max(0, speedMs - 15) / 150) : 0, 200 + speedMs * 8);
     audio.setLoop('spin', alive && (this.session.latest?.self?.spin ?? 0) > 0.05 ? 0.12 : 0, 900 + (this.session.latest?.self?.spin ?? 0) * 1800);
-    if (alive && this.pred.state.onGround && !this.wasOnGround && performance.now() - this.landSoundAt > 300) { audio.play('land', undefined, 0.5); this.landSoundAt = performance.now(); }
+    // Landing (TA's "step" sample) only after a real fall: standing still lets ground contact flicker
+    // per tick, which used to play footsteps at random while idle.
+    const falling = this.pred.state.vel.y < -1.4;
+    if (alive && this.pred.state.onGround && !this.wasOnGround && this.wasFalling && performance.now() - this.landSoundAt > 300) {
+      audio.play('land', undefined, 0.5);
+      this.landSoundAt = performance.now();
+    }
     this.wasOnGround = this.pred.state.onGround;
+    this.wasFalling = falling;
     // Weapon draw and reload parts (original samples).
     const wid = this.slot === 1 ? this.loadout.secondary : this.loadout.primary;
     if (alive && !inVehicle) {
@@ -1072,8 +1115,21 @@ export class GameClient {
     this.hud.update(state, markers, plates, net);
     this.stats.tick(dt, state.alive, state.armor, this.cls, this.mode, state.health, state.maxHealth, this.pred.state.skiing && this.pred.state.onGround, state.speedKmh);
     // Driving counts as alive (the predicted pawn is parked while in a vehicle).
+    // Snapshot gaps, respawn handoffs and spectate switches can drop `me`/PF.ALIVE for a frame or two. The
+    // grey-out is a *scene-wide* filter, so a one-frame dropout greys every player at once - the reported
+    // "all players go black, flicker, then back". Require the dead state to hold for a beat before grading.
     const dead = !me || !(me.flags & PF.ALIVE);
-    this.r.setSaturation(spectating ? 1 : dead ? 0.12 : state.waiting ? 0.2 : 1);
+    if (dead) { if (!this.deadSince) this.deadSince = performance.now(); } else { this.deadSince = 0; }
+    const deadGrey = dead && performance.now() - this.deadSince > 250;
+    this.r.setSaturation(spectating ? 1 : deadGrey ? 0.12 : state.waiting ? 0.2 : 1);
+    if (GFX_LOG) {
+      const b = this.r.brightnessState();
+      const line = `${b.sat}|${b.exposure}|${b.env}|${b.sky}|${b.scale}|${b.post}|${dead}|${spectating}|${state.waiting}|${me?.flags ?? -1}`;
+      if (line !== this.gfxLine) {
+        this.gfxLine = line;
+        console.log(`[gfx] sat=${b.sat} exposure=${b.exposure.toFixed(3)} env=${b.env.toFixed(2)} sky=${b.sky} scale=${b.scale.toFixed(3)} post=${b.post} dead=${dead} spec=${spectating} warmup=${state.waiting} flags=${me?.flags ?? -1}`);
+      }
+    }
     const wantScores = this.input.held('scores') && !this.anyOverlay() || this.phase === PHASE.POSTGAME;
     if (wantScores) { this.scoreEl?.remove(); this.scoreEl = this.buildScoreboard(); }
     else if (this.scoreEl) { this.scoreEl.remove(); this.scoreEl = null; }

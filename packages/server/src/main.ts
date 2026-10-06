@@ -59,6 +59,8 @@ if (!args.includes('--no-node')) {
   const dist = join(repoRoot, 'packages', 'client', 'dist');
   const social = new Social(assetsDir, discovery, nodePort, log);
   const hosted = new Set<GameServer>();
+  /** Games started from the in-game HOST menu with nobody in them — safe to shut down when launching another. */
+  const closable = () => [...hosted].filter((gs) => gs.info().humans === 0).map((gs) => ({ id: gs.cfg.id, name: gs.cfg.name, humans: 0, port: gs.cfg.port }));
   const host = async (r: HostRequest): Promise<GameServer> => {
     if (hosted.size >= 4) throw new Error('already hosting 4 games; close one first');
     const used = new Set(started.map((s) => s.cfg.port));
@@ -67,7 +69,7 @@ if (!args.includes('--no-node')) {
     if (port >= 7832) throw new Error('no free port');
     const cfg: ServerConfig = {
       id: `host-${port}`, name: r.name, mode: r.mode, mapSource: r.mapSource, maps: r.maps, port, wtPort: port, maxPlayers: r.maxPlayers,
-      bots: { fillTo: 0, difficulty: r.options.botDifficulty ?? 'adept' }, options: r.options, skillsMaxed: true,
+      bots: { fillTo: 0, difficulty: r.options.botDifficulty ?? 'recruit' }, options: r.options, skillsMaxed: true,
     };
     const gs = new GameServer(cfg, root, lib, cert);
     gs.assetsUrl = `http://localhost:${nodePort}`;
@@ -89,9 +91,20 @@ if (!args.includes('--no-node')) {
   const relayOn = (nodeCfg.relay ?? true) && !off('AR_RELAY') && internet;
   const relay = relayOn ? new RelayServer(log) : null;
   const name = (nodeCfg.name ?? hostname()).slice(0, 32);
+  /** Close a hosted game from the in-game host menu; refuses games with players in them. */
+  const closeGame = (id: string): string => {
+    const gs = [...hosted].find((g) => g.cfg.id === id);
+    if (!gs) return 'that game was not started from the host menu';
+    if (gs.info().humans > 0) return 'that game has players in it';
+    gs.stop();
+    started.splice(started.indexOf(gs), 1);
+    hosted.delete(gs);
+    return '';
+  };
   new LocalNode({
     port: nodePort, nodeId, name, servers: started, assetsDir,
     clientDir: existsSync(join(dist, 'index.html')) ? dist : null, discovery, social, host, hasOriginal: (m, mode) => lib.hasOriginal(m, mode), log,
+    hosted: closable, close: closeGame,
     relay, relayOffered: () => discovery.upnpOk,
   }).start();
   void discovery.start().then(() => {

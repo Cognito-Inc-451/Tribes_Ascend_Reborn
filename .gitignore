@@ -8,3 +8,5 @@ maps-original/
 certs/
 packages/client/public/voicepacks/*/
 !packages/client/public/voicepacks/.keep
+# Launcher build output (the exe is published through GitHub releases, not the repo).
+tools/launcher/bin/

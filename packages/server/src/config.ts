@@ -36,7 +36,7 @@ export function loadConfig(path: string): RootConfig {
     if (!MODE_IDS.includes(s.mode)) throw new Error(`config: server ${s.id} has unknown mode ${s.mode}`);
     if (!Number.isInteger(s.port) || s.port < 1 || s.port > 65535) throw new Error(`config: server ${s.id} bad port`);
     s.maxPlayers = Math.max(2, Math.min(32, s.maxPlayers ?? 24));
-    s.bots ??= { fillTo: 0, difficulty: 'adept' };
+    s.bots ??= { fillTo: 0, difficulty: 'recruit' };
     s.bots.fillTo = Math.max(0, Math.min(s.maxPlayers, s.bots.fillTo));
     s.skillsMaxed ??= true;
   }

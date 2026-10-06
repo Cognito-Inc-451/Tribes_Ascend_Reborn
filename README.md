@@ -15,12 +15,46 @@ self-hosted Node servers — skiing, jetting, spinfusors, CTF and the other TA g
 <img width="2165" height="1259" alt="image" src="https://github.com/user-attachments/assets/a6b669b2-9eb9-4a2b-85ea-48c4a2557c7f" />
 
 ---
+## Launcher (Windows)
+
+`AscendRebornLauncher.exe` (attached to every GitHub Release) walks through the whole Quick Start for you —
+no command prompt needed. Save it anywhere and run it.
+
+| Button | What it does |
+| --- | --- |
+| **Install** (green, one click) | Does the whole Quick Start: installs Node.js and Git if missing, clones the repository, runs `npm install`, then imports your Tribes: Ascend assets. Refreshes `PATH` after each install, so a fresh machine needs no restart. |
+| **Choose game folder** | Where the clone should live (defaults to the folder next to the exe). |
+| **Download the game** | `git clone` of this repository. |
+| **Install dependencies** | `npm install`. |
+| **Re-import Tribes: Ascend assets** | Finds your existing T:A install and runs `npm run ta-import -- --all` (re-runnable after an update). |
+| **Install Node.js / Install Git** | "One step at a time" helpers: opens the Node v24 MSI, and installs Git with `winget install Git.Git`. |
+| **Start game (server)** / **Start game (client)** | Launches `npm start` / `npm run play` in its own console window, then opens <http://localhost:7770>. |
+| **Open browser** / **Stop servers** | Opens the game page, and closes the game console windows the launcher started. |
+| **Check for updates** | Reads the latest GitHub Release, compares it with the local `package.json`, and reports how many commits behind `origin/main` you are. A repository with no published release yet is reported as such, not as offline. |
+| **Update the game** | `git pull` + `npm install` + a re-import of the Tribes: Ascend assets, in that order. |
+| **Update this launcher** | Downloads the newest launcher exe from the Release and swaps itself out on the next start. |
+
+It shows the game's own splash art as its banner when your import is present, and falls back to a drawn
+banner otherwise (no Hi-Rez art ships in this repository).
+
+Building it from source (Windows, no extra SDK — it uses the .NET Framework 4.x compiler in the box):
+
+```
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\launcher\build.ps1
+```
+
+Output lands in `tools\launcher\bin\` (git-ignored); attach the exe to a Release as an asset.
+
+---
 ## Quick Start Guide
 
 **Windows**
 ```
 You'll need nodejs with npm:
 install https://nodejs.org/dist/v24.21.0/node-v24.21.0-x64.msi and keep "npm package manager" selected.
+
+You'll also need git from https://git-scm.com/download/win or from command prompt (as admin) :
+winget install --id Git.Git -e --source winget
 
 Go to your desired target folder & open command prompt from there via right-click in explorer,
 or go there via the command prompt (WIN+R and cmd [ENTER]) with "cd D:\games" or whatever your folder is.
@@ -49,7 +83,7 @@ To run the game again, "npm start" or "npm run play"
 If later there is an update on github, you can just type "git pull" from with the Tribes_Ascend_Reborn folder to update
 also run "npm run ta-import -- --all" again as it may also have been updated
 
-An installer / updater should automate all this soon
+An installer / updater should automate all this soon - see "Launcher (Windows)" below.
 ```
 
 ## Features

@@ -7,6 +7,32 @@ import { TextureStore } from './textures.js';
 /** Normal-map strength for imported TA models and map meshes. */
 export const NORMAL_STRENGTH = 0.9;
 
+/** Sections that are self-lit displays in TA (weapon glass, map screens) — they glow, they are not lit.
+ *  `window` catches the spinfusor's authored sight glass (`T_Wep_LightSpinfusor_Window_Dif`). */
+const DISPLAY_TEX = /scanlines|display|screen|hud|window/i;
+/** Self-lit, but kept *under* the bloom knee with HDR off (threshold 0.72, knee 0.25). The authored glass is a
+ *  mid grey (mean luminance ~0.39) whose bright scanline streaks approach 1.0; at 1.5 those streaks cleared the
+ *  threshold and bloomed, and bloom desaturates, so the whole panel blew out to white (the "glowing white
+ *  gridlines" report). 0.85 puts the streaks into the knee only: the glass reads as lit, not as a lamp. */
+const DISPLAY_GLOW = 0.85;
+/** TA draws its weapon LCDs in phosphor blue over the neutral scanline glass (the spinfusor glass reads
+ *  "75 / 2 SAFE" in blue), so the shared glass and the authored display panels are tinted LCD blue. Saturated
+ *  hard toward blue (low red) so the emissive stays chromatic at the knee - a pale blue blooms to white. */
+const DISPLAY_TINT = 0x2f8fff;
+
+/** Program cache keys for the two async shader patches. Both are fixed strings composed from the material's
+ *  installed-patch flags, so a material ends up with the *same* key whichever order the patches land in: a key
+ *  that flips mid-game makes three recompile every material sharing that program, and the whole scene flashes
+ *  dark for a frame (the reported "all players go black at once"). */
+const LIFT_KEY = 'far-lift3';
+const PACKED_KEY = 'packed-model';
+
+/** Recompose a material's program cache key from the patches it has installed. */
+function syncProgramKey(mat: THREE.Material): void {
+  const m = mat as THREE.MeshStandardMaterial & { userData: { lifted?: boolean; packed?: boolean } };
+  mat.customProgramCacheKey = () => (m.userData.lifted ? LIFT_KEY : '') + (m.userData.packed ? PACKED_KEY : '');
+}
+
 export interface ModelBone { name: string; parent: number; q: number[]; p: number[] }
 export interface ModelData {
   key: string; bones: ModelBone[]; geometry: THREE.BufferGeometry; sections: { first: number; count: number; tex: string; normal?: string }[];
@@ -134,13 +160,23 @@ class ModelLibrary {
         if (t.userData.packed) {
           // A channel-packed mask the material recolours (it looks magenta raw): its luminance shades the team colour.
           if (maskTint !== undefined) { mat.color.setHex(maskTint); mat.emissive.setHex(maskTint); mat.emissiveIntensity = 0.25; }
-          mat.customProgramCacheKey = () => 'packed-model';
-          mat.onBeforeCompile = (sh) => {
+          // Chain onto any patch already installed (CharacterRig's distance lift): overwriting it
+          // here is what made players flicker black the moment a skin texture finished loading.
+          const prev = mat.onBeforeCompile;
+          mat.userData.packed = true;
+          syncProgramKey(mat);
+          mat.onBeforeCompile = (sh, renderer) => {
+            prev(sh, renderer);
             sh.fragmentShader = sh.fragmentShader.replace('#include <map_fragment>',
               '#ifdef USE_MAP\n vec4 sdc = texture2D(map, vMapUv); diffuseColor.rgb *= vec3(dot(sdc.rgb, vec3(0.3, 0.59, 0.11))) * 1.3 + 0.1;\n#endif');
           };
         }
         if (selfLit) { mat.emissiveMap = t; mat.emissive.setHex(0xffffff); mat.emissiveIntensity = selfLit; }
+        // TA paints its displays (weapon glass, screens) as self-lit emissive. Without that the scanline
+        // glass is just a dark diffuse quad and reads as flat black, so the ammo counter on it vanishes too.
+        else if (!t.userData.packed && DISPLAY_TEX.test(s.tex)) {
+          mat.emissiveMap = t; mat.emissive.setHex(DISPLAY_TINT); mat.emissiveIntensity = DISPLAY_GLOW;
+        }
         mat.needsUpdate = true;
       });
       if (s.normal && this.textures && settings.textureDetail !== 'low') void this.textures.get(s.normal, true).then((t) => {
@@ -160,8 +196,16 @@ export const models = new ModelLibrary();
 /** Players seen from afar or back-lit must not sink into fog and shadow: a base fill, a sky-side rim and a gain that grows with distance. */
 export function liftWithDistance(mats: THREE.MeshStandardMaterial[]) {
   for (const mat of mats) {
-    mat.customProgramCacheKey = () => 'far-lift3';
-    mat.onBeforeCompile = (sh) => {
+    if (mat.userData.lifted === true) continue;
+    const prev = mat.onBeforeCompile;
+    mat.userData.lifted = true;
+    // Chain onto any patch already installed (the packed-mask luminance ramp lands asynchronously, so
+    // either order can happen). The key is recomposed from the installed-patch flags: it is the same
+    // string whichever order the patches land in, so a texture finishing its load can no longer swap
+    // the compiled program out from under the scene.
+    syncProgramKey(mat);
+    mat.onBeforeCompile = (sh, renderer) => {
+      prev(sh, renderer);
       // TA's heavy armour textures are near-black: lift the darks, then add fill from the viewer's side.
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <map_fragment>', '#include <map_fragment>\n diffuseColor.rgb = pow(max(diffuseColor.rgb, vec3(0.0)), vec3(0.72));')
@@ -238,6 +282,10 @@ export class CharacterRig {
     });
     bones.forEach((b, i) => { const p = m.bones[i].parent; if (p >= 0) bones[p].add(b); });
     this.mats = models.materials(m);
+    // Imported models are DoubleSide for map geometry (thin walls, one-sided facades). On a skinned actor the
+    // back faces of the torso/head self-shadow the front faces through the sun's ortho pass, and that acne
+    // sweeps the whole body as the skeleton moves - the actor goes dark all over. Front faces only.
+    for (const mat of this.mats) mat.side = THREE.FrontSide;
     liftWithDistance(this.mats);
     this.mesh = new THREE.SkinnedMesh(m.geometry, this.mats);
     this.mesh.add(bones[0]);

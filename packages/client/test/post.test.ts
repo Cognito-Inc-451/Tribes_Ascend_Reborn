@@ -15,7 +15,7 @@ const { structuralKey, chainSizes, bloomParams, whiteBalance, hazeParams } =
   await import('../src/render/post.js');
 
 const BASE = {
-  hdr: true, msaa: 4, bloom: 0.55, ao: 1, godrays: 0.4, dof: false, motionBlur: 0, ssr: false,
+  hdr: true, msaa: 4, bloom: 0.55, ao: 1, godrays: 0.4, dof: 0, motionBlur: 0, ssr: false,
 };
 
 describe('structuralKey', () => {
@@ -36,7 +36,8 @@ describe('structuralKey', () => {
     expect(structuralKey({ ...BASE, msaa: 0 })).not.toBe(k);
     expect(structuralKey({ ...BASE, ao: 2 })).not.toBe(k);
     expect(structuralKey({ ...BASE, ao: 0 })).not.toBe(k);
-    expect(structuralKey({ ...BASE, dof: true })).not.toBe(k);
+    expect(structuralKey({ ...BASE, dof: 0.5 })).not.toBe(k);
+    expect(structuralKey({ ...BASE, dof: 0 })).toBe(k);
     expect(structuralKey({ ...BASE, ssr: true })).not.toBe(k);
     // Turning a feature fully on/off changes the shape (defines + targets).
     expect(structuralKey({ ...BASE, bloom: 0 })).not.toBe(k);
@@ -72,14 +73,25 @@ describe('bloomParams', () => {
     expect(p.intensity).toBeCloseTo(0.55 * 0.85, 6);
   });
 
+  it('drops the threshold under the 8-bit ceiling when HDR is off', () => {
+    // 8-bit linear targets clip at 1.0: a threshold of 1.0 would never pass a pixel.
+    const p = bloomParams(0.55, false);
+    expect(p.threshold).toBeLessThan(1.0);
+    expect(p.threshold + p.knee).toBeLessThanOrEqual(1.0);
+    expect(p.intensity).toBeGreaterThan(bloomParams(0.55).intensity);
+  });
+
   it('clamps extreme strengths into a sane range', () => {
     expect(bloomParams(-1).intensity).toBe(0);
     expect(bloomParams(9).intensity).toBeCloseTo(2 * 0.85, 6);
+    expect(bloomParams(-1, false).intensity).toBe(0);
+    expect(bloomParams(9, false).intensity).toBeCloseTo(2 * 0.95, 6);
   });
 
   it('is monotonic in strength', () => {
     expect(bloomParams(0.2).intensity).toBeLessThan(bloomParams(0.55).intensity);
     expect(bloomParams(0.55).intensity).toBeLessThan(bloomParams(1.0).intensity);
+    expect(bloomParams(0.2, false).intensity).toBeLessThan(bloomParams(1.0, false).intensity);
   });
 });
 

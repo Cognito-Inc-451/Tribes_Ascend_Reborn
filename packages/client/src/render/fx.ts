@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { projDef, ITEM_IDS, type ProjSnap, type Vec3 } from '@ar/shared';
+import { projDef, ITEM_IDS, JET_STYLES, type JetStyle, type ProjSnap, type Vec3 } from '@ar/shared';
 import { settings } from '../settings.js';
 import { TaParticles, type FxHandle } from './tafx.js';
 
@@ -112,7 +112,6 @@ const PROJ_GEOMS: Record<string, THREE.BufferGeometry> = {
   nova: new THREE.IcosahedronGeometry(0.2, 1),
   saber: new THREE.ConeGeometry(0.15, 0.8, 8),
 };
-
 export class Effects {
   readonly group = new THREE.Group();
   readonly particles = new Particles();
@@ -328,8 +327,16 @@ export class Effects {
     if (destroyed && Math.random() < 0.2) this.particles.emit({ x: pos.x, y: pos.y + h * 0.7, z: pos.z }, { x: 0, y: 2, z: 0 }, new THREE.Color(0xffc060), 0.07, 0.4, { spread: 5, gravity: 12 });
   }
 
-  jetPuff(pos: Vec3, vel: Vec3, color: number) {
-    this.particles.emit(pos, { x: vel.x * 0.3, y: -6 + vel.y * 0.3, z: vel.z * 0.3 }, new THREE.Color(color), 0.28, 0.3, { spread: 1.5, grow: 0.6 });
+  /** Thrust plume style: per-class look for the jetpack exhaust. */
+  jetPuff(pos: Vec3, vel: Vec3, color: number, style: JetStyle = 'ion') {
+    const st = JET_STYLES[style] ?? JET_STYLES.ion;
+    if (st.smoke) {
+      // Dense exhaust: soft smoke puffs with the hot core colour bleeding into grey.
+      this.smoke.emit(pos, { x: vel.x * 0.25, y: -3.4 + vel.y * 0.25, z: vel.z * 0.25 }, new THREE.Color(color).lerp(new THREE.Color(0x9aa3ad), 0.45), 0.55, 1.05, { spread: 1.1, grow: 2.6 });
+      this.particles.emit(pos, { x: vel.x * 0.3, y: -5 + vel.y * 0.3, z: vel.z * 0.3 }, new THREE.Color(color).lerp(new THREE.Color(st.core), 0.6), 0.34, 0.42, { spread: 0.9, grow: 1.1 });
+    } else {
+      this.particles.emit(pos, { x: vel.x * 0.3, y: -6 + vel.y * 0.3, z: vel.z * 0.3 }, new THREE.Color(color).lerp(new THREE.Color(st.core), st.blend), 0.28 * st.size, 0.3 * st.life, { spread: 1.5, grow: 0.6 * st.life });
+    }
   }
 
   skiSpark(pos: Vec3, vel: Vec3) {

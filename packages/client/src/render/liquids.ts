@@ -61,6 +61,7 @@ export function waterMaterial(env: THREE.Texture | null, tint = 0x1d4a5c): THREE
     color: tint, roughness: q === 'low' ? 0.3 : 0.06, metalness: 0, side: THREE.DoubleSide,
     envMap: q === 'high' ? env : null, envMapIntensity: 1.1,
   });
+  m.userData.tint = tint;
   if (q !== 'low') {
     m.customProgramCacheKey = () => `ta-water-${ssr}`;
     m.onBeforeCompile = (sh) => {
@@ -99,4 +100,21 @@ export function disposeLiquids() {
   waters.clear();
   lava?.dispose();
   lava = null;
+}
+
+/**
+ * Swap the sky reflection on every cached water material.
+ *
+ * The map's painted sky dome is loaded (and its IBL baked) *after* the level geometry is built, so water
+ * created at load time holds the procedural fallback env. When the baked environment arrives the render
+ * target behind the old texture is disposed, and a water shader sampling a disposed texture draws its
+ * reflection as black - which is what a sky-domed map like Crossfire showed.
+ */
+export function refreshWaterEnv(env: THREE.Texture): void {
+  for (const m of waters.values()) {
+    // Only high-quality water samples the env map; the others must keep envMap null.
+    if (m.envMap === null || m.envMap === env) continue;
+    m.envMap = env;
+    m.needsUpdate = true;
+  }
 }

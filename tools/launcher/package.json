@@ -1,0 +1,9 @@
+{
+  "name": "@ar/launcher",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Windows installer / updater / launcher for Ascend Reborn. WinForms, compiled with the in-box .NET Framework csc.exe.",
+  "scripts": {
+    "build": "powershell -NoProfile -ExecutionPolicy Bypass -File build.ps1"
+  }
+}

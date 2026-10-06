@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import {
-  ARMOR_SKINS, ASSET_TYPES, ASSETS, CLASSES, EMBLEMS, JET_TRAILS, PF, TEAM_COLORS, VEHICLE_TYPES, WEAPON_FINISHES, AF, taSkinModelKeys,
-  type AssetSnap, type CosmeticProfile, type FlagSnap, type VehSnap,
+  ARMOR_SKINS, ASSET_TYPES, ASSETS, CLASSES, EMBLEMS, JET_TRAILS, JET_STYLES, PF, TEAM_COLORS, VEHICLE_TYPES, WEAPON_FINISHES, AF, taSkinModelKeys,
+  type AssetSnap, type CosmeticProfile, type FlagSnap, type JetStyle, type VehSnap,
 } from '@ar/shared';
 import { settings } from '../settings.js';
 import { forceFieldMaterial } from './forcefield.js';
@@ -80,11 +80,16 @@ export class PlayerModel {
   private procedural: THREE.Object3D[] = [];
   private disposed = false;
   private weaponItem = '';
+  private jetW: number;
+  private jetL: number;
   armor: 'light' | 'medium' | 'heavy';
 
-  constructor(clsIndex: number, readonly team: number, cos: CosmeticProfile) {
+  constructor(clsIndex: number, readonly team: number, cos: CosmeticProfile, jetStyle: JetStyle = 'ion') {
     const cls = CLASSES[clsIndex] ?? CLASSES[0];
     this.armor = cls.armor;
+    const jet = JET_STYLES[jetStyle] ?? JET_STYLES.ion;
+    this.jetW = jet.width;
+    this.jetL = jet.length;
     const k = cls.armor === 'light' ? 0.85 : cls.armor === 'medium' ? 1 : 1.22;
     const h = cls.armor === 'light' ? 1.85 : cls.armor === 'medium' ? 1.95 : 2.25;
     const skinId = settings.forceDefaultSkins ? 'standard' : cls.armor === 'light' ? cos.skinLight : cls.armor === 'medium' ? cos.skinMedium : cos.skinHeavy;
@@ -93,7 +98,9 @@ export class PlayerModel {
     const skin = own(skinMaterial(ARMOR_SKINS.find((s) => s.id === skinId) ?? ARMOR_SKINS[0]), this.mats);
     const accent = own(shared(`accent|${tc}`, () => new THREE.MeshStandardMaterial({ color: tc, roughness: 0.5, metalness: 0.3, emissive: tc, emissiveIntensity: 0.25 })), this.mats);
     const visor = own(glowMat(tc, 2.2), this.mats);
-    const dark = own(shared('dark|0x2a2e33', () => new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.6, metalness: 0.5 })), this.mats);
+    /* envMapIntensity > 1: the sky IBL is the only ambient source for these dark greys; at 1
+       they read as flat charcoal in shade (the sun alone does all the work). */
+    const dark = own(shared('dark|0x2a2e33', () => new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.6, metalness: 0.5, envMapIntensity: 1.2 })), this.mats);
 
     const legH = h * 0.45;
     const torsoH = h * 0.32;
@@ -123,7 +130,7 @@ export class PlayerModel {
     // Jetpack.
     mk(box(0.34 * k, torsoH * 0.9, 0.18 * k), dark, 0, legH + torsoH * 0.5, 0.24 * k);
     const trail = JET_TRAILS.find((j) => j.id === cos.jetTrail) ?? JET_TRAILS[0];
-    const flameCol = new THREE.Color(tc).offsetHSL(0, (trail.saturation - 1) * 0.3, (trail.brightness - 1) * 0.25).lerp(new THREE.Color(0xffffff), 0.35);
+    const flameCol = new THREE.Color(tc).offsetHSL(0, (trail.saturation - 1) * 0.3, (trail.brightness - 1) * 0.25).lerp(new THREE.Color(0xffffff), 0.35).lerp(new THREE.Color(jet.core), jet.blend * 0.6);
     const flameMat = own(shared(`flame|${flameCol.getHex()}`, () => new THREE.MeshBasicMaterial({ color: flameCol, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false })), this.mats);
     for (const sx of [-1, 1]) {
       const f = new THREE.Mesh(new THREE.ConeGeometry(0.07 * k, 0.8, 8), flameMat);
@@ -197,8 +204,8 @@ export class PlayerModel {
     this.armR.rotation.x = pitch;
     const jet = (flags & PF.JETTING) !== 0, ski = (flags & PF.SKIING) !== 0, ground = (flags & PF.ON_GROUND) !== 0;
     for (const f of this.flames) {
-      f.visible = jet;
-      if (jet) f.scale.set(1, 0.7 + Math.random() * 0.6, 1);
+      f.visible = jet && this.jetL > 0;
+      if (f.visible) f.scale.set(this.jetW, (0.7 + Math.random() * 0.6) * this.jetL, this.jetW);
     }
     if (ground && !ski && speed > 1) {
       this.phase += dt * Math.min(12, speed * 1.2);
@@ -266,8 +273,8 @@ export class AssetModel {
     // `look()` dims every standard material in the root (and `update()` drives the glow), so
     // this asset owns clones of the shared templates; the force-field shader material is shared.
     this.glow = own(glowMat(tc, 1.4));
-    const body = own(shared('asset-body', () => new THREE.MeshStandardMaterial({ color: 0x70767e, roughness: 0.55, metalness: 0.5 })));
-    const dark = own(shared('asset-dark', () => new THREE.MeshStandardMaterial({ color: 0x33373d, roughness: 0.6, metalness: 0.6 })));
+    const body = own(shared('asset-body', () => new THREE.MeshStandardMaterial({ color: 0x70767e, roughness: 0.55, metalness: 0.5, envMapIntensity: 1.35 })));
+    const dark = own(shared('asset-dark', () => new THREE.MeshStandardMaterial({ color: 0x33373d, roughness: 0.6, metalness: 0.6, envMapIntensity: 1.2 })));
     const add = (g: THREE.BufferGeometry, m: THREE.Material, x = 0, y = 0, z = 0, parent: THREE.Object3D = this.root) => {
       const mesh = new THREE.Mesh(g, m);
       mesh.position.set(x, y, z);
@@ -440,7 +447,7 @@ export class VehicleModel {
     const tc = teamColor(v.team);
     // Vehicle materials are never mutated after construction and vehicles are never disposed,
     // so all four are shared per team.
-    const hull = shared('veh-hull', () => new THREE.MeshStandardMaterial({ color: 0x7d858e, metalness: 0.6, roughness: 0.45 }));
+    const hull = shared('veh-hull', () => new THREE.MeshStandardMaterial({ color: 0x7d858e, metalness: 0.6, roughness: 0.45, envMapIntensity: 1.3 }));
     const accent = shared(`veh-accent|${tc}`, () => new THREE.MeshStandardMaterial({ color: tc, emissive: tc, emissiveIntensity: 0.3, metalness: 0.4, roughness: 0.5 }));
     const glow = glowMat(tc, 2);
     const add = (g: THREE.BufferGeometry, m: THREE.Material, x = 0, y = 0, z = 0, parent: THREE.Object3D = this.root) => {

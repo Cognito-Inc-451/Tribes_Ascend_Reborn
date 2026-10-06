@@ -148,8 +148,18 @@ export class Predictor {
   }
 
   renderPos(dt: number): Vec3 {
-    const k = Math.exp(-dt * 12);
-    this.errorOffset = { x: this.errorOffset.x * k, y: this.errorOffset.y * k, z: this.errorOffset.z * k };
+    // Decay the prediction error gently. A fast decay (12/s) drains the offset in a few frames, and with a
+    // server snapshot every 50ms the residual error arrives as a fresh step each time - on flat ground, where
+    // the server's terrain snap pins the player to exactly h, the per-snapshot error is a repeating vertical
+    // tick, which the player sees as a vibration while walking. Slower decay spreads each correction over
+    // ~0.3s so consecutive corrections blend into one smooth glide.
+    const k = Math.exp(-dt * 4.5);
+    // Horizontal error is a position correction the eye should absorb quickly. Vertical error on a flat floor is
+    // mostly the server re-snapping the player to the terrain height, so a fast decay turns each 50ms snapshot
+    // into a visible up/down tick (walking vibration). Bleed the vertical component out slowly so consecutive
+    // snaps blend into one smooth glide.
+    const ky = Math.exp(-dt * 1.1);
+    this.errorOffset = { x: this.errorOffset.x * k, y: this.errorOffset.y * ky, z: this.errorOffset.z * k };
     return { x: this.state.pos.x + this.errorOffset.x, y: this.state.pos.y + this.errorOffset.y, z: this.state.pos.z + this.errorOffset.z };
   }
 }
