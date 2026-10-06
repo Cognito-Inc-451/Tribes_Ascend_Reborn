@@ -7,18 +7,19 @@ import { TextureStore } from './textures.js';
 /** Normal-map strength for imported TA models and map meshes. */
 export const NORMAL_STRENGTH = 0.9;
 
-/** Sections that are self-lit displays in TA (weapon glass, map screens) — they glow, they are not lit.
- *  `window` catches the spinfusor's authored sight glass (`T_Wep_LightSpinfusor_Window_Dif`). */
-const DISPLAY_TEX = /scanlines|display|screen|hud|window/i;
-/** Self-lit, but kept *under* the bloom knee with HDR off (threshold 0.72, knee 0.25). The authored glass is a
- *  mid grey (mean luminance ~0.39) whose bright scanline streaks approach 1.0; at 1.5 those streaks cleared the
- *  threshold and bloomed, and bloom desaturates, so the whole panel blew out to white (the "glowing white
- *  gridlines" report). 0.85 puts the streaks into the knee only: the glass reads as lit, not as a lamp. */
+/** Authored display art on TA weapons (chaingun panel, spinfusor sight glass): self-lit, not shaded. Kept *under* the
+ *  bloom knee with HDR off (threshold 0.72, knee 0.25): at higher intensity the bright parts bloom, bloom
+ *  desaturates, and the panel blows out to white. */
+const DISPLAY_TEX = /display|screen|hud|window/i;
 const DISPLAY_GLOW = 0.85;
-/** TA draws its weapon LCDs in phosphor blue over the neutral scanline glass (the spinfusor glass reads
- *  "75 / 2 SAFE" in blue), so the shared glass and the authored display panels are tinted LCD blue. Saturated
- *  hard toward blue (low red) so the emissive stays chromatic at the knee - a pale blue blooms to white. */
+/** TA draws its weapon LCDs in phosphor blue. Saturated hard toward blue (low red) so the emissive stays chromatic
+ *  at the knee - a pale blue blooms to white. */
 const DISPLAY_TINT = 0x2f8fff;
+/** Most 1P weapons carry `T_FX_ScanLines01` on their ammo screen: a shared 64x64 tile of bright streaks. Used as a
+ *  texture it reads as white gridlines, so that glass is drawn as a plain lit blue LCD without the streaks. */
+const GLASS_TEX = /scanlines/i;
+const GLASS_COLOR = 0x0a2038;
+const GLASS_GLOW = 0.5;
 
 /** Program cache keys for the two async shader patches. Both are fixed strings composed from the material's
  *  installed-patch flags, so a material ends up with the *same* key whichever order the patches land in: a key
@@ -43,7 +44,8 @@ export interface ModelData {
 function parse(key: string, buf: ArrayBuffer): ModelData | null {
   const v = new DataView(buf);
   const dec = new TextDecoder('latin1');
-  if (dec.decode(new Uint8Array(buf, 0, 4)) !== 'AMD1') return null;
+  const magic = dec.decode(new Uint8Array(buf, 0, 4));
+  if (magic !== 'AMD1' && magic !== 'AMD2') return null;
   let o = 4;
   const nb = v.getUint16(o, true); o += 2;
   const nv = v.getUint32(o, true); o += 4;
@@ -62,6 +64,8 @@ function parse(key: string, buf: ArrayBuffer): ModelData | null {
   const si = new Uint16Array(buf.slice(o, o + nv * 8)); o += nv * 8;
   const swRaw = new Uint8Array(buf, o, nv * 4); o += nv * 4;
   const idx32 = new Uint32Array(buf.slice(o, o + ni * 4)); o += ni * 4;
+  // AMD1 exports wound every face inward (see the importer); flip them so models from an older import still face out.
+  if (magic === 'AMD1') for (let i = 0; i + 2 < ni; i += 3) { const t = idx32[i + 1]; idx32[i + 1] = idx32[i + 2]; idx32[i + 2] = t; }
   const sections: ModelData['sections'] = [];
   for (let i = 0; i < ns; i++) {
     const first = v.getUint32(o, true), count = v.getUint32(o + 4, true); o += 8;
@@ -156,6 +160,11 @@ class ModelLibrary {
       const mat = new THREE.MeshStandardMaterial({ color: tint ?? 0xffffff, roughness: 0.68, metalness: 0.06, envMapIntensity: 0.6, side: THREE.DoubleSide });
       if (s.tex && this.textures) void this.textures.get(s.tex).then((t) => {
         if (!t) return;
+        if (!selfLit && !t.userData.packed && GLASS_TEX.test(s.tex)) {
+          mat.color.setHex(GLASS_COLOR); mat.emissive.setHex(DISPLAY_TINT); mat.emissiveIntensity = GLASS_GLOW;
+          mat.needsUpdate = true;
+          return;
+        }
         mat.map = t;
         if (t.userData.packed) {
           // A channel-packed mask the material recolours (it looks magenta raw): its luminance shades the team colour.
@@ -172,8 +181,6 @@ class ModelLibrary {
           };
         }
         if (selfLit) { mat.emissiveMap = t; mat.emissive.setHex(0xffffff); mat.emissiveIntensity = selfLit; }
-        // TA paints its displays (weapon glass, screens) as self-lit emissive. Without that the scanline
-        // glass is just a dark diffuse quad and reads as flat black, so the ammo counter on it vanishes too.
         else if (!t.userData.packed && DISPLAY_TEX.test(s.tex)) {
           mat.emissiveMap = t; mat.emissive.setHex(DISPLAY_TINT); mat.emissiveIntensity = DISPLAY_GLOW;
         }
@@ -182,8 +189,8 @@ class ModelLibrary {
       if (s.normal && this.textures && settings.textureDetail !== 'low') void this.textures.get(s.normal, true).then((t) => {
         if (!t) return;
         mat.normalMap = t;
-        // UE3 normal maps are DirectX-style (green down) and our axis swap mirrors the mesh: flip both.
-        mat.normalScale.set(-NORMAL_STRENGTH, NORMAL_STRENGTH);
+        // UE3 normal maps are DirectX-style (green down); the tangent frame is right-handed with outward-wound faces.
+        mat.normalScale.set(NORMAL_STRENGTH, -NORMAL_STRENGTH);
         mat.needsUpdate = true;
       });
       return mat;

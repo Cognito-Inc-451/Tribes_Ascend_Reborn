@@ -952,8 +952,7 @@ export class GameClient {
         const rl = self?.reload ?? 0;
         if (rl > 0 && this.lastReload === 0) fp.player.play('reload', false, 0.1);
         this.lastReload = rl;
-        const am = self?.ammo[this.slot];
-        fp.update(dt, am?.[0] ?? 0, am?.[1] ?? 0, Math.max(rl, self?.spin ?? 0, self?.charge ?? 0));
+        fp.update(dt);
       }
       setViewModelStealth(this.viewModel, !!me && (me.flags & PF.STEALTH) !== 0, performance.now() / 1000);
     }

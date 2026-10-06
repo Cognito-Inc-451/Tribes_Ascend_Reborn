@@ -102,7 +102,7 @@ export const ANIMS_1P: Record<string, string> = {
 const S = 1 / UU_PER_METER;
 
 /**
- * Binary model (gzipped): 'AMD1', u16 bones, u32 verts, u32 indices, u16 sections; bones (name, i16 parent, quat, pos);
+ * Binary model (gzipped): 'AMD2' ('AMD1' is the same layout with inward-wound faces), u16 bones, u32 verts, u32 indices, u16 sections; bones (name, i16 parent, quat, pos);
  * f32 positions, f32 uvs, u16 skin indices, u8 skin weights, u32 indices; sections (u32 first, u32 count, texture name).
  * Converted to the client's space: metres, y-up (UE y/z swapped, so quaternions become (-x,-z,-y,w)).
  */
@@ -114,7 +114,7 @@ function encodeModel(m: SkelMeshData, tex: (string | null)[]): Buffer {
   const size = 16 + names.reduce((a, b) => a + 1 + b.length + 2 + 28, 0) + n * (12 + 8 + 8 + 4) + m.indices.length * 4 + secNames.reduce((a, b) => a + 9 + b.length, 0);
   const buf = Buffer.alloc(size);
   let o = 0;
-  buf.write('AMD1', 0, 'latin1'); o = 4;
+  buf.write('AMD2', 0, 'latin1'); o = 4;
   buf.writeUInt16LE(m.bones.length, o); o += 2;
   buf.writeUInt32LE(n, o); o += 4;
   buf.writeUInt32LE(m.indices.length, o); o += 4;
@@ -128,10 +128,10 @@ function encodeModel(m: SkelMeshData, tex: (string | null)[]): Buffer {
   for (let i = 0; i < n * 2; i++) { buf.writeFloatLE(m.uvs[i], o); o += 4; }
   for (let i = 0; i < n * 4; i++) { buf.writeUInt16LE(m.skinIndex[i], o); o += 2; }
   for (let i = 0; i < n * 4; i++) buf.writeUInt8(m.skinWeight[i], o++);
-  // Axis swap mirrors the mesh: reverse winding to keep faces outward.
-  for (let i = 0; i < m.indices.length; i += 3) {
-    buf.writeUInt32LE(m.indices[i], o); buf.writeUInt32LE(m.indices[i + 2], o + 4); buf.writeUInt32LE(m.indices[i + 1], o + 8); o += 12;
-  }
+  // UE's triangles are clockwise in its left-handed space; the y/z swap above is a mirror, which already turns
+  // them counter-clockwise for the client's right-handed space. Reversing them again (what AMD1 did) left every
+  // face wound inward, so any front-face-only material drew the inside of the model.
+  for (let i = 0; i < m.indices.length; i++) { buf.writeUInt32LE(m.indices[i], o); o += 4; }
   m.sections.forEach((s, i) => {
     buf.writeUInt32LE(s.firstIndex, o); buf.writeUInt32LE(s.numTriangles * 3, o + 4); o += 8;
     buf.writeUInt8(secNames[i].length, o++); buf.set(secNames[i], o); o += secNames[i].length;

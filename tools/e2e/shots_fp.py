@@ -35,9 +35,6 @@ with sync_playwright() as p:
     print('fp loaded:', page.evaluate("() => !!window.__ar.client().viewModel.children[0]?.userData.fp"))
     page.evaluate("() => window.__ar.client().viewModel.children[0]?.userData.fp?.player.play('Idle', true, 0)")
     time.sleep(4)
-    print('readout:', page.evaluate("""() => { const c = window.__ar.client(); const fp = c.viewModel.children[0]?.userData.fp; if (!fp) return 'none';
-        const cam = window.__ar.renderer.camera; const m = fp.ammo.mesh; const p = m.getWorldPosition(m.position.clone().set(0,0,0)); cam.worldToLocal(p);
-        return { placed: fp.placed, parent: m.parent?.name, cam: [p.x.toFixed(3), p.y.toFixed(3), p.z.toFixed(3)], playing: fp.player.playing }; }"""))
     page.screenshot(path=os.path.join(out, '40_fp_idle.png'))
     page.evaluate("() => window.__ar.client().viewModel.children[0]?.userData.fp?.player.play('Fire', false, 0.04)")
     time.sleep(0.12)
@@ -52,8 +49,5 @@ with sync_playwright() as p:
     print('later:', page.evaluate("() => { const fp = window.__ar.client().viewModel.children[0]?.userData.fp; return fp ? fp.player.playing : 'no fp'; }"))
     page.evaluate("() => window.__ar.client().viewModel.children[0]?.userData.fp?.player.play('Idle', true, 0)")
     time.sleep(3)
-    print('readout:', page.evaluate("""() => { const fp = window.__ar.client().viewModel.children[0]?.userData.fp; if (!fp) return 'none';
-        const cam = window.__ar.renderer.camera; const m = fp.ammo.mesh; const p = m.getWorldPosition(m.position.clone().set(0,0,0)); cam.worldToLocal(p);
-        return { placed: fp.placed, cam: [p.x.toFixed(3), p.y.toFixed(3), p.z.toFixed(3)] }; }"""))
     page.screenshot(path=os.path.join(out, '44_fp_secondary_idle.png'))
     browser.close()
