@@ -65,6 +65,10 @@ async function connectWT(url: string, certHash: string | undefined, timeoutMs: n
       }
     } catch { /* closed */ }
   })();
+  // Report the drop exactly once. wt.closed carries the server's close reason (e.g. a kick),
+  // so a stream ending alone waits briefly for it before falling back to a generic reason.
+  let ended = false;
+  const fireClose = (reason: string) => { if (closed || ended) return; ended = true; t.onClose(reason); };
   void (async () => {
     const r = stream.readable.getReader();
     let buf = new Uint8Array(0);
@@ -84,9 +88,9 @@ async function connectWT(url: string, certHash: string | undefined, timeoutMs: n
         buf = merged.slice(off);
       }
     } catch { /* closed */ }
-    if (!closed) t.onClose('connection closed');
+    setTimeout(() => fireClose('connection closed'), 300);
   })();
-  wt.closed.then(() => { if (!closed) t.onClose('connection closed'); }, () => { if (!closed) t.onClose('connection lost'); });
+  wt.closed.then((info: unknown) => fireClose((info as { reason?: string } | undefined)?.reason || 'connection closed'), () => fireClose('connection lost'));
   return t;
 }
 

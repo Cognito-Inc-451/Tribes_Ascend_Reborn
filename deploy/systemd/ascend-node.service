@@ -1,0 +1,49 @@
+# Ascend Reborn — full node (OPTIONAL, only if you intend to serve the web client).
+#
+# This variant runs the local node: it serves the built client, the discovery/lobby
+# endpoints and /assets/* from YOUR import. Two caveats, both deliberate:
+#   * /assets/* exposes your imported Hi-Rez content to anyone who asks. Only run
+#     this with content you are allowed to distribute.
+#   * /peers, /hosted and /social are loopback-only, so remote players get 403 on
+#     them and an empty server list. The node is useful to the public only as a
+#     RELAY (NATed players host games through it) — for that you need just 7770/tcp.
+# Prefer deploy/systemd/ascend-servers.service for a public game server.
+#
+# Install:
+#   sudo cp deploy/systemd/ascend-node.service /etc/systemd/system/
+#   sudo cp deploy/servers.env.example /etc/ascend/node.env && sudo $EDITOR /etc/ascend/node.env
+#   sudo chmod 600 /etc/ascend/node.env
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ascend-node
+#
+# The node serves the built client, so the unit builds it before starting.
+
+[Unit]
+Description=Ascend Reborn local node (web client + relay)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ascend
+Group=ascend
+WorkingDirectory=/opt/ascend
+Environment=NODE_ENV=production
+Environment=AR_NODE_PORT=7770
+EnvironmentFile=/etc/ascend/node.env
+# Root `start` = build the client, then run the node with the config's servers.
+ExecStart=/usr/bin/npm start
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ascend
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target

@@ -110,20 +110,53 @@ async function join(info: ServerInfo) {
   leave();
   menus.show(false);
   showConnecting(info, `Negotiating ${info.transports.includes('webtransport') ? 'WebTransport' : 'WebSocket'}`);
+  await connectAndWire(info, 0);
+}
+
+/** Server-initiated closes that mean "you must not come back" - never reconnect on these. */
+const FINAL_CLOSES = ['vote kicked', 'kicked by admin', 'server closed', 'full', 'version', 'flood'];
+const MAX_RECONNECT = 3;
+
+async function connectAndWire(info: ServerInfo, attempt: number): Promise<void> {
   try {
     const { transport, fellBack, error } = await connect(info, settings.transport);
     const s = new Session(transport, info);
     session = s;
     showConnecting(info, `Connected via ${transport.kind === 'webtransport' ? 'WebTransport' : 'WebSocket'}${fellBack ? ` (fallback: ${error})` : ''}`, 0.1);
-    s.onClose = (reason) => leave(`Disconnected: ${reason}`);
+    s.onClose = (reason) => { if (session === s) void handleDrop(info, reason, attempt); };
     s.onJson = (msg: S2C) => {
       if (msg.t === 'error') leave(msg.msg);
       if (msg.t === 'welcome') void enterMap(s, msg.map, fellBack, true);
     };
     s.hello();
   } catch (e) {
+    // A transient connect failure (UDP blip, server mid-tick) gets the same retry ladder as a drop.
+    if (attempt < MAX_RECONNECT && loading) {
+      showConnecting(info, `Connection failed: ${(e as Error).message}. Retrying (${attempt + 1}/${MAX_RECONNECT})…`, 0.02 * (attempt + 1));
+      await new Promise((r) => setTimeout(r, 500 * (attempt + 1)));
+      if (session || !loading) return; // cancelled or a new join took over
+      return connectAndWire(info, attempt + 1);
+    }
     leave(`Could not connect: ${(e as Error).message}`);
   }
+}
+
+/** Transport drop: ride out transient QUIC/WS losses by re-joining the same server (fresh spawn). */
+async function handleDrop(info: ServerInfo, reason: string, attempt: number): Promise<void> {
+  const s = session;
+  session = null;
+  s?.close();
+  if (attempt >= MAX_RECONNECT || FINAL_CLOSES.some((r) => reason.includes(r))) {
+    leave(`Disconnected: ${reason}`);
+    return;
+  }
+  const next = attempt + 1;
+  showConnecting(info, `Connection lost (${reason}). Reconnecting (${next}/${MAX_RECONNECT})…`, 0.02 * next);
+  await new Promise((r) => setTimeout(r, 400 * next));
+  if (session || !loading) return; // cancelled or a new join took over
+  client?.dispose();
+  client = null;
+  await connectAndWire(info, next);
 }
 
 async function enterMap(s: Session, ref: Extract<S2C, { t: 'welcome' }>['map'], fellBack: boolean, first = false) {

@@ -1,0 +1,52 @@
+# Ascend Reborn — public dedicated game servers.
+#
+# Runs the servers from your VPS config with --no-node, which is the right shape
+# for a public box: the local node is what serves /assets/* (your imported,
+# copyrighted Hi-Rez content) and its lobby endpoints are loopback-only anyway.
+# With --no-node the box runs game servers only, and every player loads textures,
+# voices and models from their own machine. Maps are streamed by the server itself
+# (GET /map/<file>.arm.gz), so players do not need an import to play.
+#
+# Install:
+#   sudo cp deploy/systemd/ascend-servers.service /etc/systemd/system/
+#   sudo mkdir -p /etc/ascend
+#   sudo cp deploy/servers.env.example /etc/ascend/servers.env && sudo $EDITOR /etc/ascend/servers.env
+#   sudo chmod 600 /etc/ascend/servers.env
+#   sudo cp deploy/servers-vps.json /opt/ascend/config/servers.json
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ascend-servers
+#   journalctl -u ascend-servers -f
+#
+# Maps: copy your own import to /opt/ascend/maps-original to host original maps
+# (AR_MAPS_ORIGINAL points elsewhere if you keep them on another disk).
+
+[Unit]
+Description=Ascend Reborn dedicated game servers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ascend
+Group=ascend
+WorkingDirectory=/opt/ascend
+Environment=NODE_ENV=production
+# PUBLIC_HOST, MASTER_URL, MASTER_KEY, ADMIN_PASSWORD, AR_* live in the env file.
+EnvironmentFile=/etc/ascend/servers.env
+ExecStart=/usr/bin/npm run start -w @ar/server -- --no-node
+Restart=always
+RestartSec=5
+# Discovery removes its UPnP port maps on SIGTERM; give it a moment, then stop hard.
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ascend
+# 7 default servers with 76 bots wants roughly 4 vCPU / 8 GB; trim bots.fillTo on smaller boxes.
+MemoryMax=6G
+
+[Install]
+WantedBy=multi-user.target

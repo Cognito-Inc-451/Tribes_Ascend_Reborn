@@ -1,0 +1,11 @@
+{
+  "_comment": "VPS variant of config/servers.json. Copy to /opt/ascend/config/servers.json. publicHost is overridden by PUBLIC_HOST in /etc/ascend/servers.env, so the value here is only a fallback. Trim bots.fillTo to your CPU: each bot is simulated at 60 Hz. Measure with: npx tsx packages/server/scripts/botmatch.ts ctf katabatic original 14 300",
+  "publicHost": "203.0.113.10",
+  "node": { "port": 7770, "lan": false, "internet": false, "upnp": false, "relay": false },
+  "servers": [
+    { "id": "ctf", "name": "Reborn CTF | EU", "mode": "ctf", "mapSource": "original", "maps": ["katabatic", "arxnovena", "crossfire", "drydock", "tartarus", "raindance", "bellaomega", "blueshift"], "port": 7777, "wtPort": 7777, "maxPlayers": 24, "bots": { "fillTo": 12, "difficulty": "adept" }, "region": "eu" },
+    { "id": "blitz", "name": "Reborn CTF Blitz | EU", "mode": "blitz", "mapSource": "original", "maps": ["katabatic", "arxnovena", "crossfire", "drydock", "bellaomega", "blueshift"], "port": 7778, "wtPort": 7778, "maxPlayers": 16, "bots": { "fillTo": 8, "difficulty": "adept" }, "region": "eu" },
+    { "id": "tdm", "name": "Reborn TDM | EU", "mode": "tdm", "mapSource": "original", "maps": ["drydocknight", "inferno", "nightabatic", "outskirts", "quicksand", "sulfurcove"], "port": 7779, "wtPort": 7779, "maxPlayers": 20, "bots": { "fillTo": 10, "difficulty": "adept" }, "region": "eu" },
+    { "id": "training", "name": "Reborn Ski Training | EU", "mode": "training", "mapSource": "reborn", "maps": ["skitraining"], "port": 7780, "wtPort": 7780, "maxPlayers": 16, "bots": { "fillTo": 0, "difficulty": "recruit" }, "region": "eu" }
+  ]
+}

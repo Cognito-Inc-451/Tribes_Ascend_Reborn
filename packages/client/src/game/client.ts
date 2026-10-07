@@ -886,10 +886,31 @@ export class GameClient {
       const veh = snap?.vehicles.find((v) => v.id === me.vehicle);
       const vv = veh ? this.vehViews.get(veh.id) : undefined;
       const base = vv ? vv.root.position : new THREE.Vector3(me.pos.x, me.pos.y, me.pos.z);
-      const d = dirFromAngles(yaw, pitch);
+      const size: [number, number, number] = veh ? VEHICLES[VEHICLE_TYPES[veh.type]].size : [1, 1, 1];
+      // Same treatment as the on-foot chase cam: sit on the ray the vehicle's gun fires along,
+      // with no vertical lift, so the screen-center crosshair and the shot agree (the old +3.5
+      // lift put the view above the shot line, exactly like the +0.8 lift did on foot).
+      // Beowulf mortar and gunner hitscan both aim at the mouse; gravcycle and Shrike fire along
+      // the hull, so their camera follows the hull angles (which lag the mouse while turning).
+      const ay = veh && veh.type !== 1 ? veh.yaw : yaw;
+      const ap = veh && veh.type !== 1 ? veh.pitch : pitch;
+      const d = dirFromAngles(ay, ap);
+      // Shot origin: gunner hitscan fires from the turret eye, driver fire from the muzzle height.
+      const eye = { x: base.x, y: base.y + (me.seat === 1 ? size[1] + 1 : size[1] * 0.8), z: base.z };
       const back = veh?.type === 1 ? 14 : 9;
-      cam.position.set(base.x - d.x * back, base.y + 3.5 - d.y * back, base.z - d.z * back);
-      cam.rotation.set(pitch, yaw, 0, 'YXZ');
+      const hit = this.world.raycast(eye, { x: eye.x - d.x * back, y: eye.y - d.y * back, z: eye.z - d.z * back });
+      let dist = hit ? Math.max(1.5, back * (hit.t - 0.05)) : back;
+      // The eye sits inside the hull, so a world raycast alone would let the camera end up buried
+      // in it once the lift is gone. Keep it outside the hull box: the support radius of an
+      // oriented box along the view ray is its exact half-extent in that direction.
+      const hull = makeOBB({ x: base.x, y: base.y + size[1], z: base.z }, size, veh?.yaw ?? 0, veh?.pitch ?? 0, veh?.roll ?? 0);
+      const ax = hull.axes;
+      const r = Math.abs(d.x * ax[0] + d.y * ax[1] + d.z * ax[2]) * size[0]
+        + Math.abs(d.x * ax[3] + d.y * ax[4] + d.z * ax[5]) * size[1]
+        + Math.abs(d.x * ax[6] + d.y * ax[7] + d.z * ax[8]) * size[2];
+      dist = Math.max(dist, r + 1.2);
+      cam.position.set(eye.x - d.x * dist, eye.y - d.y * dist, eye.z - d.z * dist);
+      cam.rotation.set(ap, ay, 0, 'YXZ');
       focus = base.clone();
     } else if (!this.pred.alive) {
       if (this.deathPos) {
@@ -909,12 +930,19 @@ export class GameClient {
       const eye = { x: localPos.x, y: localPos.y + phys.height * 0.9, z: localPos.z };
       if (this.thirdPerson) {
         const d = dirFromAngles(yaw, pitch);
-        const want = { x: eye.x - d.x * 5, y: eye.y + 0.8 - d.y * 5, z: eye.z - d.z * 5 };
-        const hit = this.world.raycast(eye, want);
-        const k = hit ? Math.max(0.1, hit.t - 0.05) : 1;
-        cam.position.set(eye.x + (want.x - eye.x) * k, eye.y + (want.y - eye.y) * k, eye.z + (want.z - eye.z) * k);
-        // Aim at the eye so the character stays centered even when the chase cam is pulled in by geometry.
-        cam.lookAt(eye.x, eye.y, eye.z);
+        // Chase cam sits exactly ON the aim ray behind the eye: the screen-center ray then coincides
+        // with the eye's aim line, so the crosshair, disc and hitscan all agree. Any vertical lift
+        // here (the old +0.8) makes the view parallel to but above the aim, and shots land low.
+        const hit = this.world.raycast(eye, { x: eye.x - d.x * 5, y: eye.y - d.y * 5, z: eye.z - d.z * 5 });
+        // Floor the pull-in at 1.2 m: with no lift the camera rides the body axis, so closer than the
+        // capsule radius (heavy is 0.7) it ends up inside our own model against a wall.
+        const k = hit ? Math.max(0.24, hit.t - 0.05) : 1;
+        const dist = 5 * k;
+        cam.position.set(eye.x - d.x * dist, eye.y - d.y * dist, eye.z - d.z * dist);
+        // Orientation comes from the aim angles, not lookAt: the view direction matches the crosshair
+        // exactly (lookAt + the chase offset tilted the view ~9° off the aim), and extreme pitch no
+        // longer degenerates the lookAt roll.
+        cam.rotation.set(pitch, yaw, 0, 'YXZ');
       } else {
         // TA's walk shake lives on the *camera*: a footfall bob and a hair of roll. Keeping it here
         // (instead of on the viewmodel) means the weapon and its ammo readout stay steady on screen.

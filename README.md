@@ -285,6 +285,9 @@ Branches: **A**ttack, **D**efend, **F**lag, **G**lobal (**C**ompliment, **R**esp
 ## Hosting
 <img width="404" height="667" alt="image" src="https://github.com/user-attachments/assets/11d197c9-972b-4aad-a552-9986799b4c54" />
 
+Running a server for other players (VPS sizing, ports, systemd units, master key,
+`deploy/servers-vps.json`): see [HOSTING.md](./HOSTING.md).
+
 - *Play → Host Game*: pick game type, **map set** (original maps by default; generated "Reborn" layouts on request),
   map or rotation, bots per team and skill, limits and rule toggles, then *Launch*. Your game is announced to this PC,
   your LAN and (with port mapping or a relay) the internet, and shuts down after 10 minutes without players.

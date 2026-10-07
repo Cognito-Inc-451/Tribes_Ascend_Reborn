@@ -6,6 +6,8 @@ class WsConnection implements Connection {
   readonly kind = 'websocket' as const;
   onMessage: (data: Uint8Array) => void = () => {};
   onClose: () => void = () => {};
+  private isAlive = true;
+  private keepalive: ReturnType<typeof setInterval> | null = null;
 
   constructor(private ws: WebSocket, readonly remote: string) {
     ws.binaryType = 'nodebuffer';
@@ -13,8 +15,20 @@ class WsConnection implements Connection {
       const buf = isBinary ? new Uint8Array(data as Buffer) : new TextEncoder().encode(data.toString());
       this.onMessage(buf);
     });
-    ws.on('close', () => this.onClose());
+    ws.on('pong', () => { this.isAlive = true; });
+    ws.on('close', () => this.cleanup());
     ws.on('error', () => ws.terminate());
+    // Detect half-open sockets (NAT drops, laptop sleep) so the player slot is freed promptly.
+    this.keepalive = setInterval(() => {
+      if (!this.isAlive) { ws.terminate(); return; }
+      this.isAlive = false;
+      try { ws.ping(); } catch { this.cleanup(); }
+    }, 15000);
+  }
+
+  private cleanup() {
+    if (this.keepalive) { clearInterval(this.keepalive); this.keepalive = null; }
+    this.onClose();
   }
 
   sendReliable(data: Uint8Array): void {
@@ -26,7 +40,7 @@ class WsConnection implements Connection {
     if (this.ws.bufferedAmount < 256 * 1024) this.sendReliable(data);
   }
 
-  close(reason?: string): void { this.ws.close(1000, reason?.slice(0, 120)); }
+  close(reason?: string): void { this.cleanup(); this.ws.close(1000, reason?.slice(0, 120)); }
   backlog(): number { return this.ws.bufferedAmount; }
 }
 

@@ -1,0 +1,45 @@
+# Ascend Reborn — master server (the public server list).
+#
+# Game servers POST /announce every 10 seconds; players' clients GET /servers.
+# The list lives in memory only, so this must be a long-lived process: a
+# serverless/free tier that sleeps empties the list within 35 seconds (the TTL).
+# The master needs no game assets and no Tribes: Ascend import.
+#
+# Install:
+#   sudo cp deploy/systemd/ascend-master.service /etc/systemd/system/
+#   sudo mkdir -p /etc/ascend
+#   sudo sh -c 'umask 077; printf "MASTER_KEY=%s\n" "$(openssl rand -hex 24)" > /etc/ascend/master.env'
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ascend-master
+#   journalctl -u ascend-master -f
+#
+# Put the same MASTER_KEY in /etc/ascend/servers.env, or announces are rejected 403.
+
+[Unit]
+Description=Ascend Reborn master server (public server list)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ascend
+Group=ascend
+WorkingDirectory=/opt/ascend
+Environment=NODE_ENV=production
+Environment=MASTER_PORT=8787
+EnvironmentFile=/etc/ascend/master.env
+ExecStart=/usr/bin/npm run start -w @ar/master
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+KillSignal=SIGTERM
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/ascend
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

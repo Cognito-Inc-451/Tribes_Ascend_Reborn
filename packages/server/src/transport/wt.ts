@@ -48,28 +48,37 @@ class WtConnection implements Connection {
   private async acceptStreams() {
     const reader = this.session.incomingBidirectionalStreams.getReader();
     try {
-      const { value: stream } = await reader.read();
-      if (!stream) return;
-      this.streamWriter = stream.writable.getWriter();
-      for (const p of this.pendingReliable) void this.writeReliable(p);
-      this.pendingReliable = [];
-      const dec = new FrameDecoder();
-      const sr = stream.readable.getReader();
+      // Keep adopting streams for the life of the session: if a client re-opens its reliable
+      // stream mid-session, we re-point the writer at it instead of tearing the connection down.
       for (;;) {
-        const { value, done } = await sr.read();
-        if (done) break;
-        if (value && !dec.push(new Uint8Array(value), (f) => this.onMessage(f), 256 * 1024)) { this.close('frame too large'); break; }
+        const { value: stream, done } = await reader.read();
+        if (done || !stream) break;
+        this.streamWriter = stream.writable.getWriter();
+        for (const p of this.pendingReliable) void this.writeReliable(p);
+        this.pendingReliable = [];
+        const dec = new FrameDecoder();
+        const sr = stream.readable.getReader();
+        for (;;) {
+          const { value, done: sd } = await sr.read();
+          if (sd) break;
+          if (value && !dec.push(new Uint8Array(value), (f) => this.onMessage(f), 256 * 1024)) { this.close('frame too large'); return; }
+        }
       }
     } catch { /* closed */ }
-    this.finish();
+    // A stream ending alone is not a disconnect - only the session close (wired in the ctor) ends the connection.
+    if (this.streamWriter) { try { await this.streamWriter.close(); } catch { /* ignore */ } }
+    this.streamWriter = null;
   }
 
   private async writeReliable(data: Uint8Array) {
     if (!this.streamWriter) return;
+    const w = this.streamWriter;
     const f = frame(data);
     this.backlogBytes += f.length;
-    try { await this.streamWriter.write(f); } catch { /* closed */ }
+    try { await w.write(f); } catch { /* closed */ }
     this.backlogBytes -= f.length;
+    // Stream was swapped mid-write: queue the frame so it goes out on the current stream.
+    if (!this.closed && w !== this.streamWriter && !this.streamWriter) this.pendingReliable.push(data);
   }
 
   sendReliable(data: Uint8Array): void {
@@ -105,7 +114,7 @@ export async function startWtServer(port: number, cert: string, key: string, onC
   }
   let server: InstanceType<typeof mod.Http3Server>;
   try {
-    server = new mod.Http3Server({ port, host: '0.0.0.0', secret: randomBytes(16).toString('hex'), cert, privKey: key, defaultDatagramsReadableMode: 'bytes' });
+    server = new mod.Http3Server({ port, host: '0.0.0.0', secret: randomBytes(16).toString('hex'), cert, privKey: key, defaultDatagramsReadableMode: 'bytes', maxIdleTimeout: 60000 });
     server.startServer();
     const ok = await Promise.race([server.ready.then(() => true), new Promise<boolean>((r) => setTimeout(() => r(false), 4000))]);
     if (!ok) { log(`WebTransport listener on UDP ${port} did not start; WebSocket only.`); try { server.stopServer(); } catch { /* ignore */ } return null; }
