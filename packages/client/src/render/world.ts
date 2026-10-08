@@ -927,9 +927,9 @@ export class WorldView {
         .replace('#include <begin_vertex>', `vec3 transformed = vec3( position );
 vec3 pv = position + vec3(${vx}, ${vy}, ${vz}) * uTime;
 transformed = vec3(
-	cameraPosition.x + mod( pv.x - cameraPosition.x + ${H}, ${B} ) - ${H},
-	cameraPosition.y + mod( pv.y - cameraPosition.y + ${H}, ${B} ) - ${H},
-	cameraPosition.z + mod( pv.z - cameraPosition.z + ${H}, ${B} ) - ${H} );
+	cameraPosition.x + mod( pv.x - cameraPosition.x + ${H}.0, ${B}.0 ) - ${H}.0,
+	cameraPosition.y + mod( pv.y - cameraPosition.y + ${H}.0, ${B}.0 ) - ${H}.0,
+	cameraPosition.z + mod( pv.z - cameraPosition.z + ${H}.0, ${B}.0 ) - ${H}.0 );
 if ( aShelter > 0.5 ) transformed.y = -1e5;`);
     };
     // Velocity is baked into the source above, so each kind needs its own program.

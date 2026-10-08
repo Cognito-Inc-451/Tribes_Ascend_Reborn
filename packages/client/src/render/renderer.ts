@@ -124,12 +124,13 @@ export class Renderer {
     return {
       hdr: settings.hdr, msaa: settings.antialias ? 4 : 0, bloom: settings.bloom ? settings.bloomStrength : 0,
       ao: settings.ao === 'high' ? 2 : settings.ao === 'low' ? 1 : 0, godrays: settings.godrays ? 0.4 : 0, dof: settings.dof,
-      motionBlur: settings.motionBlur, ssr: settings.ssr, exposure: 1, contrast: settings.contrast, saturation: settings.saturation,
+      motionBlur: settings.motionBlur, ssr: settings.ssr, taa: settings.taa, fsr: settings.fsr, exposure: 1, contrast: settings.contrast, saturation: settings.saturation,
       vibrance: settings.vibrance + (g.vibrance ?? 0), temperature: settings.temperature, tint: settings.tint,
       lift: new THREE.Vector3(...g.lift), gamma: new THREE.Vector3(...g.gamma), gain: new THREE.Vector3(...g.gain),
       vignette: settings.vignette, grain: settings.filmGrain, chromatic: settings.chromatic,
       // "Light" post is the cheap chain: no unsharp mask (menus label "full" as "On + sharpen").
       sharpen: settings.post === 'full' ? settings.sharpen : 0,
+      renderScale: settings.renderScale,
     };
   }
 
@@ -205,3 +206,4 @@ export class Renderer {
     else { this.renderer.setRenderTarget(null); this.renderer.render(this.scene, this.camera); }
   }
 }
+

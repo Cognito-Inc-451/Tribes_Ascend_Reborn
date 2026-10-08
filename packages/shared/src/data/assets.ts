@@ -49,7 +49,7 @@ export const ASSETS: Record<AssetType, AssetDef> = {
   supply_drop: { type: 'supply_drop', name: 'Supply Drop', health: 2000, armored: true, needsPower: false, lifetime: 90, size: [1, 1.4, 1], solid: true, src: 'TD/Call-Ins' },
 };
 
-export type VehicleType = 'gravcycle' | 'beowulf' | 'shrike';
+export type VehicleType = 'gravcycle' | 'beowulf' | 'shrike' | 'bomber' | 'havoc';
 
 export interface VehicleDef {
   type: VehicleType;
@@ -78,6 +78,10 @@ export const VEHICLES: Record<VehicleType, VehicleDef> = {
     weapon: { damage: 2000, splash: 1500, radius: 9, speed: 70, clip: 1, reload: 3.82, refire: 3.82, gravity: 0.6 }, gunner: { damage: 100, refire: 0.1, spread: 0.03 }, src: 'TD/Beowulf' },
   shrike: { type: 'shrike', name: 'Shrike', cost: 4000, health: 3200, energy: 70, seats: 1, maxPerTeam: 2, maxSpeed: 55, accel: 20, boostAccel: 35, flying: true, hover: 0, mass: 1200, size: [3, 0.9, 3],
     weapon: { damage: 350, splash: 300, radius: 4, speed: 120, clip: 4, reload: 3.86, refire: 0.3, gravity: 0 }, src: 'TD/Shrike' },
+  bomber: { type: 'bomber', name: 'Bomber', cost: 6000, health: 4000, energy: 80, seats: 3, maxPerTeam: 2, maxSpeed: 45, accel: 15, boostAccel: 25, flying: true, hover: 0, mass: 2000, size: [4, 1.2, 5],
+    weapon: { damage: 500, splash: 400, radius: 6, speed: 100, clip: 6, reload: 4.5, refire: 0.5, gravity: 0.1 }, gunner: { damage: 150, refire: 0.15, spread: 0.04 }, src: 'TD/Bomber' },
+  havoc: { type: 'havoc', name: 'Havoc', cost: 8000, health: 6000, energy: 100, seats: 6, maxPerTeam: 1, maxSpeed: 40, accel: 12, boostAccel: 20, flying: true, hover: 0, mass: 3000, size: [5, 2, 6],
+    weapon: { damage: 300, splash: 250, radius: 5, speed: 90, clip: 10, reload: 5, refire: 0.4, gravity: 0.1 }, gunner: { damage: 200, refire: 0.1, spread: 0.02 }, src: 'TD/Havoc' },
 };
 
 export type CallInType = 'tactical_strike' | 'orbital_strike' | 'supply_drop';

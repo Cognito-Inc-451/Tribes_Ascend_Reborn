@@ -234,6 +234,8 @@ export const PSEUDO_PROJECTILES: Record<string, ProjectileDef> = {
   veh_gravcycle: pseudo({ speed: 110, direct: 250, radius: 3, splashMax: 200, model: 'rocket', color: 0xffc060, inherit: 1 }),
   veh_beowulf: pseudo({ speed: 70, direct: 2000, radius: 9, splashMax: 1500, gravity: 0.6, model: 'mortar', color: 0xff8030, impulse: 80000, inherit: 0.5 }),
   veh_shrike: pseudo({ speed: 120, direct: 350, radius: 4, splashMax: 300, model: 'plasma', color: 0x80c0ff, inherit: 1 }),
+  veh_bomber: pseudo({ speed: 100, direct: 500, radius: 6, splashMax: 400, gravity: 0.1, model: 'mortar', color: 0xff6030, impulse: 60000, inherit: 0.5 }),
+  veh_havoc: pseudo({ speed: 90, direct: 300, radius: 5, splashMax: 250, gravity: 0.1, model: 'plasma', color: 0x80c0ff, inherit: 1 }),
   turret_base: pseudo({ speed: 90, direct: 650, radius: 4, splashMax: 650, model: 'plasma', color: 0xff5040 }),
   turret_exr: pseudo({ speed: 75, direct: 380, radius: 4, splashMax: 380, model: 'plasma', color: 0xffa040 }),
   sub_munition: pseudo({ speed: 20, direct: 450, radius: 7, splashMax: 450, gravity: 1, model: 'grenade', color: 0xb6ff4a, bounce: 0.3, fuse: 1.2, explodeOnExpire: true, lifetime: 3 }),

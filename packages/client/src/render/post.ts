@@ -14,6 +14,8 @@ export interface PostStructure {
   dof: number;            // strength, 0 = off
   motionBlur: number;     // shutter fraction, 0 = off
   ssr: boolean;           // screen-space reflections on water
+  taa: boolean;           // temporal anti-aliasing
+  fsr: boolean;           // FSR upscaling
 }
 
 /** Everything the post chain can do; values come from settings (see Renderer.configure). */
@@ -31,11 +33,12 @@ export interface PostOptions extends PostStructure {
   grain: number;
   chromatic: number;
   sharpen: number;
+  renderScale: number;    // for FSR
 }
 
 /** Stable key for the structural shape of the chain; equal keys mean "no rebuild needed". */
 export function structuralKey(o: PostStructure): string {
-  return [o.hdr ? 1 : 0, o.msaa, o.ao, o.dof > 0 ? 1 : 0, o.ssr ? 1 : 0, o.bloom > 0 ? 1 : 0, o.godrays > 0 ? 1 : 0, o.motionBlur > 0 ? 1 : 0].join('|');
+  return [o.hdr ? 1 : 0, o.msaa, o.ao, o.dof > 0 ? 1 : 0, o.ssr ? 1 : 0, o.bloom > 0 ? 1 : 0, o.godrays > 0 ? 1 : 0, o.motionBlur > 0 ? 1 : 0, o.taa ? 1 : 0, o.fsr ? 1 : 0].join('|');
 }
 
 /** Buffer sizes for the chain: full / half (AO, DOF) / quarter (god rays, bloom near) / eighth (bloom wide). */
@@ -48,6 +51,106 @@ export function chainSizes(w: number, h: number) {
     ww: Math.max(1, W >> 3), wh: Math.max(1, H >> 3),
   };
 }
+
+/** TAA jitter sequence (8-sample rotated grid). */
+export const TAA_JITTER = [
+  [0.25, 0.25], [-0.75, -0.75], [-0.25, 0.75], [0.75, -0.25],
+  [-0.5, -0.5], [0.5, 0.5], [-0.5, 0.5], [0.5, -0.5],
+];
+
+/**
+ * Shared shader prelude. Declared before the first fragment template that interpolates them -
+ * these are `const`, so a template evaluated at module load would hit the temporal dead zone.
+ */
+const VERT = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
+
+/** NaN/Inf texels (degenerate normals, depth at silhouettes) must never reach a blur: they grow into black blocks. */
+const CLEAN = `
+  vec3 clean3(vec3 v) { return (any(isnan(v)) || any(isinf(v))) ? vec3(0.0) : v; }
+  float clean1(float v, float def) { return (isnan(v) || isinf(v)) ? def : v; }`;
+
+const VIEWPOS = `
+  uniform sampler2D tDepth; uniform mat4 uInvProj;
+  vec3 viewPos(vec2 uv) {
+    float d = texture2D(tDepth, uv).x;
+    vec4 v = uInvProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+    return v.xyz / v.w;
+  }`;
+
+/** YCoCg-A round trip used by the TAA clamp. Inverse is R = Y+Co+Cg, G = Y-Cg, B = Y-Co+Cg. */
+const YCOCG = `
+  vec3 toYcocg(vec3 c) { return vec3(dot(c, vec3(0.25, 0.5, 0.25)), dot(c, vec3(0.5, 0.0, -0.5)), dot(c, vec3(0.25, -0.5, 0.25))); }
+  vec3 fromYcocg(vec3 c) { return vec3(c.x + c.y + c.z, c.x - c.z, c.x - c.y + c.z); }`;
+
+/** FSR 1.0 EASU (Edge-Adaptive Spatial Upscaling) - simplified version. */
+const FSR_EASU_FRAG = `varying vec2 vUv;${CLEAN}
+  uniform sampler2D tInput; uniform vec2 uInputSize; uniform vec2 uOutputSize; uniform float uSharpness;
+  // FSR EASU constants
+  const float PI = 3.14159265359;
+  vec4 sample(vec2 uv) { return texture2D(tInput, uv); }
+  void main() {
+    vec2 inputSize = uInputSize;
+    vec2 outputSize = uOutputSize;
+    vec2 ratio = inputSize / outputSize;
+    vec2 uv = vUv * ratio;
+    vec2 px = vec2(1.0) / inputSize;
+    // Sample 5x5 neighborhood
+    vec4 c[25];
+    int idx = 0;
+    for (int y = -2; y <= 2; y++) {
+      for (int x = -2; x <= 2; x++) {
+        c[idx++] = sample(uv + vec2(float(x), float(y)) * px);
+      }
+    }
+    // Luma weights
+    vec3 luma = vec3(0.299, 0.587, 0.114);
+    float l[25];
+    for (int i = 0; i < 25; i++) l[i] = dot(c[i].rgb, luma);
+    // Edge detection
+    float gx = (l[1] + l[6] * 2.0 + l[11] - l[3] - l[8] * 2.0 - l[13]) * 0.25;
+    float gy = (l[11] + l[12] * 2.0 + l[13] - l[1] - l[2] * 2.0 - l[3]) * 0.25;
+    float grad = length(vec2(gx, gy));
+    // Directional weights
+    float w[4];
+    w[0] = 1.0 / (1.0 + abs(l[7] - l[12])); // N
+    w[1] = 1.0 / (1.0 + abs(l[11] - l[13])); // E
+    w[2] = 1.0 / (1.0 + abs(l[12] - l[7])); // S
+    w[3] = 1.0 / (1.0 + abs(l[13] - l[11])); // W
+    float wsum = w[0] + w[1] + w[2] + w[3];
+    w[0] /= wsum; w[1] /= wsum; w[2] /= wsum; w[3] /= wsum;
+    // Reconstruct
+    vec3 col = c[7].rgb * w[0] + c[11].rgb * w[1] + c[12].rgb * w[2] + c[13].rgb * w[3];
+    // Sharpening
+    if (uSharpness > 0.0) {
+      vec3 sharp = col - (c[7].rgb + c[11].rgb + c[12].rgb + c[13].rgb) * 0.25;
+      col += sharp * uSharpness;
+    }
+    gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+  }`;
+
+/** FSR 1.0 RCAS (Robust Contrast-Adaptive Sharpening). */
+const FSR_RCAS_FRAG = `varying vec2 vUv;${CLEAN}
+  uniform sampler2D tInput; uniform vec2 uInputSize; uniform float uSharpness;
+  void main() {
+    vec2 px = vec2(1.0) / uInputSize;
+    vec4 c0 = texture2D(tInput, vUv);
+    vec4 c1 = texture2D(tInput, vUv + vec2(px.x, 0.0));
+    vec4 c2 = texture2D(tInput, vUv - vec2(px.x, 0.0));
+    vec4 c3 = texture2D(tInput, vUv + vec2(0.0, px.y));
+    vec4 c4 = texture2D(tInput, vUv - vec2(0.0, px.y));
+    vec3 luma = vec3(0.299, 0.587, 0.114);
+    float l0 = dot(c0.rgb, luma);
+    float l1 = dot(c1.rgb, luma);
+    float l2 = dot(c2.rgb, luma);
+    float l3 = dot(c3.rgb, luma);
+    float l4 = dot(c4.rgb, luma);
+    float minL = min(min(min(l1, l2), l3), l4);
+    float maxL = max(max(max(l1, l2), l3), l4);
+    float l0Clamped = clamp(l0, minL, maxL);
+    float sharp = (l0 - l0Clamped) * uSharpness;
+    vec3 col = c0.rgb + vec3(sharp);
+    gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+  }`;
 
 /**
  * Bloom response for a given strength. TA's bloom is a soft haze around highlights, not a glow:
@@ -68,25 +171,61 @@ export function whiteBalance(temperature: number, tint: number): [number, number
   return [1 + t + g * 0.5, 1 - g, 1 - t + g * 0.5];
 }
 
+/** Temporal Anti-Aliasing: blends current frame with history using velocity-based reprojection. */
+const TAA_FRAG = `varying vec2 vUv;${CLEAN}${YCOCG}
+  uniform sampler2D tColor; uniform sampler2D tHistory; uniform sampler2D tDepth; uniform sampler2D tVelocity;
+  uniform mat4 uInvProj; uniform mat4 uPrevViewProj; uniform vec2 uJitter; uniform vec2 uJitterPrev;
+  uniform vec2 uTexel; uniform float uSharpness; uniform float uBlend;
+  void main() {
+    vec2 uv = vUv;
+    vec4 curr = texture2D(tColor, uv);
+    float d = texture2D(tDepth, uv).x;
+    if (d >= 0.99999) { gl_FragColor = curr; return; }
+    vec4 vel = texture2D(tVelocity, uv);
+    // Velocity is the NDC-space motion of this pixel. The scene was rendered with this frame's
+    // sub-pixel jitter and the history with the previous frame's, so undo the current jitter and
+    // re-apply the previous one to land on the matching texel of the history buffer.
+    vec2 reprojUv = clamp(uv + 0.5 * vel.xy + (uJitterPrev - uJitter), vec2(0.0), vec2(1.0));
+    vec4 hist = texture2D(tHistory, reprojUv);
+    // Neighborhood clamping (YCoCg) to reject ghosting
+    vec3 currYcocg = toYcocg(curr.rgb);
+    vec3 histYcocg = toYcocg(hist.rgb);
+    vec3 minYcocg = currYcocg, maxYcocg = currYcocg;
+    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+      vec2 nuv = uv + vec2(float(x), float(y)) * uTexel;
+      vec3 nycocg = toYcocg(texture2D(tColor, nuv).rgb);
+      minYcocg = min(minYcocg, nycocg);
+      maxYcocg = max(maxYcocg, nycocg);
+    }
+    vec3 clamped = clamp(histYcocg, minYcocg, maxYcocg);
+    vec3 blended = mix(currYcocg, clamped, uBlend);
+    // Sharpening: unsharp-mask the current frame and recover detail the blend removed
+    if (uSharpness > 0.0) {
+      vec3 n = texture2D(tColor, uv + vec2(uTexel.x, 0.0)).rgb + texture2D(tColor, uv - vec2(uTexel.x, 0.0)).rgb
+        + texture2D(tColor, uv + vec2(0.0, uTexel.y)).rgb + texture2D(tColor, uv - vec2(0.0, uTexel.y)).rgb;
+      n *= 0.25;
+      vec3 sharp = toYcocg(n);
+      blended = mix(blended, currYcocg + (currYcocg - sharp) * uSharpness, uSharpness);
+    }
+    gl_FragColor = vec4(fromYcocg(blended), 1.0);
+  }`;
+
+/** Velocity buffer generation for TAA and motion blur. */
+const VELOCITY_FRAG = `varying vec2 vUv;${CLEAN}
+  uniform sampler2D tDepth; uniform mat4 uInvViewProj; uniform mat4 uPrevViewProj;
+  void main() {
+    float d = texture2D(tDepth, vUv).x;
+    if (d >= 0.99999) { gl_FragColor = vec4(0.0); return; }
+    vec4 wp = uInvViewProj * vec4(vUv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0); wp /= wp.w;
+    vec4 pp = uPrevViewProj * wp;
+    vec2 vel = (vUv - (pp.xy / pp.w * 0.5 + 0.5));
+    gl_FragColor = vec4(vel, 0.0, 1.0);
+  }`;
+
 /** Distance haze: how far out the world starts losing saturation and drifting cool (metres). */
 export function hazeParams(): { near: number; far: number; amount: number } {
   return { near: 120, far: 900, amount: 0.45 };
 }
-
-const VERT = 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }';
-
-/** NaN/Inf texels (degenerate normals, depth at silhouettes) must never reach a blur: they grow into black blocks. */
-const CLEAN = `
-  vec3 clean3(vec3 v) { return (any(isnan(v)) || any(isinf(v))) ? vec3(0.0) : v; }
-  float clean1(float v, float def) { return (isnan(v) || isinf(v)) ? def : v; }`;
-
-const VIEWPOS = `
-  uniform sampler2D tDepth; uniform mat4 uInvProj;
-  vec3 viewPos(vec2 uv) {
-    float d = texture2D(tDepth, uv).x;
-    vec4 v = uInvProj * vec4(uv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
-    return v.xyz / v.w;
-  }`;
 
 /** Alchemy-style SSAO from depth only (normals rebuilt from neighbours), at half resolution. */
 const AO_FRAG = `varying vec2 vUv; ${VIEWPOS}${CLEAN}
@@ -352,6 +491,23 @@ export class PostPipeline {
   private bloomNearB: THREE.WebGLRenderTarget | null = null;
   private bloomWide: THREE.WebGLRenderTarget | null = null;
   private bloomWideB: THREE.WebGLRenderTarget | null = null;
+  // TAA
+  /** TAA history ping-pong: the pass reads one target and writes the other, so a texture is
+   *  never bound while it is the active render target (WebGL feedback loop). */
+  private historyRT: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget] | null = null;
+  private historyIndex = 0;
+  private velocityRT: THREE.WebGLRenderTarget | null = null;
+  private taaMat: THREE.ShaderMaterial | null = null;
+  private velocityMat: THREE.ShaderMaterial | null = null;
+  private taaEnabled = false;
+  private taaFirst = true;
+  private jitterIndex = 0;
+  // FSR
+  private fsrEnabled = false;
+  private fsrEasuRT: THREE.WebGLRenderTarget | null = null;
+  private fsrInputRT: THREE.WebGLRenderTarget | null = null;
+  private fsrEasuMat: THREE.ShaderMaterial | null = null;
+  private fsrRcasMat: THREE.ShaderMaterial | null = null;
   private quad = new FullScreenQuad();
   private aoMat: THREE.ShaderMaterial | null = null;
   private aoBlurMat: THREE.ShaderMaterial | null = null;
@@ -418,13 +574,14 @@ export class PostPipeline {
     if (o.godrays > 0) defs.USE_GOD = '';
     if (o.dof > 0) defs.USE_DOF = '';
     if (o.ssr) defs.USE_SSR = '';
-    const haze = hazeParams();
-    this.compMat = shader(COMPOSITE_FRAG, {
-      ...common, tColor: { value: this.scene.texture }, tAO: { value: this.aoBlurRT?.texture ?? null }, tGod: { value: this.godB?.texture ?? null },
-      tDof: { value: this.dofRT?.texture ?? null }, uProj: { value: new THREE.Matrix4() }, uViewUp: { value: new THREE.Vector3(0, 1, 0) },
-      uTime: { value: 0 }, uAO: { value: o.ao === 2 ? 0.85 : 0.7 }, uGod: { value: new THREE.Vector3() }, uDof: { value: new THREE.Vector3(260 - 170 * Math.min(1, o.dof), 900 - 500 * Math.min(1, o.dof), 0) }, uDofAmt: { value: Math.min(1, o.dof) }, uSSR: { value: 1 },
-      uHaze: { value: new THREE.Vector3(haze.near, haze.far, haze.amount) },
-    }, defs);
+        if (o.taa) defs.USE_TAA = '';
+        const haze = hazeParams();
+        this.compMat = shader(COMPOSITE_FRAG, {
+          ...common, tColor: { value: this.scene.texture }, tAO: { value: this.aoBlurRT?.texture ?? null }, tGod: { value: this.godB?.texture ?? null },
+          tDof: { value: this.dofRT?.texture ?? null }, uProj: { value: new THREE.Matrix4() }, uViewUp: { value: new THREE.Vector3(0, 1, 0) },
+          uTime: { value: 0 }, uAO: { value: o.ao === 2 ? 0.85 : 0.7 }, uGod: { value: new THREE.Vector3() }, uDof: { value: new THREE.Vector3(260 - 170 * Math.min(1, o.dof), 900 - 500 * Math.min(1, o.dof), 0) }, uDofAmt: { value: Math.min(1, o.dof) }, uSSR: { value: 1 },
+          uHaze: { value: new THREE.Vector3(haze.near, haze.far, haze.amount) },
+        }, defs);
     const finalDefs: Record<string, string> = {};
     if (o.motionBlur > 0) finalDefs.USE_MOTION = '';
     if (o.bloom > 0) finalDefs.USE_BLOOM = '';
@@ -438,8 +595,39 @@ export class PostPipeline {
       uVignette: { value: o.vignette }, uGrain: { value: o.grain }, uTime: { value: 0 },
       tBloomNear: { value: this.bloomNear?.texture ?? null }, tBloomWide: { value: this.bloomWide?.texture ?? null }, uBloom: { value: bp.intensity },
     }, finalDefs, true);
-    this.setSize(1, 1);
-  }
+
+      // TAA setup (structural flag from settings)
+      this.taaEnabled = o.taa;
+        if (this.taaEnabled) {
+          const type = o.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType;
+          // Two history targets: the resolve reads one and writes the other each frame.
+          this.historyRT = [new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false }), new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false })];
+          this.velocityRT = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false });
+          this.velocityMat = shader(VELOCITY_FRAG, { tDepth: { value: this.scene.depthTexture }, uInvViewProj: { value: new THREE.Matrix4() }, uPrevViewProj: { value: new THREE.Matrix4() } });
+          this.taaMat = shader(TAA_FRAG, {
+            tColor: { value: this.comp.texture }, tHistory: { value: this.historyRT[0].texture }, tDepth: { value: this.scene.depthTexture }, tVelocity: { value: this.velocityRT.texture },
+            uInvProj: { value: new THREE.Matrix4() }, uPrevViewProj: { value: new THREE.Matrix4() },
+            uJitter: { value: new THREE.Vector2() }, uJitterPrev: { value: new THREE.Vector2() },
+            uTexel: { value: new THREE.Vector2() }, uSharpness: { value: 0.3 }, uBlend: { value: 0.9 },
+          });
+        }
+
+        // FSR setup (structural flag from settings; only meaningful below native scale)
+        this.fsrEnabled = o.fsr && o.renderScale < 1.0;
+        if (this.fsrEnabled) {
+          const type = o.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType;
+          this.fsrEasuRT = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
+          this.fsrEasuMat = shader(FSR_EASU_FRAG, {
+            tInput: { value: this.comp.texture }, uInputSize: { value: new THREE.Vector2() }, uOutputSize: { value: new THREE.Vector2() }, uSharpness: { value: 0.5 },
+          });
+          this.fsrInputRT = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
+          this.fsrRcasMat = shader(FSR_RCAS_FRAG, {
+            tInput: { value: this.fsrEasuRT.texture }, uInputSize: { value: new THREE.Vector2() }, uSharpness: { value: 0.3 },
+          });
+        }
+
+        this.setSize(1, 1);
+      }
 
   /** Structural key of the live pipeline; compare with `structuralKey(options)` to decide on a rebuild. */
   get structuralKey(): string { return this.key; }
@@ -454,14 +642,21 @@ export class PostPipeline {
     this.dofRT?.setSize(s.hw, s.hh);
     this.bloomNear?.setSize(s.qw, s.qh); this.bloomNearB?.setSize(s.qw, s.qh);
     this.bloomWide?.setSize(s.ww, s.wh); this.bloomWideB?.setSize(s.ww, s.wh);
-    this.finalMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
-    if (this.aoMat) this.aoMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
-    if (this.aoBlurMat) this.aoBlurMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
-    if (this.dofMat) this.dofMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
-    if (this.bloomBrightMat) this.bloomBrightMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
-    if (this.bloomDownMat) this.bloomDownMat.uniforms.uTexel.value.set(1 / s.qw, 1 / s.qh);
-    this.hasPrev = false;
-  }
+      this.historyRT?.[0].setSize(s.w, s.h);
+      this.historyRT?.[1].setSize(s.w, s.h);
+      this.velocityRT?.setSize(s.w, s.h);
+      this.taaFirst = true;
+      this.fsrEasuRT?.setSize(s.w / this.opts.renderScale, s.h / this.opts.renderScale);
+      this.fsrInputRT?.setSize(s.w, s.h);
+      this.finalMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+      if (this.aoMat) this.aoMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+      if (this.aoBlurMat) this.aoBlurMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
+      if (this.dofMat) this.dofMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
+      if (this.bloomBrightMat) this.bloomBrightMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+      if (this.bloomDownMat) this.bloomDownMat.uniforms.uTexel.value.set(1 / s.qw, 1 / s.qh);
+      if (this.taaMat) this.taaMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+      this.hasPrev = false;
+    }
 
   /**
    * Apply non-structural option changes (every slider) to the live pipeline.
@@ -518,9 +713,34 @@ export class PostPipeline {
     const s = this.sizes;
     this.frame++;
     camera.updateMatrixWorld();
-    const invProj = camera.projectionMatrixInverse;
-    r.setRenderTarget(this.scene);
-    r.render(scene, camera);
+
+      // TAA sub-pixel jitter. The camera's own projection matrix is left untouched: the jitter
+      // lives only in the matrices the post chain uses, so gameplay raycasts and the next frame's
+      // base projection are never affected (and the jitter cannot accumulate frame over frame).
+      let invProj = camera.projectionMatrixInverse;
+      const jitterProj = this.taaEnabled;
+      let jitter = TAA_JITTER[0];
+      let jitterPrev = TAA_JITTER[0];
+      if (jitterProj) {
+        jitter = TAA_JITTER[this.jitterIndex % TAA_JITTER.length];
+        jitterPrev = TAA_JITTER[(this.jitterIndex - 1 + TAA_JITTER.length) % TAA_JITTER.length];
+        this.jitterIndex++;
+        _baseProj.copy(camera.projectionMatrix);
+        camera.projectionMatrix.elements[2] += jitter[0] * 2.0 / s.w;
+        camera.projectionMatrix.elements[6] += jitter[1] * 2.0 / s.h;
+        camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
+        invProj = camera.projectionMatrixInverse;
+      }
+
+      r.setRenderTarget(this.scene);
+      r.render(scene, camera);
+
+      // Generate velocity buffer for TAA and motion blur
+      if (this.velocityMat && this.velocityRT) {
+        this.velocityMat.uniforms.uInvViewProj.value.copy(this.prevViewProj).invert();
+        this.velocityMat.uniforms.uPrevViewProj.value.copy(this.hasPrev ? this.prevViewProj : camera.projectionMatrix.clone().multiply(camera.matrixWorldInverse));
+        this.pass(this.velocityMat, this.velocityRT);
+      }
 
     if (this.aoMat && this.aoBlurMat && this.aoRT && this.aoBlurRT) {
       this.aoMat.uniforms.uInvProj.value.copy(invProj);
@@ -583,26 +803,80 @@ export class PostPipeline {
 
     const fu = this.finalMat.uniforms;
     const viewProj = _m.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    // Last frame's jittered view-projection, captured before it is overwritten below.
+    const prevViewProj = _m2.copy(this.prevViewProj);
+    const firstFrame = !this.hasPrev;
     if (this.opts.motionBlur > 0) {
       fu.uInvViewProj.value.copy(viewProj).invert();
-      fu.uPrevViewProj.value.copy(this.hasPrev ? this.prevViewProj : viewProj);
+      fu.uPrevViewProj.value.copy(firstFrame ? viewProj : prevViewProj);
       // Shutter as a fraction of a 60 Hz frame, independent of the actual frame rate.
       fu.uMotion.value = this.opts.motionBlur * Math.min(2, (1 / 60) / Math.max(1 / 240, dt));
     }
     this.prevViewProj.copy(viewProj);
     this.hasPrev = true;
     fu.uTime.value = t;
-    this.pass(this.finalMat, null);
-  }
+
+        // TAA resolve pass. History is seeded from the current frame the first time (and after
+        // every resize), so frame one never blends 90% of uninitialised texture data.
+        const taaMat = this.taaMat, history = this.historyRT, velocityRT = this.velocityRT;
+        const taaRan = this.taaEnabled && !!taaMat && !!history && !!velocityRT;
+        if (taaMat && history && velocityRT && this.taaEnabled) {
+          // Read the previous history, write the other target (a texture must never be
+          // bound while it is the active render target).
+          const src = history[this.historyIndex];
+          const dst = history[1 - this.historyIndex];
+          this.historyIndex = 1 - this.historyIndex;
+          taaMat.uniforms.uJitter.value.set(jitter[0] / s.w, jitter[1] / s.h);
+          taaMat.uniforms.uJitterPrev.value.set(jitterPrev[0] / s.w, jitterPrev[1] / s.h);
+          taaMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+          taaMat.uniforms.uInvProj.value.copy(invProj);
+          taaMat.uniforms.uPrevViewProj.value.copy(firstFrame ? viewProj : prevViewProj);
+          taaMat.uniforms.tColor.value = this.comp.texture;
+          taaMat.uniforms.tHistory.value = src.texture;
+          taaMat.uniforms.tDepth.value = this.scene.depthTexture;
+          taaMat.uniforms.tVelocity.value = velocityRT.texture;
+          taaMat.uniforms.uBlend.value = this.taaFirst ? 0 : 0.9;
+          this.pass(taaMat, dst);
+          this.taaFirst = false;
+        }
+
+        // Everything is graded through the final pass (tone mapping, colour space, white balance,
+        // contrast, vignette, grain, chromatic aberration, sharpen, motion blur); FSR, when active,
+        // then upscales the graded image to the display resolution.
+        fu.tColor.value = taaRan && history ? history[this.historyIndex].texture : this.comp.texture;
+        if (this.fsrEnabled && this.fsrEasuMat && this.fsrRcasMat && this.fsrInputRT && this.fsrEasuRT) {
+          const ow = this.fsrEasuRT.width, oh = this.fsrEasuRT.height;
+          this.pass(this.finalMat, this.fsrInputRT);
+          this.fsrEasuMat.uniforms.tInput.value = this.fsrInputRT.texture;
+          this.fsrEasuMat.uniforms.uInputSize.value.set(s.w, s.h);
+          this.fsrEasuMat.uniforms.uOutputSize.value.set(ow, oh);
+          this.fsrEasuMat.uniforms.uSharpness.value = 0.5;
+          this.pass(this.fsrEasuMat, this.fsrEasuRT);
+          this.fsrRcasMat.uniforms.tInput.value = this.fsrEasuRT.texture;
+          this.fsrRcasMat.uniforms.uInputSize.value.set(ow, oh);
+          this.fsrRcasMat.uniforms.uSharpness.value = 0.3;
+          this.pass(this.fsrRcasMat, null);
+        } else {
+          this.pass(this.finalMat, null);
+        }
+
+        if (jitterProj) {
+          // Hand the game back its unjittered camera.
+          camera.projectionMatrix.copy(_baseProj);
+          camera.projectionMatrixInverse.copy(_baseProj).invert();
+        }
+      }
 
   dispose() {
     for (const rt of [this.scene, this.comp, this.aoRT, this.aoBlurRT, this.godA, this.godB, this.dofRT,
-      this.bloomNear, this.bloomNearB, this.bloomWide, this.bloomWideB]) rt?.dispose();
+          this.bloomNear, this.bloomNearB, this.bloomWide, this.bloomWideB, this.velocityRT, this.fsrEasuRT, this.fsrInputRT]) rt?.dispose();
+    for (const rt of this.historyRT ?? []) rt.dispose();
     this.scene.depthTexture?.dispose();
     for (const m of [this.aoMat, this.aoBlurMat, this.godMaskMat, this.godBlurMat, this.dofMat,
-      this.bloomBrightMat, this.bloomBlurMat, this.bloomDownMat, this.compMat, this.finalMat]) m?.dispose();
+          this.bloomBrightMat, this.bloomBlurMat, this.bloomDownMat, this.compMat, this.finalMat, this.taaMat, this.velocityMat, this.fsrEasuMat, this.fsrRcasMat]) m?.dispose();
     this.quad.dispose();
   }
 }
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _vz = new THREE.Vector2(), _m = new THREE.Matrix4();
+const _baseProj = new THREE.Matrix4(), _m2 = new THREE.Matrix4();

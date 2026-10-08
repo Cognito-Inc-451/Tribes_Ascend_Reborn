@@ -20,6 +20,10 @@ export interface Settings {
   bloom: boolean;
   bloomStrength: number;
   antialias: boolean;
+  /** Temporal Anti-Aliasing (TAA) - reduces shimmering on thin geometry. */
+  taa: boolean;
+  /** FidelityFX Super Resolution 1.0 - spatial upscaling for performance. */
+  fsr: boolean;
   viewDistance: number;
   particles: number;
   weather: boolean;
@@ -83,20 +87,20 @@ export interface Settings {
 /** Presets only touch performance-relevant options; colour/style choices (grade, grain, ...) stay as the player set them. */
 export const QUALITY_PRESETS: Record<Quality, Partial<Settings>> = {
   low: {
-    renderScale: 0.75, shadows: false, shadowQuality: 'off', bloom: false, antialias: false, viewDistance: 900, particles: 0.35, weather: false, textureDetail: 'low',
+    renderScale: 0.75, shadows: false, shadowQuality: 'off', bloom: false, antialias: false, taa: false, fsr: true, viewDistance: 900, particles: 0.35, weather: false, textureDetail: 'low',
     anisotropy: 1, waterQuality: 'low', post: 'off', hdr: false, ao: 'off', godrays: false, volumetricFog: false, ssr: false, dof: 0,
   },
   medium: {
-    renderScale: 1, shadows: true, shadowQuality: 'low', bloom: true, antialias: true, viewDistance: 1400, particles: 0.7, weather: true, textureDetail: 'medium',
+    renderScale: 1, shadows: true, shadowQuality: 'low', bloom: true, antialias: true, taa: true, fsr: false, viewDistance: 1400, particles: 0.7, weather: true, textureDetail: 'medium',
     anisotropy: 4, waterQuality: 'medium', post: 'light', hdr: false, ao: 'off', godrays: true, volumetricFog: true, ssr: false,
   },
   high: {
-    renderScale: 1, shadows: true, shadowQuality: 'high', bloom: true, antialias: true, viewDistance: 2200, particles: 1, weather: true, textureDetail: 'high',
+    renderScale: 1, shadows: true, shadowQuality: 'high', bloom: true, antialias: true, taa: true, fsr: false, viewDistance: 2200, particles: 1, weather: true, textureDetail: 'high',
     anisotropy: 8, waterQuality: 'high', post: 'light', hdr: false, ao: 'low', godrays: true, volumetricFog: true, ssr: false,
   },
   ultra: {
     // A 2x pixel ratio on a HiDPI panel is a 4x pixel bill for a barely visible gain; 1.5 is the ceiling.
-    renderScale: Math.min(1.5, window.devicePixelRatio || 1), shadows: true, shadowQuality: 'ultra', bloom: true, antialias: true, viewDistance: 3200, particles: 1.4,
+    renderScale: Math.min(1.5, window.devicePixelRatio || 1), shadows: true, shadowQuality: 'ultra', bloom: true, antialias: true, taa: true, fsr: false, viewDistance: 3200, particles: 1.4,
     weather: true, textureDetail: 'ultra', anisotropy: 16, waterQuality: 'high', post: 'light', hdr: false, ao: 'high', godrays: true, volumetricFog: true, ssr: true,
   },
 };
@@ -106,7 +110,7 @@ const DEFAULTS: Settings = {
   rememberName: true,
   loggedIn: false,
   quality: 'ultra',
-  ...(QUALITY_PRESETS.ultra as Required<Pick<Settings, 'renderScale' | 'shadows' | 'shadowQuality' | 'bloom' | 'antialias' | 'viewDistance' | 'particles' | 'weather' | 'textureDetail' | 'anisotropy' | 'waterQuality' | 'post' | 'hdr' | 'ao' | 'godrays' | 'volumetricFog' | 'ssr'>>),
+  ...(QUALITY_PRESETS.ultra as Required<Pick<Settings, 'renderScale' | 'shadows' | 'shadowQuality' | 'bloom' | 'antialias' | 'taa' | 'fsr' | 'viewDistance' | 'particles' | 'weather' | 'textureDetail' | 'anisotropy' | 'waterQuality' | 'post' | 'hdr' | 'ao' | 'godrays' | 'volumetricFog' | 'ssr'>>),
   renderScale: 1,
   adaptiveResolution: true,
   shadowQuality: 'high',

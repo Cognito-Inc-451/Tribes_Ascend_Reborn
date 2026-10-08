@@ -472,7 +472,29 @@ export class VehicleModel {
       add(cyl(0.22, 0.28, 3.6, 10), hull, 0, 0.1, -2.6, this.turret).rotation.x = Math.PI / 2;
       add(box(1.2, 0.15, 0.2), glow, 0, 0.3, -1.3, this.turret);
       this.root.add(this.turret);
+    } else if (this.type === 'bomber') {
+      add(box(4, 1.2, 5), hull, 0, 0.2);
+      add(box(4.5, 0.3, 5.5), accent, 0, -0.4);
+      this.turret = new THREE.Group();
+      this.turret.position.y = 1.5;
+      add(box(2.5, 1, 2.5), hull, 0, 0, 0, this.turret);
+      add(cyl(0.25, 0.3, 4, 10), hull, 0, 0.1, -3, this.turret).rotation.x = Math.PI / 2;
+      add(box(1.5, 0.15, 0.2), glow, 0, 0.3, -1.5, this.turret);
+      this.root.add(this.turret);
+      // Bomb bay doors
+      add(box(3, 0.1, 2), accent, 0, -0.8, 0);
+    } else if (this.type === 'havoc') {
+      add(box(5, 2, 6), hull, 0, 0.5);
+      add(box(5.5, 0.4, 6.5), accent, 0, -0.5);
+      // Side gunner positions
+      for (const x of [-2.5, 2.5]) {
+        add(box(1.5, 1, 1.5), hull, x, 0.5, 0);
+        add(box(0.3, 0.3, 0.1), glow, x, 0.5, 1.5);
+      }
+      // Rear ramp
+      add(box(3, 1.5, 0.2), accent, 0, 0, -3.1);
     } else {
+      // Shrike and any future vehicle type falls back to this hull.
       add(box(1.2, 0.8, 4.2), hull, 0, 0);
       add(box(6, 0.15, 1.6), accent, 0, 0, 0.6);
       add(box(2, 0.12, 1), hull, 0, 0.2, 2);
@@ -485,7 +507,7 @@ export class VehicleModel {
       for (const o of proc) if (o !== this.turret) o.visible = false;
       if (this.turret) this.turret.visible = false;
       const real = staticModel(m);
-      real.position.y = this.type === 'gravcycle' ? -0.6 : this.type === 'beowulf' ? -1.2 : -0.6;
+      real.position.y = this.type === 'beowulf' ? -1.2 : this.type === 'bomber' ? -1.5 : this.type === 'havoc' ? -2 : -0.6;
       this.root.add(real);
     });
   }
