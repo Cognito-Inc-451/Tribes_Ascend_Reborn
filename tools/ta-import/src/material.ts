@@ -37,12 +37,22 @@ export class Resolver {
 
 const NOT_DIFFUSE = /(_|^)(n|nrm|norm|normal|s|spc|spec|specular|msk|mask|m|e|emi|emis|emissive|em|h|height|ao|rough|detail|noise|cube|env|refl|alpha|opacity)(_?\d*)$/i;
 const DIFFUSE = /(_|^)(d|dif|diff|diffuse|c|col|color|colour|albedo|base|tex)(_?\d*)$/i;
+/** Weapon HUD panel art (MAT_*_Display / MIC_*_Screen materials swap these in per weapon). */
+const DISPLAY_NAME = /display|screen|lcd|hud|monitor/i;
+/** The material parameters a display panel is swapped in through (Screen_Main, Screen_Warning, PREVIEW_AMMO_*). */
+const DISPLAY_PARAM = /screen|display|lcd|monitor|panel/i;
+/** Scanline glass layer: a highlight effect drawn over the panel, never the panel art itself. */
+const SCANLINES_NAME = /scanline/i;
 
 function scoreTextureName(n: string): number {
   // Wear/overlay layers multiply over the real diffuse (TA's base metals: DIF_Overlay2 x DIF1); last resort only.
   if (/overlay|detail|grunge|scratch/i.test(n) && !/normal|_nrm|mask|_msk/i.test(n)) return 0;
   if (DIFFUSE.test(n)) return 3;
   if (NOT_DIFFUSE.test(n) || /normal|_nrm|spec|_spc|mask|_msk|emiss|_emi|cube|noise|detail/i.test(n)) return -5;
+  // Display panels sit in the master material's emissive graph beside the FX layers, so they need to outrank
+  // them explicitly; the scanline glass is ranked below so it can never stand in for a missing panel.
+  if (SCANLINES_NAME.test(n)) return -5;
+  if (DISPLAY_NAME.test(n)) return /warn|alert/i.test(n) ? 3 : 4;
   return 1;
 }
 
@@ -50,7 +60,9 @@ function scoreParam(p: string | undefined): number {
   if (!p) return 0;
   if (/overlay|detail|grunge|dirt|wear/i.test(p)) return -3;
   if (/mask|spec|norm|emis|rough|detail|noise|alpha|opac|glow|cube|refl/i.test(p)) return -5;
+  if (/scanline/i.test(p)) return -5;
   if (/diff|dif\d|^dif|albedo|base|colou?r|tex/i.test(p)) return 2;
+  if (DISPLAY_PARAM.test(p)) return 3;
   return 0;
 }
 
