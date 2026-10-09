@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+﻿import * as THREE from 'three';
 import { FullScreenQuad } from 'three/examples/jsm/postprocessing/Pass.js';
 
 /**
@@ -14,9 +14,13 @@ export interface PostStructure {
   dof: number;            // strength, 0 = off
   motionBlur: number;     // shutter fraction, 0 = off
   ssr: boolean;           // screen-space reflections on water
-  taa: boolean;           // temporal anti-aliasing
   fsr: boolean;           // FSR upscaling
+  frameGen: boolean;      // frame generation (motion-interpolated mid-frames)
+  tone: 0 | 1 | 2 | 3;    // tone curve replicated in FINAL_FRAG (aces / agx / neutral / cineon)
 }
+
+/** FINAL_FRAG tone define for each PostStructure.tone index. */
+export const TONE_DEFINE = ['TONE_ACES', 'TONE_AGX', 'TONE_NEUTRAL', 'TONE_CINEON'] as const;
 
 /** Everything the post chain can do; values come from settings (see Renderer.configure). */
 export interface PostOptions extends PostStructure {
@@ -33,12 +37,11 @@ export interface PostOptions extends PostStructure {
   grain: number;
   chromatic: number;
   sharpen: number;
-  renderScale: number;    // for FSR
 }
 
 /** Stable key for the structural shape of the chain; equal keys mean "no rebuild needed". */
 export function structuralKey(o: PostStructure): string {
-  return [o.hdr ? 1 : 0, o.msaa, o.ao, o.dof > 0 ? 1 : 0, o.ssr ? 1 : 0, o.bloom > 0 ? 1 : 0, o.godrays > 0 ? 1 : 0, o.motionBlur > 0 ? 1 : 0, o.taa ? 1 : 0, o.fsr ? 1 : 0].join('|');
+  return [o.hdr ? 1 : 0, o.msaa, o.ao, o.dof > 0 ? 1 : 0, o.ssr ? 1 : 0, o.bloom > 0 ? 1 : 0, o.godrays > 0 ? 1 : 0, o.motionBlur > 0 ? 1 : 0, o.fsr ? 1 : 0, o.frameGen ? 1 : 0, o.tone].join('|');
 }
 
 /** Buffer sizes for the chain: full / half (AO, DOF) / quarter (god rays, bloom near) / eighth (bloom wide). */
@@ -51,12 +54,6 @@ export function chainSizes(w: number, h: number) {
     ww: Math.max(1, W >> 3), wh: Math.max(1, H >> 3),
   };
 }
-
-/** TAA jitter sequence (8-sample rotated grid). */
-export const TAA_JITTER = [
-  [0.25, 0.25], [-0.75, -0.75], [-0.25, 0.75], [0.75, -0.25],
-  [-0.5, -0.5], [0.5, 0.5], [-0.5, 0.5], [0.5, -0.5],
-];
 
 /**
  * Shared shader prelude. Declared before the first fragment template that interpolates them -
@@ -77,55 +74,59 @@ const VIEWPOS = `
     return v.xyz / v.w;
   }`;
 
-/** YCoCg-A round trip used by the TAA clamp. Inverse is R = Y+Co+Cg, G = Y-Cg, B = Y-Co+Cg. */
-const YCOCG = `
-  vec3 toYcocg(vec3 c) { return vec3(dot(c, vec3(0.25, 0.5, 0.25)), dot(c, vec3(0.5, 0.0, -0.5)), dot(c, vec3(0.25, -0.5, 0.25))); }
-  vec3 fromYcocg(vec3 c) { return vec3(c.x + c.y + c.z, c.x - c.z, c.x - c.y + c.z); }`;
-
 /** FSR 1.0 EASU (Edge-Adaptive Spatial Upscaling) - simplified version. */
 const FSR_EASU_FRAG = `varying vec2 vUv;${CLEAN}
   uniform sampler2D tInput; uniform vec2 uInputSize; uniform vec2 uOutputSize; uniform float uSharpness;
-  // FSR EASU constants
-  const float PI = 3.14159265359;
-  vec4 sample(vec2 uv) { return texture2D(tInput, uv); }
+  // "sample" is a reserved word in GLSL ES, so the tap helper is named tapColor.
+  vec4 tapColor(vec2 uv) { return texture2D(tInput, uv); }
   void main() {
     vec2 inputSize = uInputSize;
     vec2 outputSize = uOutputSize;
     vec2 ratio = inputSize / outputSize;
     vec2 uv = vUv * ratio;
     vec2 px = vec2(1.0) / inputSize;
-    // Sample 5x5 neighborhood
+    // Sample 5x5 neighborhood; index = (y + 2) * 5 + (x + 2) is a loop-index
+    // expression, which GLSL ES 1.0 accepts for array indexing.
     vec4 c[25];
-    int idx = 0;
     for (int y = -2; y <= 2; y++) {
       for (int x = -2; x <= 2; x++) {
-        c[idx++] = sample(uv + vec2(float(x), float(y)) * px);
+        c[(y + 2) * 5 + (x + 2)] = tapColor(uv + vec2(float(x), float(y)) * px);
       }
     }
     // Luma weights
     vec3 luma = vec3(0.299, 0.587, 0.114);
     float l[25];
     for (int i = 0; i < 25; i++) l[i] = dot(c[i].rgb, luma);
-    // Edge detection
-    float gx = (l[1] + l[6] * 2.0 + l[11] - l[3] - l[8] * 2.0 - l[13]) * 0.25;
-    float gy = (l[11] + l[12] * 2.0 + l[13] - l[1] - l[2] * 2.0 - l[3]) * 0.25;
+    // Neighbourhood layout: index = (y + 2) * 5 + (x + 2), so the centre is l[12],
+    // north l[7], south l[17], west l[11], east l[13].
+    // Edge detection (Sobel over adjacent rows/columns)
+    float gx = (l[6] + l[11] * 2.0 + l[16] - l[8] - l[13] * 2.0 - l[18]) * 0.25;
+    float gy = (l[16] + l[17] * 2.0 + l[18] - l[6] - l[7] * 2.0 - l[8]) * 0.25;
     float grad = length(vec2(gx, gy));
-    // Directional weights
+    // Directional weights: how flat the image is towards each neighbour.
     float w[4];
-    w[0] = 1.0 / (1.0 + abs(l[7] - l[12])); // N
-    w[1] = 1.0 / (1.0 + abs(l[11] - l[13])); // E
-    w[2] = 1.0 / (1.0 + abs(l[12] - l[7])); // S
-    w[3] = 1.0 / (1.0 + abs(l[13] - l[11])); // W
+    w[0] = 1.0 / (1.0 + abs(l[7] - l[12]));  // N
+    w[1] = 1.0 / (1.0 + abs(l[13] - l[12])); // E
+    w[2] = 1.0 / (1.0 + abs(l[17] - l[12])); // S
+    w[3] = 1.0 / (1.0 + abs(l[11] - l[12])); // W
     float wsum = w[0] + w[1] + w[2] + w[3];
     w[0] /= wsum; w[1] /= wsum; w[2] /= wsum; w[3] /= wsum;
-    // Reconstruct
-    vec3 col = c[7].rgb * w[0] + c[11].rgb * w[1] + c[12].rgb * w[2] + c[13].rgb * w[3];
+    // Reconstruct. The centre tap must participate: with only the four axis
+    // neighbours, a perfectly flat region weights them 0.25 each and the pass
+    // becomes a blur of the source instead of an identity at 1:1 scale.
+    float mn = l[12], mx = l[12];
+    for (int i = 0; i < 25; i++) { mn = min(mn, l[i]); mx = max(mx, l[i]); }
+    float fade = clamp((mx - mn) * 12.0, 0.0, 1.0);
+    vec3 col = mix(c[12].rgb, c[7].rgb * w[0] + c[13].rgb * w[1] + c[17].rgb * w[2] + c[11].rgb * w[3], fade);
     // Sharpening
     if (uSharpness > 0.0) {
-      vec3 sharp = col - (c[7].rgb + c[11].rgb + c[12].rgb + c[13].rgb) * 0.25;
+      vec3 sharp = col - (c[7].rgb + c[11].rgb + c[12].rgb + c[13].rgb + c[17].rgb) * 0.2;
       col += sharp * uSharpness;
     }
-    gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+    // No clamp here: this pass feeds RCAS, and clipping HDR highlights in the
+    // middle of the chain is what produced the hard white edges. RCAS limits
+    // the result once, on the way to the canvas.
+    gl_FragColor = vec4(col, 1.0);
   }`;
 
 /** FSR 1.0 RCAS (Robust Contrast-Adaptive Sharpening). */
@@ -152,6 +153,66 @@ const FSR_RCAS_FRAG = `varying vec2 vUv;${CLEAN}
     gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
   }`;
 
+/*
+ * Frame generation (the FSR3 / DLSS3 idea, built on the chain's own motion vectors).
+ *
+ * The chain already reprojects the previous frame for motion blur, so the motion field
+ * exists: unproject the current depth, push it through the previous view-projection, and
+ * you get where this pixel came from last frame. Frame generation runs on the *graded,
+ * displayed* frames (the final pass output), samples the stored previous frame at the
+ * reprojected UV, and blends the two at the motion-compensated midpoint. The result is a
+ * synthetic in-between frame, so the scene renders at maxFps while twice as many frames
+ * reach the screen.
+ *
+ * Occlusion is handled the way the motion-blur pass does it (the reprojected depth test
+ * `pp.w > uNearCut` rejects pixels that were behind geometry last frame) plus a
+ * forward-projection check: if the previous frame's pixel at the sampled UV does not
+ * project back to this pixel, the surface moved and we fade the blend out.
+ */
+export const FRAME_GEN_FRAG = `
+  uniform sampler2D tCurrent;
+  uniform sampler2D tPrev;
+  uniform sampler2D tDepth;
+  uniform mat4 uInvViewProj;
+  uniform mat4 uPrevViewProj;
+  uniform vec2 uTexel;
+  uniform float uNearCut;
+  uniform float uAmount;   // 0 = pass current through, 1 = full midpoint blend
+  varying vec2 vUv;
+  void main() {
+    vec3 cur = texture2D(tCurrent, vUv).rgb;
+    float d = texture2D(tDepth, vUv).x;
+    vec4 wp = uInvViewProj * vec4(vUv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0);
+    wp /= wp.w;
+    vec4 pp = uPrevViewProj * wp;
+    vec2 prevUv = pp.xy / pp.w * 0.5 + 0.5;
+    float vel = length(vUv - prevUv);
+    /* Rejected when the surface was occluded last frame (its previous-frame depth is
+       closer than this one) or when the reprojection lands off-screen. */
+    if (pp.w <= uNearCut || uAmount <= 0.0 || vel < 0.0002 || vel > 0.25
+        || prevUv.x < 0.0 || prevUv.y < 0.0 || prevUv.x > 1.0 || prevUv.y > 1.0) {
+      gl_FragColor = vec4(cur, 1.0);
+      return;
+    }
+    vec3 prev = texture2D(tPrev, prevUv).rgb;
+    /* Forward check: the previous frame's depth at prevUv must land back on this pixel,
+       otherwise the blend is straddling an edge and ghosting would show. */
+    float pd = texture2D(tDepth, prevUv).x;
+    vec4 pw = uInvViewProj * vec4(prevUv * 2.0 - 1.0, pd * 2.0 - 1.0, 1.0);
+    pw /= pw.w;
+    vec4 fp = uPrevViewProj * pw;
+    vec2 back = fp.xy / fp.w * 0.5 + 0.5;
+    float drift = length(back - prevUv);
+    float w = uAmount * 0.5 * smoothstep(0.02, 0.002, drift) * smoothstep(0.25, 0.02, vel);
+    gl_FragColor = vec4(mix(cur, prev, w), 1.0);
+  }`;
+
+/** Plain copy of a texture to the screen — used to bank graded frames into the frame-gen history. */
+export const BLIT_FRAG = `
+  uniform sampler2D tInput;
+  varying vec2 vUv;
+  void main() { gl_FragColor = texture2D(tInput, vUv); }`;
+
 /**
  * Bloom response for a given strength. TA's bloom is a soft haze around highlights, not a glow:
  * a high soft-knee threshold (only real highlights bloom) with a wide, low-intensity spread.
@@ -170,57 +231,6 @@ export function whiteBalance(temperature: number, tint: number): [number, number
   const t = Math.max(-1, Math.min(1, temperature)) * 0.12, g = Math.max(-1, Math.min(1, tint)) * 0.08;
   return [1 + t + g * 0.5, 1 - g, 1 - t + g * 0.5];
 }
-
-/** Temporal Anti-Aliasing: blends current frame with history using velocity-based reprojection. */
-const TAA_FRAG = `varying vec2 vUv;${CLEAN}${YCOCG}
-  uniform sampler2D tColor; uniform sampler2D tHistory; uniform sampler2D tDepth; uniform sampler2D tVelocity;
-  uniform mat4 uInvProj; uniform mat4 uPrevViewProj; uniform vec2 uJitter; uniform vec2 uJitterPrev;
-  uniform vec2 uTexel; uniform float uSharpness; uniform float uBlend;
-  void main() {
-    vec2 uv = vUv;
-    vec4 curr = texture2D(tColor, uv);
-    float d = texture2D(tDepth, uv).x;
-    if (d >= 0.99999) { gl_FragColor = curr; return; }
-    vec4 vel = texture2D(tVelocity, uv);
-    // Velocity is the NDC-space motion of this pixel. The scene was rendered with this frame's
-    // sub-pixel jitter and the history with the previous frame's, so undo the current jitter and
-    // re-apply the previous one to land on the matching texel of the history buffer.
-    vec2 reprojUv = clamp(uv + 0.5 * vel.xy + (uJitterPrev - uJitter), vec2(0.0), vec2(1.0));
-    vec4 hist = texture2D(tHistory, reprojUv);
-    // Neighborhood clamping (YCoCg) to reject ghosting
-    vec3 currYcocg = toYcocg(curr.rgb);
-    vec3 histYcocg = toYcocg(hist.rgb);
-    vec3 minYcocg = currYcocg, maxYcocg = currYcocg;
-    for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
-      vec2 nuv = uv + vec2(float(x), float(y)) * uTexel;
-      vec3 nycocg = toYcocg(texture2D(tColor, nuv).rgb);
-      minYcocg = min(minYcocg, nycocg);
-      maxYcocg = max(maxYcocg, nycocg);
-    }
-    vec3 clamped = clamp(histYcocg, minYcocg, maxYcocg);
-    vec3 blended = mix(currYcocg, clamped, uBlend);
-    // Sharpening: unsharp-mask the current frame and recover detail the blend removed
-    if (uSharpness > 0.0) {
-      vec3 n = texture2D(tColor, uv + vec2(uTexel.x, 0.0)).rgb + texture2D(tColor, uv - vec2(uTexel.x, 0.0)).rgb
-        + texture2D(tColor, uv + vec2(0.0, uTexel.y)).rgb + texture2D(tColor, uv - vec2(0.0, uTexel.y)).rgb;
-      n *= 0.25;
-      vec3 sharp = toYcocg(n);
-      blended = mix(blended, currYcocg + (currYcocg - sharp) * uSharpness, uSharpness);
-    }
-    gl_FragColor = vec4(fromYcocg(blended), 1.0);
-  }`;
-
-/** Velocity buffer generation for TAA and motion blur. */
-const VELOCITY_FRAG = `varying vec2 vUv;${CLEAN}
-  uniform sampler2D tDepth; uniform mat4 uInvViewProj; uniform mat4 uPrevViewProj;
-  void main() {
-    float d = texture2D(tDepth, vUv).x;
-    if (d >= 0.99999) { gl_FragColor = vec4(0.0); return; }
-    vec4 wp = uInvViewProj * vec4(vUv * 2.0 - 1.0, d * 2.0 - 1.0, 1.0); wp /= wp.w;
-    vec4 pp = uPrevViewProj * wp;
-    vec2 vel = (vUv - (pp.xy / pp.w * 0.5 + 0.5));
-    gl_FragColor = vec4(vel, 0.0, 1.0);
-  }`;
 
 /** Distance haze: how far out the world starts losing saturation and drifting cool (metres). */
 export function hazeParams(): { near: number; far: number; amount: number } {
@@ -347,7 +357,9 @@ const COMPOSITE_FRAG = `varying vec2 vUv; ${VIEWPOS}${CLEAN}
     #endif
     #ifdef USE_DOF
     float coc = (smoothstep(uDof.x, uDof.x + uDof.y, dist) + (uDof.z > 0.0 ? 1.0 - smoothstep(uDof.z * 0.35, uDof.z * 0.8, dist) : 0.0)) * uDofAmt;
-    c = mix(c, clean3(texture2D(tDof, vUv).rgb), clamp(coc, 0.0, 1.0) * step(1.2, dist));
+    // Capped: at full strength the half-res blur replaced the frame outright past ~400 m, so the
+    // whole horizon was the blur buffer and lost all its detail to the tap pattern.
+    c = mix(c, clean3(texture2D(tDof, vUv).rgb), clamp(coc, 0.0, 0.35) * step(1.2, dist));
     #endif
     #ifdef USE_GOD
     c += clean3(texture2D(tGod, vUv).rgb) * uGod;
@@ -419,6 +431,68 @@ const FINAL_FRAG = `varying vec2 vUv;${CLEAN}
   #ifdef USE_BLOOM
   uniform sampler2D tBloomNear; uniform sampler2D tBloomWide; uniform float uBloom;
   #endif
+  #define saturate(a) clamp(a, 0.0, 1.0)
+  // Tone curves replicated from three's tonemapping_pars_fragment, plus the sRGB encode.
+  // They are applied explicitly because three compiles tone mapping out of every material
+  // drawn into a render target (and render targets are LinearSRGB, so the colourspace
+  // include is a pass-through there too). With FSR on, the graded pass renders into
+  // fsrInputRT and the canvas is written by RCAS - without this block the screen would
+  // receive raw linear values: dark, washed out, and immune to the Brightness slider.
+  vec3 toneAces(vec3 color) {
+    const mat3 ACESInputMat = mat3( vec3( 0.59719, 0.07600, 0.02840 ), vec3( 0.35458, 0.90834, 0.13383 ), vec3( 0.04823, 0.01566, 0.83777 ) );
+    const mat3 ACESOutputMat = mat3( vec3( 1.60475, -0.10208, -0.00327 ), vec3( -0.53108, 1.10813, -0.07276 ), vec3( -0.07367, -0.00605, 1.07602 ) );
+    color /= 0.6;
+    color = ACESInputMat * color;
+    vec3 a = color * ( color + 0.0245786 ) - 0.000090537;
+    vec3 b = color * ( 0.983729 * color + 0.4329510 ) + 0.238081;
+    color = ACESOutputMat * ( a / b );
+    return saturate( color );
+  }
+  vec3 toneCineon(vec3 color) {
+    color = max( vec3( 0.0 ), color - 0.004 );
+    return pow( ( color * ( 6.2 * color + 0.5 ) ) / ( color * ( 6.2 * color + 1.7 ) + 0.06 ), vec3( 2.2 ) );
+  }
+  vec3 agxContrastApprox(vec3 x) {
+    vec3 x2 = x * x; vec3 x4 = x2 * x2;
+    return + 15.5 * x4 * x2 - 40.14 * x4 * x + 31.96 * x4 - 6.868 * x2 * x + 0.4298 * x2 + 0.1191 * x - 0.00232;
+  }
+  vec3 toneAgX(vec3 color) {
+    const mat3 LINEAR_SRGB_TO_LINEAR_REC2020 = mat3( vec3( 0.6274, 0.0691, 0.0164 ), vec3( 0.3293, 0.9195, 0.0880 ), vec3( 0.0433, 0.0113, 0.8956 ) );
+    const mat3 LINEAR_REC2020_TO_LINEAR_SRGB = mat3( vec3( 1.6605, -0.1246, -0.0182 ), vec3( -0.5876, 1.1329, -0.1006 ), vec3( -0.0728, -0.0083, 1.1187 ) );
+    const mat3 AgXInsetMatrix = mat3( vec3( 0.856627153315983, 0.137318972929847, 0.11189821299995 ), vec3( 0.0951212405381588, 0.761241990602591, 0.0767994186031903 ), vec3( 0.0482516061458583, 0.101439036467562, 0.811302368396859 ) );
+    const mat3 AgXOutsetMatrix = mat3( vec3( 1.1271005818144368, -0.1413297634984383, -0.14132976349843826 ), vec3( -0.11060664309660323, 1.157823702216272, -0.11060664309660294 ), vec3( -0.016493938717834573, -0.016493938717834257, 1.2519364065950405 ) );
+    const float AgxMinEv = - 12.47393;
+    const float AgxMaxEv = 4.026069;
+    color = LINEAR_SRGB_TO_LINEAR_REC2020 * color;
+    color = AgXInsetMatrix * color;
+    color = max( color, 1e-10 );
+    color = log2( color );
+    color = ( color - AgxMinEv ) / ( AgxMaxEv - AgxMinEv );
+    color = clamp( color, 0.0, 1.0 );
+    color = agxContrastApprox( color );
+    color = AgXOutsetMatrix * color;
+    color = pow( max( vec3( 0.0 ), color ), vec3( 2.2 ) );
+    color = LINEAR_REC2020_TO_LINEAR_SRGB * color;
+    return clamp( color, 0.0, 1.0 );
+  }
+  vec3 toneNeutral(vec3 color) {
+    const float StartCompression = 0.8 - 0.04;
+    const float Desaturation = 0.15;
+    float x = min( color.r, min( color.g, color.b ) );
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+    float peak = max( color.r, max( color.g, color.b ) );
+    if ( peak < StartCompression ) return color;
+    float d = 1.0 - StartCompression;
+    float newPeak = 1.0 - d * d / ( peak + d - StartCompression );
+    color *= newPeak / peak;
+    float g = 1.0 - 1.0 / ( Desaturation * ( peak - newPeak ) + 1.0 );
+    return mix( color, vec3( newPeak ), g );
+  }
+  vec3 toSRGB(vec3 value) {
+    vec3 v = clamp( value, 0.0, 1.0 );
+    return mix( pow( v, vec3( 0.41666 ) ) * 1.055 - vec3( 0.055 ), v * 12.92, vec3( lessThanEqual( v, vec3( 0.0031308 ) ) ) );
+  }
   void main() {
     vec2 uv = vUv;
     vec3 c = texture2D(tColor, uv).rgb;
@@ -451,9 +525,18 @@ const FINAL_FRAG = `varying vec2 vUv;${CLEAN}
     c += bl * uBloom;
     #endif
     c *= uWhite * uExposure;
-    gl_FragColor = vec4(c, 1.0);
-    #include <tonemapping_fragment>
-    #include <colorspace_fragment>
+    #ifdef TONE_ACES
+    vec3 tm = toneAces(c);
+    #elif defined(TONE_AGX)
+    vec3 tm = toneAgX(c);
+    #elif defined(TONE_NEUTRAL)
+    vec3 tm = toneNeutral(c);
+    #elif defined(TONE_CINEON)
+    vec3 tm = toneCineon(c);
+    #else
+    vec3 tm = saturate(c);
+    #endif
+    gl_FragColor = vec4(toSRGB(tm), 1.0);
     vec3 g = clamp(gl_FragColor.rgb, 0.0, 1.0);
     g = pow(max(g * uGain + uLift * (1.0 - g), vec3(0.0)), 1.0 / uGamma);
     float l = dot(g, vec3(0.2126, 0.7152, 0.0722));
@@ -463,7 +546,9 @@ const FINAL_FRAG = `varying vec2 vUv;${CLEAN}
     vec2 vd = uv - 0.5;
     g *= 1.0 - uVignette * smoothstep(0.35, 0.85, length(vd * vec2(1.0, 0.8)) * 1.25);
     if (uGrain > 0.0) {
-      float nz = fract(sin(dot(gl_FragCoord.xy + fract(uTime) * 917.0, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
+      // Static grain pattern: a time-seeded grain field adds full-frame luminance noise
+      // on top of the graded image, which reads as a fine per-frame sizzle.
+      float nz = fract(sin(dot(gl_FragCoord.xy + 917.0, vec2(12.9898, 78.233))) * 43758.5453) - 0.5;
       g += nz * uGrain * 0.09 * (1.0 - abs(l - 0.5));
     }
     gl_FragColor = vec4(clamp(g, 0.0, 1.0), 1.0);
@@ -491,23 +576,38 @@ export class PostPipeline {
   private bloomNearB: THREE.WebGLRenderTarget | null = null;
   private bloomWide: THREE.WebGLRenderTarget | null = null;
   private bloomWideB: THREE.WebGLRenderTarget | null = null;
-  // TAA
-  /** TAA history ping-pong: the pass reads one target and writes the other, so a texture is
-   *  never bound while it is the active render target (WebGL feedback loop). */
-  private historyRT: [THREE.WebGLRenderTarget, THREE.WebGLRenderTarget] | null = null;
-  private historyIndex = 0;
-  private velocityRT: THREE.WebGLRenderTarget | null = null;
-  private taaMat: THREE.ShaderMaterial | null = null;
-  private velocityMat: THREE.ShaderMaterial | null = null;
-  private taaEnabled = false;
-  private taaFirst = true;
-  private jitterIndex = 0;
   // FSR
   private fsrEnabled = false;
   private fsrEasuRT: THREE.WebGLRenderTarget | null = null;
   private fsrInputRT: THREE.WebGLRenderTarget | null = null;
   private fsrEasuMat: THREE.ShaderMaterial | null = null;
   private fsrRcasMat: THREE.ShaderMaterial | null = null;
+  // Frame generation (FSR3-style mid-frame interpolation)
+  private frameGenEnabled = false;
+  private prevColor: THREE.WebGLRenderTarget | null = null;
+  private prevColorPrev: THREE.WebGLRenderTarget | null = null;
+  private frameGenMat: THREE.ShaderMaterial | null = null;
+  private blitMat: THREE.ShaderMaterial | null = null;
+  private hasPrevColor = false;
+  private gradedFrames = 0;
+  private genPhase = false;
+  /**
+   * Ping-pong index of the frame history. A real frame is rendered into the slot this index
+   * selects and the index flips immediately after, so the two most recent presented frames are
+   * always the pair (`prevColor`, `prevColorPrev`) and the interpolated pass blends them.
+   */
+  private writeIdx = 0;
+  private genCurViewProj = new THREE.Matrix4();
+  private genPrevViewProj = new THREE.Matrix4();
+  /**
+   * True when frame generation is on and the next `render()` call would present an interpolated
+   * frame instead of rendering the scene. The frame loop uses this to spend frame-rate-limit ticks
+   * on a generated frame, keeping the display at the monitor refresh rate.
+   */
+  get wantsGeneratedFrame(): boolean {
+    return this.frameGenEnabled && this.genPhase && this.hasPrevColor && this.gradedFrames >= 2
+      && !!this.frameGenMat && !!this.prevColor && !!this.prevColorPrev;
+  }
   private quad = new FullScreenQuad();
   private aoMat: THREE.ShaderMaterial | null = null;
   private aoBlurMat: THREE.ShaderMaterial | null = null;
@@ -523,6 +623,12 @@ export class PostPipeline {
   private hasPrev = false;
   private frame = 0;
   private sizes = chainSizes(1, 1);
+  /** Last rendered buffer size, so a resize that changes nothing skips the rebuild. */
+  private lastW = 0;
+  private lastH = 0;
+  /** Native display size the upscaled output is targeted at. */
+  private displayW = 0;
+  private displayH = 0;
   private key: string;
   private sat = 1;
   private opts: PostOptions;
@@ -574,17 +680,21 @@ export class PostPipeline {
     if (o.godrays > 0) defs.USE_GOD = '';
     if (o.dof > 0) defs.USE_DOF = '';
     if (o.ssr) defs.USE_SSR = '';
-        if (o.taa) defs.USE_TAA = '';
-        const haze = hazeParams();
-        this.compMat = shader(COMPOSITE_FRAG, {
-          ...common, tColor: { value: this.scene.texture }, tAO: { value: this.aoBlurRT?.texture ?? null }, tGod: { value: this.godB?.texture ?? null },
-          tDof: { value: this.dofRT?.texture ?? null }, uProj: { value: new THREE.Matrix4() }, uViewUp: { value: new THREE.Vector3(0, 1, 0) },
-          uTime: { value: 0 }, uAO: { value: o.ao === 2 ? 0.85 : 0.7 }, uGod: { value: new THREE.Vector3() }, uDof: { value: new THREE.Vector3(260 - 170 * Math.min(1, o.dof), 900 - 500 * Math.min(1, o.dof), 0) }, uDofAmt: { value: Math.min(1, o.dof) }, uSSR: { value: 1 },
-          uHaze: { value: new THREE.Vector3(haze.near, haze.far, haze.amount) },
-        }, defs);
+    const haze = hazeParams();
+    this.compMat = shader(COMPOSITE_FRAG, {
+      ...common, tColor: { value: this.scene.texture }, tAO: { value: this.aoBlurRT?.texture ?? null }, tGod: { value: this.godB?.texture ?? null },
+      tDof: { value: this.dofRT?.texture ?? null }, uProj: { value: new THREE.Matrix4() }, uViewUp: { value: new THREE.Vector3(0, 1, 0) },
+      uTime: { value: 0 }, uAO: { value: o.ao === 2 ? 0.85 : 0.7 }, uGod: { value: new THREE.Vector3() }, uDof: { value: new THREE.Vector3(260 - 170 * Math.min(1, o.dof), 900 - 500 * Math.min(1, o.dof), 0) }, uDofAmt: { value: Math.min(1, o.dof) }, uSSR: { value: 1 },
+      uHaze: { value: new THREE.Vector3(haze.near, haze.far, haze.amount) },
+    }, defs);
     const finalDefs: Record<string, string> = {};
     if (o.motionBlur > 0) finalDefs.USE_MOTION = '';
     if (o.bloom > 0) finalDefs.USE_BLOOM = '';
+    // Tone curve replicated in-shader (see the TONE_* helpers in FINAL_FRAG).
+    // three compiles tone mapping out of any draw into a render target, so the
+    // FSR path (final pass -> fsrInputRT) has to do its own tone mapping and
+    // sRGB encode, otherwise the canvas receives raw linear values.
+    finalDefs[TONE_DEFINE[o.tone] ?? 'TONE_ACES'] = '';
     const white = whiteBalance(o.temperature, o.tint);
     this.finalMat = shader(FINAL_FRAG, {
       tColor: { value: this.comp.texture }, tDepth: { value: this.scene.depthTexture }, uTexel: { value: new THREE.Vector2() },
@@ -594,46 +704,59 @@ export class PostPipeline {
       uLift: { value: o.lift.clone() }, uGamma: { value: o.gamma.clone() }, uGain: { value: o.gain.clone() },
       uVignette: { value: o.vignette }, uGrain: { value: o.grain }, uTime: { value: 0 },
       tBloomNear: { value: this.bloomNear?.texture ?? null }, tBloomWide: { value: this.bloomWide?.texture ?? null }, uBloom: { value: bp.intensity },
-    }, finalDefs, true);
+    }, finalDefs, false);
 
-      // TAA setup (structural flag from settings)
-      this.taaEnabled = o.taa;
-        if (this.taaEnabled) {
-          const type = o.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType;
-          // Two history targets: the resolve reads one and writes the other each frame.
-          this.historyRT = [new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false }), new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false })];
-          this.velocityRT = new THREE.WebGLRenderTarget(1, 1, { type: THREE.HalfFloatType, depthBuffer: false });
-          this.velocityMat = shader(VELOCITY_FRAG, { tDepth: { value: this.scene.depthTexture }, uInvViewProj: { value: new THREE.Matrix4() }, uPrevViewProj: { value: new THREE.Matrix4() } });
-          this.taaMat = shader(TAA_FRAG, {
-            tColor: { value: this.comp.texture }, tHistory: { value: this.historyRT[0].texture }, tDepth: { value: this.scene.depthTexture }, tVelocity: { value: this.velocityRT.texture },
-            uInvProj: { value: new THREE.Matrix4() }, uPrevViewProj: { value: new THREE.Matrix4() },
-            uJitter: { value: new THREE.Vector2() }, uJitterPrev: { value: new THREE.Vector2() },
-            uTexel: { value: new THREE.Vector2() }, uSharpness: { value: 0.3 }, uBlend: { value: 0.9 },
-          });
-        }
+    // FSR setup (structural flag from settings). The upscale target is the native
+    // display size, so at the display's full scale EASU degenerates to a sharpening
+    // pass; below it, it does the real upscaling.
+    this.fsrEnabled = o.fsr;
+    if (this.fsrEnabled) {
+      const type = o.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType;
+      this.fsrEasuRT = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
+      this.fsrEasuMat = shader(FSR_EASU_FRAG, {
+        tInput: { value: this.comp.texture }, uInputSize: { value: new THREE.Vector2() }, uOutputSize: { value: new THREE.Vector2() }, uSharpness: { value: 0.5 },
+      });
+      this.fsrInputRT = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
+      this.fsrRcasMat = shader(FSR_RCAS_FRAG, {
+        tInput: { value: this.fsrEasuRT.texture }, uInputSize: { value: new THREE.Vector2() }, uSharpness: { value: 0.3 },
+      });
+    }
 
-        // FSR setup (structural flag from settings; only meaningful below native scale)
-        this.fsrEnabled = o.fsr && o.renderScale < 1.0;
-        if (this.fsrEnabled) {
-          const type = o.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType;
-          this.fsrEasuRT = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
-          this.fsrEasuMat = shader(FSR_EASU_FRAG, {
-            tInput: { value: this.comp.texture }, uInputSize: { value: new THREE.Vector2() }, uOutputSize: { value: new THREE.Vector2() }, uSharpness: { value: 0.5 },
-          });
-          this.fsrInputRT = new THREE.WebGLRenderTarget(1, 1, { type, depthBuffer: false });
-          this.fsrRcasMat = shader(FSR_RCAS_FRAG, {
-            tInput: { value: this.fsrEasuRT.texture }, uInputSize: { value: new THREE.Vector2() }, uSharpness: { value: 0.3 },
-          });
-        }
+    /* Frame generation setup. The history holds the two most recent *presented* frames,
+       so it is sized off the same target the chain presents to (EASU output with FSR on,
+       chain size otherwise). 8-bit and unflagged: the frames banked here are already
+       tone-mapped and sRGB-encoded by the final pass, and the blend happens in that
+       encoded space, so the targets must not carry a colour space (no decode on sample,
+       no re-encode on write). */
+    this.frameGenEnabled = o.frameGen;
+    if (this.frameGenEnabled) {
+      this.prevColor = new THREE.WebGLRenderTarget(1, 1, { type: THREE.UnsignedByteType, depthBuffer: false });
+      this.prevColorPrev = new THREE.WebGLRenderTarget(1, 1, { type: THREE.UnsignedByteType, depthBuffer: false });
+      this.frameGenMat = shader(FRAME_GEN_FRAG, {
+        tCurrent: { value: null }, tPrev: { value: null }, tDepth: { value: this.scene.depthTexture },
+        uInvViewProj: { value: new THREE.Matrix4() }, uPrevViewProj: { value: new THREE.Matrix4() },
+        uTexel: { value: new THREE.Vector2(1, 1) }, uNearCut: { value: 1.5 }, uAmount: { value: 1 },
+      });
+      this.blitMat = shader(BLIT_FRAG, { tInput: { value: null } });
+    }
 
-        this.setSize(1, 1);
-      }
+    this.setSize(1, 1);
+  }
 
   /** Structural key of the live pipeline; compare with `structuralKey(options)` to decide on a rebuild. */
   get structuralKey(): string { return this.key; }
 
-  setSize(w: number, h: number) {
-    const s = chainSizes(w, h);
+  /**
+   * `w`/`h` are the render-buffer size (display * pixel ratio); `displayW`/`displayH`
+   * are the native canvas size the upscaled image is targeted at.
+   */
+  setSize(w: number, h: number, displayW?: number, displayH?: number) {
+    const rw = Math.max(1, Math.round(w)), rh = Math.max(1, Math.round(h));
+    const dw = Math.max(1, Math.round(displayW ?? w)), dh = Math.max(1, Math.round(displayH ?? h));
+    if (this.lastW === rw && this.lastH === rh && this.displayW === dw && this.displayH === dh) return;
+    this.lastW = rw; this.lastH = rh;
+    this.displayW = dw; this.displayH = dh;
+    const s = chainSizes(rw, rh);
     this.sizes = s;
     this.scene.setSize(s.w, s.h);
     this.comp.setSize(s.w, s.h);
@@ -642,21 +765,29 @@ export class PostPipeline {
     this.dofRT?.setSize(s.hw, s.hh);
     this.bloomNear?.setSize(s.qw, s.qh); this.bloomNearB?.setSize(s.qw, s.qh);
     this.bloomWide?.setSize(s.ww, s.wh); this.bloomWideB?.setSize(s.ww, s.wh);
-      this.historyRT?.[0].setSize(s.w, s.h);
-      this.historyRT?.[1].setSize(s.w, s.h);
-      this.velocityRT?.setSize(s.w, s.h);
-      this.taaFirst = true;
-      this.fsrEasuRT?.setSize(s.w / this.opts.renderScale, s.h / this.opts.renderScale);
-      this.fsrInputRT?.setSize(s.w, s.h);
-      this.finalMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
-      if (this.aoMat) this.aoMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
-      if (this.aoBlurMat) this.aoBlurMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
-      if (this.dofMat) this.dofMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
-      if (this.bloomBrightMat) this.bloomBrightMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
-      if (this.bloomDownMat) this.bloomDownMat.uniforms.uTexel.value.set(1 / s.qw, 1 / s.qh);
-      if (this.taaMat) this.taaMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
-      this.hasPrev = false;
+    /* The EASU output *is* the displayed image, so it is sized off the native display
+       resolution. Dividing the buffer size by a scale factor is wrong: the buffer already
+       carries the pixel ratio (display scale * adaptive scale), so that division shrinks
+       the upscale target every time the adaptive controller moves. */
+    this.fsrEasuRT?.setSize(Math.max(1, Math.round(dw)), Math.max(1, Math.round(dh)));
+    this.fsrInputRT?.setSize(s.w, s.h);
+    /* Frame-gen history lives at the presented resolution: EASU output with FSR on,
+       chain size otherwise (that is what the final pass sends to the canvas). */
+    if (this.prevColor && this.prevColorPrev) {
+      const pw = this.fsrEnabled ? dw : s.w, ph = this.fsrEnabled ? dh : s.h;
+      this.prevColor.setSize(pw, ph);
+      this.prevColorPrev.setSize(pw, ph);
+      this.frameGenMat?.uniforms.uTexel.value.set(1 / pw, 1 / ph);
     }
+    this.finalMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+    if (this.aoMat) this.aoMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+    if (this.aoBlurMat) this.aoBlurMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
+    if (this.dofMat) this.dofMat.uniforms.uTexel.value.set(1 / s.hw, 1 / s.hh);
+    if (this.bloomBrightMat) this.bloomBrightMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
+    if (this.bloomDownMat) this.bloomDownMat.uniforms.uTexel.value.set(1 / s.qw, 1 / s.qh);
+    this.hasPrev = false;
+    this.hasPrevColor = false;
+  }
 
   /**
    * Apply non-structural option changes (every slider) to the live pipeline.
@@ -714,38 +845,37 @@ export class PostPipeline {
     this.frame++;
     camera.updateMatrixWorld();
 
-      // TAA sub-pixel jitter. The camera's own projection matrix is left untouched: the jitter
-      // lives only in the matrices the post chain uses, so gameplay raycasts and the next frame's
-      // base projection are never affected (and the jitter cannot accumulate frame over frame).
-      let invProj = camera.projectionMatrixInverse;
-      const jitterProj = this.taaEnabled;
-      let jitter = TAA_JITTER[0];
-      let jitterPrev = TAA_JITTER[0];
-      if (jitterProj) {
-        jitter = TAA_JITTER[this.jitterIndex % TAA_JITTER.length];
-        jitterPrev = TAA_JITTER[(this.jitterIndex - 1 + TAA_JITTER.length) % TAA_JITTER.length];
-        this.jitterIndex++;
-        _baseProj.copy(camera.projectionMatrix);
-        camera.projectionMatrix.elements[2] += jitter[0] * 2.0 / s.w;
-        camera.projectionMatrix.elements[6] += jitter[1] * 2.0 / s.h;
-        camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
-        invProj = camera.projectionMatrixInverse;
-      }
+    /* Frame generation, interpolated phase: present the motion-compensated midpoint of the two
+       banked frames and skip the chain entirely. The scene is rendered once per pair of frames
+       presented, which is the whole point of frame generation. The depth buffer still holds the
+       newest banked frame's depth, which is what the reprojection below unprojects. */
+    const genMat = this.frameGenMat;
+    const cur = this.writeIdx === 0 ? this.prevColorPrev : this.prevColor;
+    const prev = this.writeIdx === 0 ? this.prevColor : this.prevColorPrev;
+    if (this.wantsGeneratedFrame && genMat && cur && prev) {
+      const gu = genMat.uniforms;
+      gu.tCurrent.value = cur.texture;
+      gu.tPrev.value = prev.texture;
+      gu.uInvViewProj.value.copy(this.genCurViewProj).invert();
+      gu.uPrevViewProj.value.copy(this.genPrevViewProj);
+      gu.uAmount.value = 1; // midpoint blend: w peaks at 0.5 between the two banked frames
+      this.pass(genMat, null);
+      this.genPhase = false;
+      return;
+    }
 
-      r.setRenderTarget(this.scene);
-      r.render(scene, camera);
+    const invProj = camera.projectionMatrixInverse;
 
-      // Generate velocity buffer for TAA and motion blur
-      if (this.velocityMat && this.velocityRT) {
-        this.velocityMat.uniforms.uInvViewProj.value.copy(this.prevViewProj).invert();
-        this.velocityMat.uniforms.uPrevViewProj.value.copy(this.hasPrev ? this.prevViewProj : camera.projectionMatrix.clone().multiply(camera.matrixWorldInverse));
-        this.pass(this.velocityMat, this.velocityRT);
-      }
+    r.setRenderTarget(this.scene);
+    r.render(scene, camera);
 
     if (this.aoMat && this.aoBlurMat && this.aoRT && this.aoBlurRT) {
       this.aoMat.uniforms.uInvProj.value.copy(invProj);
       this.aoMat.uniforms.uProj.value.copy(camera.projectionMatrix);
-      this.aoMat.uniforms.uFrame.value = this.frame % 64;
+      // Fixed dither phase. Advancing it every frame rotated the whole SSAO pattern, and the 4x4
+      // depth-aware blur cannot hide that, so every surface shimmered frame to frame. A static
+      // per-pixel pattern is the temporally stable option available without a temporal pass.
+      this.aoMat.uniforms.uFrame.value = 0;
       this.pass(this.aoMat, this.aoRT);
       this.aoBlurMat.uniforms.uInvProj.value.copy(invProj);
       this.pass(this.aoBlurMat, this.aoBlurRT);
@@ -774,7 +904,12 @@ export class PostPipeline {
         god.set(k, k, k);
       }
     }
-    if (this.dofMat && this.dofRT) this.pass(this.dofMat, this.dofRT);
+    if (this.dofMat && this.dofRT) {
+      // The DOF tap pattern samples the scene render directly. With no sub-pixel jitter in the
+      // chain, the raw scene render is temporally stable, so the far blur can read it straight.
+      this.dofMat.uniforms.tColor.value = this.scene.texture;
+      this.pass(this.dofMat, this.dofRT);
+    }
 
     const cu = this.compMat.uniforms;
     cu.uInvProj.value.copy(invProj);
@@ -803,7 +938,7 @@ export class PostPipeline {
 
     const fu = this.finalMat.uniforms;
     const viewProj = _m.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    // Last frame's jittered view-projection, captured before it is overwritten below.
+    // Last frame's view-projection, captured before it is overwritten below.
     const prevViewProj = _m2.copy(this.prevViewProj);
     const firstFrame = !this.hasPrev;
     if (this.opts.motionBlur > 0) {
@@ -816,67 +951,57 @@ export class PostPipeline {
     this.hasPrev = true;
     fu.uTime.value = t;
 
-        // TAA resolve pass. History is seeded from the current frame the first time (and after
-        // every resize), so frame one never blends 90% of uninitialised texture data.
-        const taaMat = this.taaMat, history = this.historyRT, velocityRT = this.velocityRT;
-        const taaRan = this.taaEnabled && !!taaMat && !!history && !!velocityRT;
-        if (taaMat && history && velocityRT && this.taaEnabled) {
-          // Read the previous history, write the other target (a texture must never be
-          // bound while it is the active render target).
-          const src = history[this.historyIndex];
-          const dst = history[1 - this.historyIndex];
-          this.historyIndex = 1 - this.historyIndex;
-          taaMat.uniforms.uJitter.value.set(jitter[0] / s.w, jitter[1] / s.h);
-          taaMat.uniforms.uJitterPrev.value.set(jitterPrev[0] / s.w, jitterPrev[1] / s.h);
-          taaMat.uniforms.uTexel.value.set(1 / s.w, 1 / s.h);
-          taaMat.uniforms.uInvProj.value.copy(invProj);
-          taaMat.uniforms.uPrevViewProj.value.copy(firstFrame ? viewProj : prevViewProj);
-          taaMat.uniforms.tColor.value = this.comp.texture;
-          taaMat.uniforms.tHistory.value = src.texture;
-          taaMat.uniforms.tDepth.value = this.scene.depthTexture;
-          taaMat.uniforms.tVelocity.value = velocityRT.texture;
-          taaMat.uniforms.uBlend.value = this.taaFirst ? 0 : 0.9;
-          this.pass(taaMat, dst);
-          this.taaFirst = false;
-        }
-
-        // Everything is graded through the final pass (tone mapping, colour space, white balance,
-        // contrast, vignette, grain, chromatic aberration, sharpen, motion blur); FSR, when active,
-        // then upscales the graded image to the display resolution.
-        fu.tColor.value = taaRan && history ? history[this.historyIndex].texture : this.comp.texture;
-        if (this.fsrEnabled && this.fsrEasuMat && this.fsrRcasMat && this.fsrInputRT && this.fsrEasuRT) {
-          const ow = this.fsrEasuRT.width, oh = this.fsrEasuRT.height;
-          this.pass(this.finalMat, this.fsrInputRT);
-          this.fsrEasuMat.uniforms.tInput.value = this.fsrInputRT.texture;
-          this.fsrEasuMat.uniforms.uInputSize.value.set(s.w, s.h);
-          this.fsrEasuMat.uniforms.uOutputSize.value.set(ow, oh);
-          this.fsrEasuMat.uniforms.uSharpness.value = 0.5;
-          this.pass(this.fsrEasuMat, this.fsrEasuRT);
-          this.fsrRcasMat.uniforms.tInput.value = this.fsrEasuRT.texture;
-          this.fsrRcasMat.uniforms.uInputSize.value.set(ow, oh);
-          this.fsrRcasMat.uniforms.uSharpness.value = 0.3;
-          this.pass(this.fsrRcasMat, null);
-        } else {
-          this.pass(this.finalMat, null);
-        }
-
-        if (jitterProj) {
-          // Hand the game back its unjittered camera.
-          camera.projectionMatrix.copy(_baseProj);
-          camera.projectionMatrixInverse.copy(_baseProj).invert();
-        }
-      }
+    // Everything is graded through the final pass (bloom, white balance, tone mapping, contrast,
+    // vignette, grain, chromatic aberration, sharpen, motion blur); FSR, when active, then
+    // upscales the graded image to the display resolution.
+    fu.tColor.value = this.comp.texture;
+    /* With frame generation on, the graded frame is rendered into the history slot that is not
+       being read this frame and then copied to the screen, so the banked frame and the presented
+       frame are bit-identical (the history holds exactly what the player saw). */
+    const blit = this.frameGenEnabled ? this.blitMat : null;
+    const bank = blit && this.prevColor && this.prevColorPrev
+      ? (this.writeIdx === 0 ? this.prevColor : this.prevColorPrev)
+      : null;
+    if (this.fsrEnabled && this.fsrEasuMat && this.fsrRcasMat && this.fsrInputRT && this.fsrEasuRT) {
+      const ow = this.fsrEasuRT.width, oh = this.fsrEasuRT.height;
+      this.pass(this.finalMat, this.fsrInputRT);
+      this.fsrEasuMat.uniforms.tInput.value = this.fsrInputRT.texture;
+      this.fsrEasuMat.uniforms.uInputSize.value.set(s.w, s.h);
+      this.fsrEasuMat.uniforms.uOutputSize.value.set(ow, oh);
+      this.fsrEasuMat.uniforms.uSharpness.value = 0.5;
+      this.pass(this.fsrEasuMat, this.fsrEasuRT);
+      this.fsrRcasMat.uniforms.tInput.value = this.fsrEasuRT.texture;
+      this.fsrRcasMat.uniforms.uInputSize.value.set(ow, oh);
+      this.fsrRcasMat.uniforms.uSharpness.value = 0.3;
+      this.pass(this.fsrRcasMat, bank);
+    } else {
+      this.pass(this.finalMat, bank);
+    }
+    if (bank && blit) {
+      blit.uniforms.tInput.value = bank.texture;
+      this.pass(blit, null);
+      /* Bank the pair of matrices this interpolation needs: `genCurViewProj` is the transform that
+         produced the newest banked frame, `genPrevViewProj` the one before it. */
+      this.writeIdx = this.writeIdx === 0 ? 1 : 0;
+      this.genPrevViewProj.copy(this.genCurViewProj);
+      this.genCurViewProj.copy(viewProj);
+      this.hasPrevColor = true;
+      this.gradedFrames++;
+      this.genPhase = true;
+    }
+  }
 
   dispose() {
     for (const rt of [this.scene, this.comp, this.aoRT, this.aoBlurRT, this.godA, this.godB, this.dofRT,
-          this.bloomNear, this.bloomNearB, this.bloomWide, this.bloomWideB, this.velocityRT, this.fsrEasuRT, this.fsrInputRT]) rt?.dispose();
-    for (const rt of this.historyRT ?? []) rt.dispose();
+          this.bloomNear, this.bloomNearB, this.bloomWide, this.bloomWideB, this.fsrEasuRT, this.fsrInputRT,
+          this.prevColor, this.prevColorPrev]) rt?.dispose();
     this.scene.depthTexture?.dispose();
     for (const m of [this.aoMat, this.aoBlurMat, this.godMaskMat, this.godBlurMat, this.dofMat,
-          this.bloomBrightMat, this.bloomBlurMat, this.bloomDownMat, this.compMat, this.finalMat, this.taaMat, this.velocityMat, this.fsrEasuMat, this.fsrRcasMat]) m?.dispose();
+          this.bloomBrightMat, this.bloomBlurMat, this.bloomDownMat, this.compMat, this.finalMat, this.fsrEasuMat, this.fsrRcasMat,
+          this.frameGenMat, this.blitMat]) m?.dispose();
     this.quad.dispose();
   }
 }
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _vz = new THREE.Vector2(), _m = new THREE.Matrix4();
-const _baseProj = new THREE.Matrix4(), _m2 = new THREE.Matrix4();
+const _m2 = new THREE.Matrix4();

@@ -380,6 +380,16 @@ export class CharacterRig {
     rotateWorld(b, _q.setFromAxisAngle(axis, angle).clone());
   }
 
+  /** Ski tuck: boots retract toward the hull and the torso folds over them as speed builds. */
+  private skiTuck(right: THREE.Vector3, tuck: number, w: number) {
+    if (tuck <= 0.01 || w <= 0.01) return;
+    const k = tuck * w;
+    this.turn('L_Thigh', right, 0.5 * k); this.turn('R_Thigh', right, 0.35 * k);
+    this.turn('L_Calf', right, -0.7 * k); this.turn('R_Calf', right, -0.5 * k);
+    this.turn('L_Foot', right, 0.45 * k); this.turn('R_Foot', right, 0.4 * k);
+    this.turn('Spine', right, -0.3 * k);
+  }
+
   private ik(side: 'L' | 'R', target: THREE.Vector3, pole: THREE.Vector3) {
     const up = this.bones.get(`${side}_UpperArm`), fo = this.bones.get(`${side}_Forearm`), ha = this.bones.get(`${side}_Hand`);
     if (!up || !fo || !ha) return;
@@ -404,6 +414,9 @@ export class CharacterRig {
       const f = _v.set(0, 0, -1).applyQuaternion(q), r = _v2.set(1, 0, 0).applyQuaternion(q);
       const vx = vel?.x ?? 0, vz = vel?.z ?? 0;
       this.animator.update(dt, { fwd: vx * f.x + vz * f.z, right: vx * r.x + vz * r.z, up: vel?.y ?? 0, onGround: ground, skiing: ski && !jet, jetting: jet, pitch });
+      // TA has no ski-tuck clip: legs retracting into the boots is layered on top
+      // of the locomotion set, and deepens with speed.
+      if (ski && !jet) this.skiTuck(r, Math.min(1, speed / 30), 1);
       return;
     }
     for (const [b, q] of this.rest) b.quaternion.copy(q);
@@ -429,13 +442,15 @@ export class CharacterRig {
     }
     if (this.wSki > 0.01) {
       // TA ski stance: crouched, staggered feet, chest over the knees, slight sideways twist.
+      // As speed builds the boots retract toward the hull (the classic ski tuck).
       const w = this.wSki;
-      this.turn('L_Thigh', right, 0.75 * w); this.turn('R_Thigh', right, 0.2 * w);
-      this.turn('L_Calf', right, -1.15 * w); this.turn('R_Calf', right, -0.6 * w);
-      this.turn('L_Foot', right, 0.3 * w); this.turn('R_Foot', right, 0.25 * w);
-      this.turn('Spine', right, -0.38 * w);
+      const tuck = Math.min(1, speed / 30);
+      this.turn('L_Thigh', right, (0.75 + 0.5 * tuck) * w); this.turn('R_Thigh', right, (0.2 + 0.35 * tuck) * w);
+      this.turn('L_Calf', right, (-1.15 - 0.7 * tuck) * w); this.turn('R_Calf', right, (-0.6 - 0.5 * tuck) * w);
+      this.turn('L_Foot', right, (0.3 + 0.45 * tuck) * w); this.turn('R_Foot', right, (0.25 + 0.4 * tuck) * w);
+      this.turn('Spine', right, (-0.38 - 0.3 * tuck) * w);
       this.turn('Spine', upW, 0.18 * w);
-      rootBone.position.y -= 0.1 * s * w;
+      rootBone.position.y -= (0.1 + 0.08 * tuck) * s * w;
     }
     if (this.wAir > 0.01) {
       const w = this.wAir * (jet ? 1 : 0.7);

@@ -70,7 +70,7 @@ export const CLASSES: ClassDef[] = [
   cls({ id: 'technician', abbrev: 'TCN', name: 'Technician', armor: 'medium', health: 1300, energy: 110,
     primaries: ['tcn4_smg', 'thumper', 'tcn4_rockwind', 'tc24'],
     secondaries: ['repair_tool', 'sawed_off', 'sparrow', 'lr_repair_tool', 'shocklance'],
-    belts: ['tcng', 'motion_sensor', 'tcng_quickfuse', 'repair_kit'], packs: ['light_turret_pack', 'exr_turret_pack'], perkA: 'mechanic', mass: 100, src: 'F/Technician' }),
+    belts: ['tcng', 'motion_sensor', 'tcng_quickfuse', 'repair_kit'], packs: ['light_turret_pack', 'exr_turret_pack', 'heavy_turret_pack'], perkA: 'mechanic', mass: 100, src: 'F/Technician' }),
   cls({ id: 'raider', abbrev: 'RDR', name: 'Raider', armor: 'medium', health: 1300, energy: 110,
     primaries: ['arx_buster', 'grenade_launcher', 'plasma_gun', 'dust_devil'],
     secondaries: ['nj4_smg', 'nj5b_smg', 'desert_nj4', 'shocklance'],

@@ -4,6 +4,7 @@ export * from './rng.js';
 export * from './data/items.js';
 export * from './data/classes.js';
 export * from './data/assets.js';
+export * from './data/medals.js';
 export * from './data/modes.js';
 export * from './data/keybinds.js';
 export * from './data/vgs.js';

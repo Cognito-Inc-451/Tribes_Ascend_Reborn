@@ -220,6 +220,7 @@ export const ITEMS: Record<string, ItemDef> = Object.fromEntries(([
   item({ id: 'force_field_pack', name: 'Force Field', slot: 'pack', kind: 'deploy', clip: 2, ammo: 2, reload: 0, refire: 1, deploy: 'force_field', src: 'TD/Force_Field' }),
   item({ id: 'survival_pack', name: 'Survival Pack', slot: 'pack', kind: 'passive', clip: 0, ammo: 0, reload: 0, refire: 0, passive: { health: 200, runMult: 1.25, regenMult: 1.15 }, src: 'F/Brute' }),
   item({ id: 'heavy_shield_pack', name: 'Heavy Shield Pack', slot: 'pack', kind: 'toggle', clip: 0, ammo: 0, reload: 0, refire: 0.5, energyDrain: 10, src: 'F/Brute' }),
+  item({ id: 'heavy_turret_pack', name: 'Heavy Turret', slot: 'pack', kind: 'deploy', clip: 1, ammo: 1, reload: 0, refire: 1, deploy: 'heavy_turret', src: 'TD/Base_Assets' }),
 ] as ItemDef[]).map((i) => [i.id, i]));
 
 export const MELEE = { damage: 900, backstabMult: 2, range: 2.6, refire: 0.9, impulse: 18000 };
@@ -234,11 +235,10 @@ export const PSEUDO_PROJECTILES: Record<string, ProjectileDef> = {
   veh_gravcycle: pseudo({ speed: 110, direct: 250, radius: 3, splashMax: 200, model: 'rocket', color: 0xffc060, inherit: 1 }),
   veh_beowulf: pseudo({ speed: 70, direct: 2000, radius: 9, splashMax: 1500, gravity: 0.6, model: 'mortar', color: 0xff8030, impulse: 80000, inherit: 0.5 }),
   veh_shrike: pseudo({ speed: 120, direct: 350, radius: 4, splashMax: 300, model: 'plasma', color: 0x80c0ff, inherit: 1 }),
-  veh_bomber: pseudo({ speed: 100, direct: 500, radius: 6, splashMax: 400, gravity: 0.1, model: 'mortar', color: 0xff6030, impulse: 60000, inherit: 0.5 }),
-  veh_havoc: pseudo({ speed: 90, direct: 300, radius: 5, splashMax: 250, gravity: 0.1, model: 'plasma', color: 0x80c0ff, inherit: 1 }),
   turret_base: pseudo({ speed: 90, direct: 650, radius: 4, splashMax: 650, model: 'plasma', color: 0xff5040 }),
   turret_exr: pseudo({ speed: 75, direct: 380, radius: 4, splashMax: 380, model: 'plasma', color: 0xffa040 }),
   sub_munition: pseudo({ speed: 20, direct: 450, radius: 7, splashMax: 450, gravity: 1, model: 'grenade', color: 0xb6ff4a, bounce: 0.3, fuse: 1.2, explodeOnExpire: true, lifetime: 3 }),
+  veh_heavy_turret: pseudo({ speed: 105, direct: 700, radius: 4.5, splashMax: 500, model: 'plasma', color: 0xff5040 }),
 };
 
 export const ITEM_IDS: string[] = [...Object.keys(ITEMS), ...Object.keys(PSEUDO_PROJECTILES), 'melee', 'none'];

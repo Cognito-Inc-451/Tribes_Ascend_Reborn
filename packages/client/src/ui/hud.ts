@@ -1,4 +1,4 @@
-import { CLASSES, ITEMS, MODES, NAMEPLATES, TEAM_NAMES, BOT_TAG, type ModeId, type PlayerInfo } from '@ar/shared';
+import { CLASSES, ITEMS, MEDALS, MODES, NAMEPLATES, TEAM_NAMES, BOT_TAG, type ModeId, type PlayerInfo } from '@ar/shared';
 import { NODE_URL } from '../net/node.js';
 import { settings } from '../settings.js';
 import { clear, h } from './dom.js';
@@ -52,6 +52,209 @@ export function hudIcon(name: string, color: string): string | null {
   return null;
 }
 
+/* Kill-feed glyphs. The cooked UI art has no weapon icons, so draw simple silhouettes on a
+   canvas and cache them as data URLs (same caching shape as hudIcon, but synchronous). */
+type GlyphKind =
+  | 'disc' | 'chain' | 'shotgun' | 'rifle' | 'smg' | 'pistol' | 'launcher' | 'melee' | 'knife'
+  | 'grenade' | 'mine' | 'repair' | 'deploy' | 'pack' | 'vehicle' | 'fall' | 'hazard'
+  | 'strike' | 'suicide' | 'force' | 'turret' | 'headshot' | 'other';
+
+const GLYPH_KINDS: Record<string, GlyphKind> = {
+  spinfusor: 'disc', spinfusor_mkd: 'disc', spinfusor_mkx: 'disc', spinfusor_disc: 'disc',
+  twinfusor: 'disc', heavy_twinfusor: 'disc', light_twinfusor: 'disc', blinksfusor: 'disc',
+  devastator_spinfusor: 'disc', dueling_spinfusor: 'disc', heavy_spinfusor: 'disc',
+  light_spinfusor: 'disc', stealth_spinfusor: 'disc', spare_spinfusor: 'disc',
+  chain_gun: 'chain', chain_cannon: 'chain',
+  shotgun: 'shotgun', accurized_shotgun: 'shotgun', auto_shotgun: 'shotgun',
+  holdout_shotgun: 'shotgun', sawed_off: 'shotgun', dust_devil: 'shotgun',
+  assault_rifle: 'rifle', light_assault_rifle: 'rifle', gasts_rifle: 'rifle', bxt1: 'rifle',
+  bxt1a: 'rifle', phase_rifle: 'rifle', sap20: 'rifle', jackal: 'rifle', sparrow: 'rifle',
+  falcon: 'rifle', tc24: 'rifle',
+  nj4_smg: 'smg', nj5b_smg: 'smg', desert_nj4: 'smg', rhino_smg: 'smg',
+  arctic_rhino_smg: 'smg', tcn4_smg: 'smg', sn7: 'smg', arctic_sn7: 'smg', tcng: 'smg',
+  tcng_quickfuse: 'smg', x1_lmg: 'smg', tcn4_rockwind: 'smg',
+  eagle_pistol: 'pistol', nova_colt: 'pistol', nova_blaster: 'pistol',
+  nova_blaster_mx: 'pistol', arx_buster: 'pistol', gladiator: 'pistol',
+  saber_launcher: 'launcher', titan_launcher: 'launcher', bolt_launcher: 'launcher',
+  heavy_bolt_launcher: 'launcher', mirv_launcher: 'launcher', grenade_launcher: 'launcher',
+  fusion_mortar: 'launcher', fusion_mortar_deluxe: 'launcher', plasma_cannon: 'launcher',
+  plasma_gun: 'launcher',
+  shocklance: 'melee', the_hammer: 'melee', melee: 'melee', throwing_knives: 'knife',
+  ap_grenade: 'grenade', cluster_grenade: 'grenade', compact_nitron: 'grenade',
+  defective_frag: 'grenade', emp_grenade: 'grenade', emp_xl: 'grenade',
+  explosive_nitron: 'grenade', extended_fractal: 'grenade', fractal_grenade: 'grenade',
+  frag_grenade: 'grenade', frag_xl: 'grenade', heavy_ap: 'grenade', heavy_ap_xl: 'grenade',
+  impact_nitron: 'grenade', light_sticky: 'grenade', proximity_grenade: 'grenade',
+  short_fuse_frag: 'grenade', smoke_grenade: 'grenade', sticky_grenade: 'grenade',
+  sticky_xl: 'grenade', t5_grenade: 'grenade', whiteout_grenade: 'grenade',
+  claymore: 'mine', focused_claymore: 'mine', mines: 'mine', motion_mine: 'mine',
+  prism_mines: 'mine', thumper: 'mine', thumper_d: 'mine', thumper_dx: 'mine',
+  drop_jammer: 'deploy', jammer_pack: 'deploy', motion_sensor: 'deploy', supply_drop: 'deploy',
+  heavy_turret_pack: 'turret', light_turret_pack: 'turret', exr_turret_pack: 'turret',
+  turret_base: 'turret', light_turret: 'turret',
+  repair_tool: 'repair', repair_kit: 'repair', lr_repair_tool: 'repair',
+  energy_pack: 'pack', energy_recharge_pack: 'pack', force_field_pack: 'pack',
+  heavy_shield_pack: 'pack', regen_pack: 'pack', shield_pack: 'pack', stealth_pack: 'pack',
+  survival_pack: 'pack', thrust_pack: 'pack', utility_pack: 'pack',
+  fall: 'fall', hazard: 'hazard', suicide: 'suicide', killz: 'strike',
+  tactical_strike: 'strike', orbital_strike: 'strike', force_field: 'force',
+  vehicle_crash: 'vehicle', rollover: 'vehicle',
+};
+
+const glyphKindFor = (item: string): GlyphKind =>
+  GLYPH_KINDS[item]
+  ?? (item.startsWith('veh_') ? (item.endsWith('_gun') ? 'turret' : 'vehicle') : undefined)
+  ?? (item.startsWith('vehicle_') ? 'vehicle' : undefined)
+  ?? (item.endsWith('_pack') ? 'pack' : undefined)
+  ?? 'other';
+
+/** Feed name colours (styles.css .feed .t0/.t1/.tn) so glyphs match the names beside them. */
+const feedTint = (team: number) => (team === 0 ? '#ff8a78' : team === 1 ? '#7cb8ff' : '#dddddd');
+
+/* Accolade icons are stored as glyph names (or an item id); resolve either to a drawable glyph. */
+const GLYPH_KIND_SET = new Set<string>([
+  'disc', 'chain', 'shotgun', 'rifle', 'smg', 'pistol', 'launcher', 'melee', 'knife',
+  'grenade', 'mine', 'repair', 'deploy', 'pack', 'vehicle', 'fall', 'hazard',
+  'strike', 'suicide', 'force', 'turret', 'headshot', 'other',
+]);
+const medalGlyph = (icon: string): GlyphKind => (GLYPH_KIND_SET.has(icon) ? icon as GlyphKind : glyphKindFor(icon));
+
+const glyphCache = new Map<string, string>();
+function glyphSrc(kind: GlyphKind, color: string): string {
+  const key = `${kind}|${color}`;
+  const hit = glyphCache.get(key);
+  if (hit) return hit;
+  const c = document.createElement('canvas');
+  c.width = 24; c.height = 24;
+  const x = c.getContext('2d')!;
+  x.translate(12, 12);
+  x.lineJoin = 'round'; x.lineCap = 'round';
+  const p = new Path2D();
+  switch (kind) {
+    case 'disc':
+      p.arc(-2, 1, 5, 0, Math.PI * 2);
+      p.moveTo(4, -3); p.lineTo(10, -5);
+      p.moveTo(5, 4); p.lineTo(11, 3);
+      break;
+    case 'chain':
+      p.moveTo(-10, 0); p.lineTo(10, 0);
+      p.arc(-4, 0, 1.8, 0, Math.PI * 2);
+      p.arc(0, 0, 1.8, 0, Math.PI * 2);
+      p.arc(4, 0, 1.8, 0, Math.PI * 2);
+      break;
+    case 'shotgun':
+      p.moveTo(-9, -2); p.lineTo(7, -2);
+      p.moveTo(-9, 2); p.lineTo(7, 2);
+      p.moveTo(7, 2); p.lineTo(11, 5);
+      break;
+    case 'rifle':
+      p.moveTo(-10, -1); p.lineTo(9, -1);
+      p.moveTo(-2, -1); p.lineTo(-3, 6);
+      p.moveTo(3, -1); p.lineTo(5, 6);
+      p.moveTo(9, -1); p.lineTo(11, -4);
+      break;
+    case 'smg':
+      p.moveTo(-8, -2); p.lineTo(7, -2);
+      p.moveTo(-1, -2); p.lineTo(1, 6);
+      p.moveTo(7, -2); p.lineTo(10, -2);
+      break;
+    case 'pistol':
+      p.moveTo(-7, -3); p.lineTo(5, -3); p.lineTo(5, 0);
+      p.lineTo(1, 7); p.lineTo(-2, 7); p.lineTo(0, 0);
+      break;
+    case 'launcher':
+      p.moveTo(-9, -4); p.lineTo(5, -4); p.lineTo(5, 4); p.lineTo(-9, 4);
+      p.moveTo(5, 0); p.lineTo(11, -4);
+      p.moveTo(5, 0); p.lineTo(11, 4);
+      p.moveTo(-3, 4); p.lineTo(-1, 9);
+      break;
+    case 'melee':
+      p.moveTo(-8, 9); p.lineTo(9, -9);
+      p.moveTo(-1, 2); p.lineTo(-6, -2);
+      p.moveTo(-6, 7); p.lineTo(-2, 11);
+      break;
+    case 'knife':
+      p.moveTo(-9, 5); p.lineTo(-3, -4);
+      p.moveTo(3, 9); p.lineTo(9, -2);
+      break;
+    case 'grenade':
+      p.arc(0, 3, 5, 0, Math.PI * 2);
+      p.moveTo(-2, -3); p.lineTo(2, -3);
+      p.moveTo(0, -3); p.lineTo(0, -6);
+      p.moveTo(2, -6); p.lineTo(6, -9);
+      break;
+    case 'mine':
+      p.arc(0, 3, 6, Math.PI, 0);
+      p.moveTo(-9, 3); p.lineTo(9, 3);
+      p.moveTo(-4, 3); p.lineTo(-4, -5);
+      p.moveTo(4, 3); p.lineTo(4, -5);
+      break;
+    case 'repair':
+      p.moveTo(-6, 0); p.lineTo(6, 0);
+      p.moveTo(0, -6); p.lineTo(0, 6);
+      break;
+    case 'deploy':
+      p.moveTo(0, -7); p.lineTo(7, 0); p.lineTo(0, 7); p.lineTo(-7, 0); p.closePath();
+      p.moveTo(-9, 10); p.lineTo(9, 10);
+      break;
+    case 'pack':
+      p.moveTo(-6, -7); p.lineTo(6, -7); p.lineTo(6, 6); p.lineTo(-6, 6); p.closePath();
+      p.moveTo(-3, 6); p.lineTo(-3, 10);
+      p.moveTo(3, 6); p.lineTo(3, 10);
+      break;
+    case 'vehicle':
+      p.moveTo(-10, 5); p.lineTo(10, 5);
+      p.moveTo(-10, 5); p.lineTo(-6, -2); p.lineTo(4, -2); p.lineTo(8, 5);
+      p.arc(0, -2, 3, Math.PI, 0);
+      break;
+    case 'fall':
+      p.moveTo(0, -9); p.lineTo(0, 5);
+      p.moveTo(-4, 1); p.lineTo(0, 5); p.lineTo(4, 1);
+      p.moveTo(-7, 9); p.lineTo(7, 9);
+      break;
+    case 'hazard':
+      p.moveTo(0, -8);
+      p.quadraticCurveTo(7, 2, 0, 8);
+      p.quadraticCurveTo(-7, 2, 0, -8);
+      break;
+    case 'strike':
+      p.moveTo(2, -10); p.lineTo(-5, 1); p.lineTo(0, 1);
+      p.lineTo(-3, 10); p.lineTo(6, -2); p.lineTo(1, -2); p.closePath();
+      break;
+    case 'suicide':
+      p.arc(0, 0, 6, 0, Math.PI * 2);
+      p.moveTo(-3, -3); p.lineTo(3, 3);
+      p.moveTo(-3, 3); p.lineTo(3, -3);
+      break;
+    case 'force':
+      p.arc(0, 4, 7, Math.PI, 0);
+      p.moveTo(-9, 4); p.lineTo(9, 4);
+      break;
+    case 'turret':
+      p.moveTo(-7, 7); p.lineTo(7, 7);
+      p.arc(0, 3, 5, Math.PI, 0);
+      p.moveTo(0, 0); p.lineTo(9, -5);
+      break;
+    case 'headshot':
+      p.arc(0, 0, 5, 0, Math.PI * 2);
+      p.moveTo(0, -10); p.lineTo(0, -6);
+      p.moveTo(0, 6); p.lineTo(0, 10);
+      p.moveTo(-10, 0); p.lineTo(-6, 0);
+      p.moveTo(6, 0); p.lineTo(10, 0);
+      break;
+    default:
+      p.moveTo(-9, -1); p.lineTo(8, -1);
+      p.moveTo(2, -1); p.lineTo(4, 6);
+      break;
+  }
+  // Dark outline pass first so the glyph stays legible over any HUD background.
+  x.strokeStyle = 'rgba(0,0,0,.8)'; x.lineWidth = 4.4; x.stroke(p);
+  x.strokeStyle = color; x.lineWidth = 2.1; x.stroke(p);
+  const url = c.toDataURL();
+  glyphCache.set(key, url);
+  return url;
+}
+
 export class Hud {
   readonly root: HTMLElement;
   private vitals: HTMLElement;
@@ -74,6 +277,7 @@ export class Hud {
   readonly vgsSlot: HTMLElement;
   private vgsLog: HTMLElement;
   private toasts: HTMLElement;
+  private medalsEl: HTMLElement;
   private markers: HTMLElement;
   private crosshair: HTMLElement;
   private hitmarker: HTMLElement;
@@ -118,6 +322,7 @@ export class Hud {
     this.vgsLog = h('div', { class: 'vgslog' });
     this.vgsSlot = h('div', { class: 'vgsslot' });
     this.toasts = h('div', { class: 'toasts' });
+    this.medalsEl = h('div', { class: 'medals' });
     this.markers = h('div', { class: 'markers' });
     this.crosshair = h('div', { class: 'crosshair' });
     this.hitmarker = h('div', { class: 'hitmarker' });
@@ -131,7 +336,7 @@ export class Hud {
     // Left column, top to bottom: net stats (F10), VGS menu, VGS history, chat; stacked so nothing overlaps.
     const left = h('div', { class: 'leftcol' }, this.net, this.vgsSlot, this.vgsLog, h('div', { style: 'flex:1' }), this.chat);
     this.root = h('div', { class: 'hud' }, this.vignette, this.markers, this.crosshair, this.hitmarker, this.dmg, this.reloadEl, this.vitals, speed,
-      this.weaponsEl, this.topbar, this.flagsEl, this.compass, this.feed, left, this.toasts, this.respawn, this.pill, this.spec, this.spawnEl, this.waitEl);
+      this.weaponsEl, this.topbar, this.flagsEl, this.compass, this.feed, left, this.toasts, this.medalsEl, this.respawn, this.pill, this.spec, this.spawnEl, this.waitEl);
     parent.append(this.root);
   }
 
@@ -244,12 +449,16 @@ export class Hud {
     this.pill.textContent = s.transport;
   }
 
-  killFeed(killer: PlayerInfo | undefined, victim: PlayerInfo | undefined, item: string, assist?: PlayerInfo) {
+  killFeed(killer: PlayerInfo | undefined, victim: PlayerInfo | undefined, item: string, assist?: PlayerInfo, headshot?: boolean, dist?: number) {
     const name = (p: PlayerInfo | undefined) => h('span', { class: p ? `t${p.team === 255 ? 'n' : p.team}` : 'tn' }, p ? (p.bot ? p.name : p.name) : 'World');
-    const weapon = ITEMS[item]?.name ?? ({ melee: 'Melee', fall: 'Impact', killz: 'Out of Bounds', hazard: 'Hazard', suicide: 'Suicide', vehicle_crash: 'Roadkill', force_field: 'Force Field', turret_base: 'Base Turret', light_turret: 'Turret', tactical_strike: 'Tactical Strike', orbital_strike: 'Orbital Strike', supply_drop: 'Supply Drop' } as Record<string, string>)[item] ?? item;
+    const weapon = ITEMS[item]?.name ?? ({ melee: 'Melee', fall: 'Impact', killz: 'Out of Bounds', hazard: 'Hazard', suicide: 'Suicide', vehicle_crash: 'Roadkill', force_field: 'Force Field', turret_base: 'Base Turret', light_turret: 'Turret', tactical_strike: 'Tactical Strike', orbital_strike: 'Orbital Strike', supply_drop: 'Supply Drop', veh_heavy_turret: 'Heavy Turret', veh_beowulf_gun: 'Beowulf Gun', veh_shrike_gun: 'Shrike Gun', veh_heavy_turret_gun: 'Heavy Turret Gun', vehicle_beowulf: 'Beowulf', vehicle_gravcycle: 'Grav Cycle', vehicle_shrike: 'Shrike', vehicle_heavy_turret: 'Heavy Turret' } as Record<string, string>)[item] ?? item;
+    const by = killer && killer !== victim ? killer : victim;
+    const glyph = h('img', { class: 'g', alt: '', src: glyphSrc(glyphKindFor(item), feedTint(by?.team ?? 255)) });
+    const hs = headshot ? h('img', { class: 'hs', alt: 'Headshot', title: 'Headshot', src: glyphSrc('headshot', '#ffd166') }) : null;
+    const distText = dist !== undefined && dist >= 8 ? h('span', { class: 'd' }, `${Math.round(dist)}m`) : null;
     const row = killer && killer !== victim
-      ? h('div', { class: 'k' }, name(killer), assist ? h('span', { class: 'muted' }, ` + ${assist.name}`) : null, h('span', { class: 'muted' }, ` [${weapon}] `), name(victim))
-      : h('div', { class: 'k' }, name(victim), h('span', { class: 'muted' }, ` [${weapon}]`));
+      ? h('div', { class: 'k' }, name(killer), assist ? h('span', { class: 'muted' }, ` + ${assist.name}`) : null, glyph, hs, h('span', { class: 'muted' }, ` [${weapon}] `), name(victim), distText)
+      : h('div', { class: 'k' }, name(victim), glyph, hs, h('span', { class: 'muted' }, ` [${weapon}]`), distText);
     this.feed.append(row);
     while (this.feed.children.length > 6) this.feed.firstChild?.remove();
     setTimeout(() => row.remove(), 6200);
@@ -296,6 +505,29 @@ export class Hud {
     const el = h('div', { class: 'announce', style: `color:${color}` }, text);
     this.root.append(el);
     setTimeout(() => el.remove(), 3100);
+  }
+
+  /**
+   * Accolade ribbon, Tribes: Ascend-style: glyph + medal name + credit value,
+   * stacked above the crosshair with the newest at the bottom. Big medals
+   * (spree finales, captures, end-of-round) linger longer and glow.
+   */
+  medal(id: string, team = 255, mine = false) {
+    const def = MEDALS[id];
+    if (!def) return;
+    const row = h(
+      'div',
+      { class: `medal ${def.tier}${mine ? ' mine' : ''}` },
+      h('img', { class: 'g', alt: '', src: glyphSrc(medalGlyph(def.icon), mine ? '#ffd166' : feedTint(team)) }),
+      h('span', { class: 'nm' }, def.name),
+      h('span', { class: 'cr' }, `+${def.credits}`),
+    );
+    this.medalsEl.append(row);
+    while (this.medalsEl.children.length > 5) this.medalsEl.firstElementChild?.remove();
+    setTimeout(() => {
+      row.classList.add('out');
+      setTimeout(() => row.remove(), 420);
+    }, def.tier === 'big' ? 5200 : 3600);
   }
 
   hit(blue: boolean) {

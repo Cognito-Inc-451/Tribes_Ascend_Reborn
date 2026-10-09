@@ -4,8 +4,9 @@ import { settings } from '../settings.js';
 import { FOG_UNIFORMS, withFog } from './fog.js';
 import { forceFieldMaterial, forceFieldTime } from './forcefield.js';
 import { beamMaterial, BEAM_MESH, coneAxis, disposeBeams } from './beams.js';
-import { disposeLiquids, lavaMaterial, refreshWaterEnv, waterMaterial } from './liquids.js';
+import { buildFoamField, disposeLiquids, lavaMaterial, refreshWaterEnv, waterMaterial, type FoamField, type WaterFoam } from './liquids.js';
 import { matFor, surfaceMaterial } from './materials.js';
+import { ACCUM_APPLY, ACCUM_FRAG, ACCUM_ROUGH, applyAccumTheme, resetAccum, setAccumKind, stepAccum, type AccumKind } from './accum.js';
 import { NORMAL_STRENGTH } from './models.js';
 import { SHADOW_RES } from './renderer.js';
 import type { TextureStore } from './textures.js';
@@ -192,9 +193,14 @@ export class WorldView {
   private weatherShelter: Float32Array | null = null;
   private shelterTimer = 0;
   private lastShelterCam = new THREE.Vector3(NaN, NaN, NaN);
+  /** Weather kind driving the surface accumulation film (null = no accumulation). */
+  private accum: AccumKind | null = null;
   private hazard: THREE.Mesh | null = null;
   private texMats = new Map<string, THREE.MeshStandardMaterial>();
   private blendMats = new Map<string, THREE.Material>();
+  /** Baked height→shoreline mask shared by every water surface on this map. */
+  private foam: FoamField | null = null;
+  private foamBaked = false;
   private skyEnv: THREE.Texture | null = null;
   private skyDome: THREE.Mesh | null = null;
   private skyDomeTex: THREE.Texture | null = null;
@@ -242,14 +248,19 @@ export class WorldView {
     this.skyDome = this.buildSkyDome();
     if (this.skyDome) this.group.add(this.skyDome);
     if (this.renderer) this.skyEnv = this.buildSkyEnv();
+    // TA's weather volumes carry no type: snow on icy maps, embers/ash on volcanic ones, none in arenas, rain elsewhere.
+    const volumeWeather = /ice|alpine|snow/.test(map.theme) ? 'snow' : /hell|lava|volcan/.test(map.theme) ? 'ash' : /arena/.test(map.theme) ? 'none' : 'rain';
+    const weather = map.source === 'original' ? (env?.snow ? volumeWeather : t.weather) : t.weather;
+    // Accumulation must be configured before any surface material compiles, so the weather
+    // decision is made up front and published to the shared accumulation uniforms.
+    this.accum = settings.weather && weather && weather !== 'none' ? weather : null;
+    applyAccumTheme(t, this.map.terrain);
+    setAccumKind(this.accum ?? 'none');
     this.group.add(this.buildTerrain());
     for (const m of this.buildBoxes()) this.group.add(m);
     for (const m of this.buildMeshes()) this.group.add(m);
     if (t.hazard && map.source === 'reborn') this.buildHazard(t.hazard.kind, t.hazard.level);
     this.roof = this.buildRoofGrid();
-    // TA's weather volumes carry no type: snow on icy maps, embers/ash on volcanic ones, none in arenas, rain elsewhere.
-    const volumeWeather = /ice|alpine|snow/.test(map.theme) ? 'snow' : /hell|lava|volcan/.test(map.theme) ? 'ash' : /arena/.test(map.theme) ? 'none' : 'rain';
-    const weather = map.source === 'original' ? (env?.snow ? volumeWeather : t.weather) : t.weather;
     if (settings.weather && weather && weather !== 'none') this.buildWeather(weather);
     scene.add(this.group);
   }
@@ -577,13 +588,14 @@ export class WorldView {
         vec3 ln = texture2D(tN[${i}], vTXZ * uScale[${i}]).xyz * 2.0 - 1.0;
         ${i === 0 ? 'tn = mix(tn, ln, uHasN[0]);' : `tn = mix(tn, ln, w.${ch[i - 1]} * uHasN[${i}]);`}
       }`).join('\n');
-    m.customProgramCacheKey = () => `terrain-splat-${N}-${NN}`;
+    // Accumulation uniforms change the program layout, so the cache key must reflect them.
+    m.customProgramCacheKey = () => `terrain-splat-${N}-${NN}-accum`;
     m.onBeforeCompile = (sh) => {
       withFog(sh);
       Object.assign(sh.uniforms, uniforms);
       sh.vertexShader = sh.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec2 vTXZ;')
-        .replace('#include <project_vertex>', '#include <project_vertex>\nvTXZ = (modelMatrix * vec4(transformed, 1.0)).xz;');
+        .replace('#include <common>', '#include <common>\nvarying vec2 vTXZ;\nvarying float vTY;\nvarying vec3 vTNrm;')
+        .replace('#include <project_vertex>', '#include <project_vertex>\nvec4 tw = modelMatrix * vec4(transformed, 1.0);\nvTXZ = tw.xz;\nvTY = tw.y;\nvTNrm = normalize(mat3(modelMatrix) * objectNormal);');
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>', `#include <common>
           varying vec2 vTXZ;
@@ -594,13 +606,17 @@ export class WorldView {
           uniform vec4 uSplat;
           uniform vec2 uCellOff;
           uniform sampler2D tN[${NN}];
-          uniform float uHasN[${NN}];`)
+          uniform float uHasN[${NN}];
+          varying float vTY;
+          varying vec3 vTNrm;
+          ${ACCUM_FRAG}`)
         .replace('#include <color_fragment>', `#include <color_fragment>
           vec4 w = texture2D(tSplat, (vTXZ - uSplat.xy) * uSplat.zw + uCellOff);
           float far = smoothstep(60.0, 260.0, length(vTXZ - cameraPosition.xz));
           vec3 tc = vec3(0.6);
           ${blend}
-          diffuseColor.rgb *= tc * 1.15;`)
+          diffuseColor.rgb *= tc * 1.15;
+          ${ACCUM_APPLY.replace(/AR_NRM/g, 'vTNrm').replace(/AR_ALT/g, 'vTY')}`)
         .replace('#include <normal_fragment_maps>', `#include <normal_fragment_maps>
           {
             vec3 tn = vec3(0.0, 0.0, 1.0);
@@ -611,7 +627,9 @@ export class WorldView {
             tv = normalize(tv - normal * dot(normal, tv));
             bv = normalize(bv - normal * dot(normal, bv));
             normal = normalize(tv * tn.x + bv * tn.y + normal * max(tn.z, 0.2));
-          }`);
+          }`)
+        .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+          ${ACCUM_ROUGH}`);
     };
     return m;
   }
@@ -867,13 +885,24 @@ export class WorldView {
           geo.setAttribute('lmScale', new THREE.InstancedBufferAttribute(sc, 3));
           geo.boundingSphere = g.boundingSphere;
         }
+        // Water meshes sit at the top of their own geometry, so the surface height is the
+        // highest instance translation plus the (scaled) local top — that is the shoreline level.
+        let waterLevel: number | null = null;
+        if (me.groups?.some((gr) => gr.fx === 'water')) {
+          g.computeBoundingBox();
+          const top = g.boundingBox ? g.boundingBox.max.y : 0;
+          let lv = -Infinity;
+          // m is the packed row-major 3x4: [m00,m01,m02,tx, m10,m11,m12,ty, m20,m21,m22,tz]
+          for (const ii of sub) { const m = instances[ii].m; lv = Math.max(lv, m[7] + m[5] * top); }
+          if (Number.isFinite(lv)) waterLevel = lv;
+        }
         let material: THREE.Material | THREE.Material[] = fallback;
         if (me.groups?.length && (textured || me.groups.some((gr) => isBlendFx(gr.fx)))) {
           const mats: THREE.Material[] = [];
           for (const grp of me.groups) {
             if (isBlendFx(grp.fx)) continue;
             geo.addGroup(grp.start, grp.count, mats.length);
-            mats.push(!textured ? fallback : grp.fx === 'lava' ? lavaMaterial() : grp.fx === 'water' ? waterMaterial(this.skyEnv) : grp.tex >= 0 ? this.texMaterial(grp.tex, me.mat, grp.ntex ?? -1, FOLIAGE.test(me.name), page, grp.stex ?? -1, grp.tile ?? 1, grp.tint) : fallback);
+            mats.push(!textured ? fallback : grp.fx === 'lava' ? lavaMaterial() : grp.fx === 'water' ? waterMaterial(this.skyEnv, 0x1d4a5c, this.foamAt(waterLevel)) : grp.tex >= 0 ? this.texMaterial(grp.tex, me.mat, grp.ntex ?? -1, FOLIAGE.test(me.name), page, grp.stex ?? -1, grp.tile ?? 1, grp.tint) : fallback);
           }
           material = mats;
         }
@@ -895,8 +924,24 @@ export class WorldView {
     return out;
   }
 
+  /** Shoreline height field for this map, baked from the terrain on first use. */
+  private foamField(): FoamField | null {
+    if (!this.foamBaked) {
+      this.foamBaked = true;
+      this.foam = buildFoamField(this.map.terrain, this.map.name);
+    }
+    return this.foam;
+  }
+
+  /** Foam context for a water surface at `level`, or null when foam cannot be resolved. */
+  private foamAt(level: number | null): WaterFoam | null {
+    const field = this.foamField();
+    return field && level !== null ? { field, level } : null;
+  }
+
   private buildHazard(kind: 'lava' | 'water' | 'acid', level: number) {
-    const mat = kind === 'lava' ? lavaMaterial() : kind === 'water' ? waterMaterial(this.skyEnv) : waterMaterial(this.skyEnv, 0x6f8f1e);
+    const foam = kind === 'lava' ? null : this.foamAt(level);
+    const mat = kind === 'lava' ? lavaMaterial() : kind === 'water' ? waterMaterial(this.skyEnv, 0x1d4a5c, foam) : waterMaterial(this.skyEnv, 0x6f8f1e, foam);
     this.hazard = new THREE.Mesh(new THREE.PlaneGeometry(20000, 20000), mat);
     this.hazard.rotation.x = -Math.PI / 2;
     this.hazard.position.y = level;
@@ -994,6 +1039,7 @@ if ( aShelter > 0.5 ) transformed.y = -1e5;`);
 
   update(cam: THREE.Camera, dt: number, focus: THREE.Vector3) {
     forceFieldTime.value += dt;
+    stepAccum(this.accum, dt);
     this.sky.position.copy(cam.position);
     this.skyDome?.position.copy(cam.position);
     if (this.sun.castShadow && this.renderer) {
@@ -1073,6 +1119,7 @@ if ( aShelter > 0.5 ) transformed.y = -1e5;`);
     for (const m of this.blendMats.values()) m.dispose();
     disposeBeams();
     disposeLiquids();
+    resetAccum();
     this.skyEnv?.dispose();
     if (this.skyDomeEnv && this.skyDomeEnv !== this.skyEnv) this.skyDomeEnv.dispose();
     this.skyDomeMat?.dispose();

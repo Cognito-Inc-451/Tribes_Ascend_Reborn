@@ -10,6 +10,7 @@ import { social, type ChatMsg } from '../net/social.js';
 import { loadStats, resetStats } from '../game/stats.js';
 import { expectedTransport, browserSupportsWebTransport } from '../net/transport.js';
 import { applyQuality, exportProfile, importProfile, resetBinds, saveSettings, settings, type Quality } from '../settings.js';
+import { webgpuAvailable } from '../render/renderer.js';
 import { clear, h, keyLabel } from './dom.js';
 import { chooseVoice, ClassPreview, currentSkinName, ensureDefaultVoice, skinOptions, statBlock, taModelsReady, voiceLabel, voiceOptions } from './loadoutkit.js';
 
@@ -585,11 +586,11 @@ export class Menus {
       row('Graphics Preset', h('select', { onchange: (e: Event) => { applyQuality((e.target as HTMLSelectElement).value as Quality); gfx(); this.showSettings(); } },
         (['low', 'medium', 'high', 'ultra'] as const).map((q) => h('option', { value: q, selected: settings.quality === q }, q.toUpperCase()))));
       row('Display Mode', h('button', { class: 'btn small', onclick: () => { if (document.fullscreenElement) void document.exitFullscreen(); else void document.documentElement.requestFullscreen(); } }, document.fullscreenElement ? 'Fullscreen → Windowed' : 'Windowed → Fullscreen'));
-      row('Screen Percentage', range('renderScale', 0.4, 2, 0.05, pct, gfx));
-      row('Adaptive Resolution (holds the frame-rate limit)', check('adaptiveResolution', () => this.toast('Resolution now follows frame rate, capped by Screen Percentage')));
+      row('Adaptive Resolution (holds the frame-rate limit)', check('adaptiveResolution', () => this.toast('Resolution now follows frame rate, down from the display\'s native scale')));
       row('Field of View', range('fov', 70, 130, 1, (v) => `${v}°`, gfx));
       row('Anti-Aliasing (MSAA)', check('antialias', () => { gfx(); this.toast('Fully applies after a reload when post-processing is off'); }));
-      row('Frame Rate Limit', range('maxFps', 0, 300, 10, (v) => (v ? `${v} fps` : 'Unlimited')));
+      // Capped at 60 by design: 30 out of the box, 60 at the top of the slider.
+      row('Frame Rate Limit', range('maxFps', 30, 60, 10, (v) => `${v} fps`));
 
       head('DETAIL');
       row('Texture Quality', select('textureDetail', [['low', 'Low'], ['medium', 'Medium'], ['high', 'High'], ['ultra', 'Ultra (original resolution)']], () => this.toast('Applies on next map load')));
@@ -607,11 +608,14 @@ export class Menus {
       row('Soft Shadows', check('softShadows', gfx));
       row('Volumetric Height Fog', check('volumetricFog', gfx));
       row('God Rays', check('godrays', needsPost));
-      row('Ambient Occlusion (SSAO)', select('ao', [['off', 'Off'], ['low', 'Low'], ['high', 'High']], needsPost));
       row('Water Reflections (SSR)', check('ssr', needsPost));
+      const rtHint = () => this.toast(webgpuAvailable ? 'Ray tracing needs a WebGPU build — using the best raster approximation for now' : 'Ray tracing needs WebGPU — enabled the best raster approximation for now');
+      row('RT Shadows', check('rtShadows', () => { gfx(); rtHint(); }));
+      row('RT Reflections', check('rtReflections', () => { gfx(); rtHint(); }));
 
       head('POST-PROCESSING');
       row('Post-Processing', select('post', [['off', 'Off (fastest)'], ['light', 'On'], ['full', 'On + sharpen']], gfx));
+      row('FSR Upscaling', check('fsr', () => { gfx(); this.toast('Sharpens at full resolution, upscales when adaptive resolution drops it'); }));
       row('HDR Rendering (16-bit)', check('hdr', needsPost));
       row('Tone Mapping', select('toneMapping', [['aces', 'ACES Filmic'], ['agx', 'AgX'], ['neutral', 'Khronos Neutral'], ['cineon', 'Cineon']], gfx));
       row('Bloom', check('bloom', needsPost));

@@ -3,7 +3,9 @@ import {
   FALL_DAMAGE_PER_MS, FALL_DAMAGE_THRESHOLD, FLAG_DRAG_KMH, FLAG_GRAB_RADIUS, FLAG_RETURN_TIME, FLAG_THROW_SPEED, GRAVITY,
   HEALTH_REGEN_DELAY, HEALTH_REGEN_RATE, hitscanFalloff, ITEM_INDEX, ITEMS, loadoutStats, makeOBB, MELEE, MODES, mulberry32, newMoveState, PF,
   PHASE, projDef, RESPAWN_TIME, SHOCKLANCE_BACK_MULT, segmentVsCapsule, splashDamage, splashKnockback, applyKnockback, stepMovement, THEMES, validateLoadout,
-  VEHICLES, advanceProjectile, AF, ASSET_TYPES, VEHICLE_TYPES, UU_PER_METER,
+  VEHICLES, advanceProjectile, AF, ASSET_TYPES, VEHICLE_TYPES, UU_PER_METER, MS_TO_KMH,
+  MEDALS, MEDAL_STREAKS, MEDAL_MULTI_KILLS, MEDAL_MULTI_WINDOW, MEDAL_FLAG_HOLD_TIME, MEDAL_GRAB_SPEED_FAST, MEDAL_GRAB_SPEED_HIGH, MEDAL_GRAB_SPEED_SLOW, MEDAL_DEFENSE_RADIUS, MEDAL_HOLD_LINE_TIME, MEDAL_ASSIST_WINDOW, MEDAL_REPAIR_AMOUNT,
+  type MedalDef,
   type AssetType, type CallInType, type InputCmd, type ItemDef, type Loadout, type MapEntity, type ModeDef, type MoveParams,
   type PlayerSnap, type ProjState, type ProjectileDef, type S2C, type Snapshot, type Vec3, type VehicleType, inVolume, type MapVolume,
 } from '@ar/shared';
@@ -24,6 +26,8 @@ const SELF_DAMAGE = 0.5;
 const INTERP_DELAY = 0.1;
 const MAX_REWIND = 0.35;
 const TEAM_ENEMY = (a: number, b: number) => a !== b;
+/** Accolade for destroying each vehicle class. */
+const VEHICLE_MEDALS: Record<string, string> = { gravcycle: 'bike_down', shrike: 'shrike_down', beowulf: 'tank_down', heavy_turret: 'turret_down' };
 
 export class Match {
   now = 0;
@@ -174,6 +178,13 @@ export class Match {
     this.assets = this.assets.filter((x) => x !== a);
   }
 
+  /** Silently despawn a vehicle (disconnect / class change / arena reset). No fx, no kills, no credits. */
+  removeVehicle(v: Vehicle) {
+    for (const occ of [v.driver, v.gunner]) if (occ) occ.vehicle = null;
+    v.driver = null; v.gunner = null;
+    this.vehicles = this.vehicles.filter((x) => x !== v);
+  }
+
   // ------------------------------------------------------------------ players
   addPlayer(p: Player) {
     this.players.set(p.id, p);
@@ -183,6 +194,7 @@ export class Match {
     if (p.flag) this.dropFlag(p, false);
     if (p.vehicle) this.exitVehicle(p);
     for (const a of this.assets.filter((x) => x.owner === p.id)) this.removeAsset(a);
+    for (const v of this.vehicles.filter((x) => x.type === 'heavy_turret' && x.owner === p.id)) this.removeVehicle(v);
     this.players.delete(p.id);
     this.lastStart.delete(-1 - p.id);
   }
@@ -212,6 +224,140 @@ export class Match {
   /** Credits earned, scaled by the host's credit multiplier. */
   private earn(p: Player, amount: number) { p.credits += Math.round(amount * (this.cfg.options?.creditMultiplier ?? 1)); }
 
+  // -------------------------------------------------------------- accolades
+  /** Who damaged each live vehicle, so a teammate on the kill earns Vehicle Assist. */
+  private vehDamagers = new Map<number, Map<number, number>>();
+  /** Flag id -> carriers during the current capture chain, for Capture Assist. */
+  private flagCarriers = new Map<number, { id: number; at: number }[]>();
+  /** Player who landed the last kill of the match (Final Blow accolade). */
+  private lastKillerId = -1;
+  /** Set by the hitscan headshot rule right before the damage call that may kill. */
+  private pendingHeadshot = false;
+
+  private static isDiscItem = (item: string) => item.includes('spinfusor') || item.includes('twinfusor');
+  private static isSniperItem = (item: string) => item === 'bxt1' || item === 'bxt1a' || item === 'phase_rifle' || item === 'sap20';
+  private static isMineItem = (item: string) => item === 'claymore' || item === 'focused_claymore' || item === 'mines' || item === 'motion_mine' || item === 'prism_mine';
+
+  /** Grants an accolade once per round: pays its credits and pops it on every HUD. */
+  private award(p: Player, id: string) {
+    const def: MedalDef = MEDALS[id];
+    if (!def || p.spectator || p.medals.has(id)) return;
+    p.medals.add(id);
+    this.earn(p, def.credits);
+    this.io.broadcast({ t: 'medal', id, player: p.id });
+    if (def.broadcast) this.io.broadcast({ t: 'event', kind: 'medal_broadcast', player: p.id, text: def.broadcast.replace('$P', p.name) });
+  }
+
+  /** Fires the streak accolade whose tier the player just hit, if any. */
+  private awardStreak(p: Player, tiers: readonly { kills: number; id: string }[], count: number) {
+    for (const t of tiers) if (count === t.kills) this.award(p, t.id);
+  }
+
+  /** Accumulates repaired hit points and unlocks Base Repair once per life. */
+  private countHealing(p: Player, amount: number) {
+    if (!p || amount <= 0) return;
+    p.healed += amount;
+    if (!p.healedAwarded && p.healed >= MEDAL_REPAIR_AMOUNT) {
+      p.healedAwarded = true;
+      this.award(p, 'base_repair');
+    }
+  }
+
+  /** Active cloak (same rule as the snapshot STEALTH flag). */
+  private isStealth(p: Player) {
+    const speed = Math.hypot(p.move.vel.x, p.move.vel.y, p.move.vel.z);
+    return p.packActive && p.loadout.pack === 'stealth_pack' && speed < 150 / 3.6
+      && this.now - p.lastFire > 1 && this.now - p.lastHurt > 0.5;
+  }
+
+  /** Clears every accolade counter for a new round. */
+  private resetMedals(p: Player) {
+    p.streakGeneral = p.streakDisc = p.streakExplosive = p.streakSniper = 0;
+    p.multiKills = 0;
+    p.multiKillAt = -99;
+    p.lastKiller = -1;
+    p.flagHeldSince = 0;
+    p.flagHeldAwarded = false;
+    p.grabSpeed = 0;
+    p.healed = 0;
+    p.healedAwarded = false;
+    p.medals.clear();
+  }
+
+  /** Every accolade a kill can unlock, evaluated before the victim's streaks reset. */
+  private awardKillMedals(killer: Player, victim: Player, item: string, headshot: boolean) {
+    const air = !victim.move.onGround;
+    const disc = Match.isDiscItem(item);
+    const explosive = ITEMS[item]?.explosive === true;
+    killer.streakGeneral++;
+    if (disc) killer.streakDisc++;
+    if (explosive) killer.streakExplosive++;
+    if (Match.isSniperItem(item)) killer.streakSniper++;
+    this.awardStreak(killer, MEDAL_STREAKS.general, killer.streakGeneral);
+    this.awardStreak(killer, MEDAL_STREAKS.spinfusor, killer.streakDisc);
+    this.awardStreak(killer, MEDAL_STREAKS.explosive, killer.streakExplosive);
+    this.awardStreak(killer, MEDAL_STREAKS.sniper, killer.streakSniper);
+
+    killer.multiKills = this.now - killer.multiKillAt <= MEDAL_MULTI_WINDOW ? killer.multiKills + 1 : 1;
+    killer.multiKillAt = this.now;
+    const multi = MEDAL_MULTI_KILLS[Math.min(6, killer.multiKills)];
+    if (multi) this.award(killer, multi);
+
+    if (killer.kills === 1) this.award(killer, 'first_blood');
+    if (killer.lastKiller === victim.id) this.award(killer, 'revenge');
+    if (victim.streakGeneral >= 5) this.award(killer, 'no_joy');
+    if (!killer.alive) this.award(killer, 'aftermath');
+    if (item === 'melee' || item === 'shocklance') this.award(killer, 'martial_art');
+    if (headshot) this.award(killer, 'head_shot');
+    if (air && disc) this.award(killer, 'blue_plate');
+    if (air && explosive) this.award(killer, 'air_mail');
+    if (air && (item === 'plasma_gun' || item === 'plasma_cannon')) this.award(killer, 'hot_air');
+    if (Match.isMineItem(item)) this.award(killer, 'sticky_kill');
+    if (item === 'vehicle_crash') this.award(killer, 'road_kill');
+    if (item === 'tactical_strike') this.award(killer, 'artillery_strike');
+    if (item === 'orbital_strike') this.award(killer, 'orbital_strike');
+    if (victim.flag && victim.flag.team !== killer.team) this.award(killer, this.mode.id === 'rabbit' ? 'rabbit_season' : 'flag_killer');
+    if (killer.flag && killer.flag.team === killer.team) this.award(killer, 'caerbannog');
+    if (this.mode.id === 'arena' && this.tickets[killer.team] <= 1) this.award(killer, 'bench_em');
+
+    // Killing an enemy on your own flag stand / generator is a defensive feat; killing one
+    // inside an enemy base objective is a raid.
+    const spot = victim.move.pos;
+    const guard = this.assets.find((a) => a.owner < 0 && !a.destroyed && a.team === killer.team
+      && (a.type === 'flag_stand' || a.type === 'generator') && distSq(spot, a.pos) < MEDAL_DEFENSE_RADIUS * MEDAL_DEFENSE_RADIUS);
+    if (guard) this.award(killer, guard.type === 'generator' ? 'gener_defender' : 'flag_defender');
+    const raid = this.assets.find((a) => a.owner < 0 && !a.destroyed && a.team !== killer.team
+      && (a.type === 'generator' || a.type === 'radar' || a.type === 'inventory' || a.type === 'repair_station')
+      && distSq(spot, a.pos) < MEDAL_DEFENSE_RADIUS * MEDAL_DEFENSE_RADIUS);
+    if (raid) this.award(killer, raid.type === 'generator' ? 'gener_hater' : 'investor');
+  }
+
+  /** Arena accolades for the squad that came through a round whole, or down to one. */
+  private awardArenaSurvivors(team: number) {
+    const members = [...this.players.values()].filter((p) => p.team === team && !p.spectator);
+    const alive = members.filter((p) => p.alive);
+    if (alive.length === 1) {
+      const p = alive[0];
+      this.award(p, 'last_man_standing');
+      const tier: Record<number, string> = { 2: 'double_down', 3: 'not_among_equals', 4: 'one_man_army' };
+      this.award(p, members.length >= 5 ? 'miracle' : tier[members.length] ?? 'last_man_standing');
+    }
+    if (alive.length > 1 && alive.length === members.length) for (const p of members) this.award(p, 'united_we_stand');
+  }
+
+  /** Round Completed / Victory for everyone, plus Final Blow for the match's last killer. */
+  private awardMatchEnd(winner: number) {
+    if (this.lastKillerId >= 0 && (this.mode.id === 'rabbit' || this.mode.id === 'tdm')) {
+      const p = this.players.get(this.lastKillerId);
+      if (p) this.award(p, 'final_blow');
+    }
+    for (const p of this.players.values()) {
+      if (p.spectator) continue;
+      this.award(p, 'round_completed');
+      if (this.mode.id === 'rabbit' ? p.id === winner : winner >= 0 && p.team === winner) this.award(p, 'round_victory');
+    }
+  }
+
   setClass(p: Player, clsId: string, loadout: Partial<Loadout>) {
     const cls = CLASS_BY_ID[clsId] ?? CLASSES[0];
     const lo = validateLoadout(cls.id, loadout);
@@ -224,6 +370,10 @@ export class Match {
     for (const a of this.assets.filter((x) => x.owner === p.id && (x.type === 'light_turret' || x.type === 'exr_turret'))) {
       this.io.broadcast({ t: 'fx', kind: 'explode', pos: a.pos, radius: 2, item: `asset_${a.type}` });
       this.removeAsset(a);
+    }
+    for (const v of this.vehicles.filter((x) => x.type === 'heavy_turret' && x.owner === p.id)) {
+      this.io.broadcast({ t: 'fx', kind: 'explode', pos: v.pos, radius: 2, item: `vehicle_${v.type}` });
+      this.removeVehicle(v);
     }
   }
 
@@ -664,8 +814,9 @@ export class Match {
         const end = this.hitscan(p, eye, dd, hsDef.range, (target, dist, point) => {
           let dmg = hitscanFalloff(hsDef.damage, hsDef.minDamage, hsDef.falloffStart, hsDef.falloffEnd, dist) * dmgScale;
           if (d.kind === 'lance' && this.isBehind(p, target)) dmg *= SHOCKLANCE_BACK_MULT;
+          this.pendingHeadshot = false;
           if (d.chargeTime || d.id === 'phase_rifle' || d.id === 'sap20') {
-            if (point.y > target.move.pos.y + target.phys.height * 0.8) dmg *= 1.5;
+            if (point.y > target.move.pos.y + target.phys.height * 0.8) { dmg *= 1.5; this.pendingHeadshot = true; }
           }
           this.damagePlayer(target, dmg, p, d.id, false, dd, 0);
         });
@@ -952,7 +1103,8 @@ export class Match {
   private throwBelt(p: Player, cmd: InputCmd) {
     const d = ITEMS[p.loadout.belt];
     if (d.kind === 'deploy' && d.deploy) {
-      if (this.placeDeployable(p, d.deploy as AssetType, cmd) && !this.cfg.options?.infiniteAmmo) p.beltCount--;
+      const ok = d.deploy === 'heavy_turret' ? this.placeMannedTurret(p, cmd) : this.placeDeployable(p, d.deploy as AssetType, cmd);
+      if (ok && !this.cfg.options?.infiniteAmmo) p.beltCount--;
       return;
     }
     if (!d.projectile) return;
@@ -982,7 +1134,8 @@ export class Match {
       p.packActive = !p.packActive;
       p.packNext = this.now + d.refire;
     } else if (d.kind === 'deploy' && d.deploy) {
-      if (this.placeDeployable(p, d.deploy as AssetType, cmd)) p.packNext = this.now + 2;
+      const ok = d.deploy === 'heavy_turret' ? this.placeMannedTurret(p, cmd) : this.placeDeployable(p, d.deploy as AssetType, cmd);
+      if (ok) p.packNext = this.now + 2;
     }
   }
 
@@ -1008,6 +1161,42 @@ export class Match {
     if (mine.length >= max) this.removeAsset(mine[0]);
     this.addAsset(type, p.team, pos, cmd.yaw, p.id);
     this.io.broadcast({ t: 'fx', kind: 'deploy', pos, player: p.id, item: type });
+    return true;
+  }
+
+  /** Technician's Heavy Turret pack: a player-manned emplacement. Modelled as a vehicle so seats, manning, damage and the scoreboard all work. */
+  private placeMannedTurret(p: Player, cmd: InputCmd): boolean {
+    const def = VEHICLES.heavy_turret;
+    const { eye, dir } = this.aim(p, cmd);
+    const reach = 5;
+    const to = { x: eye.x + dir.x * reach, y: eye.y + dir.y * reach, z: eye.z + dir.z * reach };
+    const hit = this.world.raycast(eye, to);
+    let pos: Vec3;
+    if (hit && hit.normal.y > 0.5) pos = hit.point;
+    else {
+      const fx = eye.x + dir.x * 2.5, fz = eye.z + dir.z * 2.5;
+      const down = this.world.raycast({ x: fx, y: eye.y, z: fz }, { x: fx, y: eye.y - 6, z: fz });
+      if (!down || down.normal.y < 0.5) { this.io.send(p, { t: 'toast', text: 'Cannot deploy here' }); return false; }
+      pos = down.point;
+    }
+    for (const a of this.assets) {
+      if (a.owner >= 0 && distSq(a.pos, pos) < 2.5 * 2.5) { this.io.send(p, { t: 'toast', text: 'Too close to another deployable' }); return false; }
+    }
+    for (const v of this.vehicles) {
+      if (distSq(v.pos, pos) < 2.5 * 2.5) { this.io.send(p, { t: 'toast', text: 'Too close to a vehicle' }); return false; }
+    }
+    if (this.vehicles.filter((x) => x.type === 'heavy_turret' && x.team === p.team).length >= (def.maxPerTeam ?? 1)) {
+      this.io.send(p, { t: 'toast', text: 'Team Heavy Turret limit reached' }); return false;
+    }
+    for (const own of this.vehicles.filter((x) => x.type === 'heavy_turret' && x.owner === p.id)) this.removeVehicle(own);
+    const v: Vehicle = {
+      id: this.nextVeh++ & 255, type: 'heavy_turret', def, team: p.team, pos, vel: { x: 0, y: 0, z: 0 }, yaw: cmd.yaw, pitch: 0, roll: 0,
+      health: def.health, energy: def.energy, driver: null, gunner: null, clip: def.weapon.clip, reloadUntil: 0, nextFire: 0, gunnerNext: 0,
+      emptySince: this.now, box: null, owner: p.id,
+    };
+    this.vehicles.push(v);
+    this.io.broadcast({ t: 'fx', kind: 'deploy', pos, player: p.id, item: 'heavy_turret' });
+    this.enterVehicle(p, v, 0);
     return true;
   }
 
@@ -1086,7 +1275,9 @@ export class Match {
       if (v.team !== p.team) continue;
       const r = Math.max(...v.def.size);
       if (segmentVsCapsule(eye, to, { x: v.pos.x, y: v.pos.y - r * 0.5, z: v.pos.z }, r, r * 1.5) >= 0) {
+        const vBefore = v.health;
         v.health = Math.min(v.def.health, v.health + amount * 2);
+        this.countHealing(p, v.health - vBefore);
         this.io.broadcast({ t: 'fx', kind: 'repair', pos: eye, to: v.pos, player: p.id });
         return;
       }
@@ -1100,6 +1291,7 @@ export class Match {
     const before = best.health;
     best.health = Math.min(best.maxHealth, best.health + amount);
     this.earn(p, Math.round((best.health - before) * CREDITS.repairPerHp));
+    this.countHealing(p, best.health - before);
     if (best.destroyed && best.health >= best.maxHealth) {
       best.destroyed = false;
       this.io.broadcast({ t: 'event', kind: best.type === 'generator' ? 'gen_up' : 'asset_up', team: best.team, player: p.id, text: `${best.def.name} is back online` }, (o) => o.team === best!.team);
@@ -1124,6 +1316,8 @@ export class Match {
   // ------------------------------------------------------------------ damage
   damagePlayer(t: Player, amount: number, attacker: Player | null, item: string, explosive: boolean, dir: Vec3 | null, impulse: number, direct = false, kick: Vec3 | null = null) {
     if (!t.alive || amount <= 0 && impulse <= 0 && !kick) return;
+    const headshot = this.pendingHeadshot;
+    this.pendingHeadshot = false;
     if (this.phase === PHASE.WARMUP && attacker && attacker !== t) return;
     if (this.now < t.invulnUntil && attacker && attacker !== t) return;
     if (attacker && attacker !== t && !this.isEnemy(attacker, t)) return;
@@ -1145,10 +1339,10 @@ export class Match {
       this.io.send(attacker, { t: 'hit', target: t.id, dmg: Math.round(amount), kind: 'player', blueplate: direct && !t.move.onGround && !!projDef(item) });
     }
     if (!t.isBot) this.io.send(t, { t: 'damaged', from: attacker ? attacker.move.pos : t.move.pos, amount: Math.round(amount) });
-    if (t.health <= 0) this.kill(t, attacker, item);
+    if (t.health <= 0) this.kill(t, attacker, item, false, headshot);
   }
 
-  kill(v: Player, killer: Player | null, item: string, silent = false) {
+  kill(v: Player, killer: Player | null, item: string, silent = false, headshot = false) {
     if (!v.alive) return;
     v.alive = false;
     v.health = 0;
@@ -1165,6 +1359,7 @@ export class Match {
     v.rewardedSinceDeath = false;
     if (this.mode.id === 'arena') {
       for (const a of this.assets.filter((x) => x.owner === v.id)) this.removeAsset(a);
+      for (const veh of this.vehicles.filter((x) => x.owner === v.id)) this.removeVehicle(veh);
       if (!silent) this.tickets[v.team] = Math.max(0, this.tickets[v.team] - 1);
     }
     if (silent) return;
@@ -1182,8 +1377,12 @@ export class Match {
       killer.rewardedSinceDeath = true;
       if (killer.hasPerk('survivalist')) { killer.health = Math.min(killer.maxHealth, killer.health + killer.maxHealth * 0.2); killer.move.energy = Math.min(killer.maxEnergy, killer.move.energy + killer.maxEnergy * 0.4); }
     }
+    if (killer && killer !== v) { this.awardKillMedals(killer, v, item, headshot); this.lastKillerId = killer.id; }
+    v.lastKiller = killer && killer !== v ? killer.id : -1;
+    v.streakGeneral = 0; v.streakDisc = 0; v.streakExplosive = 0; v.streakSniper = 0;
+    v.multiKills = 0; v.multiKillAt = -99;
     this.modeOnKill(v, killer);
-    this.io.broadcast({ t: 'kill', killer: killer?.id ?? -1, victim: v.id, item, assist: assist?.id });
+    this.io.broadcast({ t: 'kill', killer: killer?.id ?? -1, victim: v.id, item, assist: assist?.id, headshot: headshot || undefined });
     for (const p of this.players.values()) p.brain?.onKill(this, p, v, killer);
   }
 
@@ -1211,6 +1410,9 @@ export class Match {
       this.earn(attacker, a.type === 'generator' ? CREDITS.genDestroy : CREDITS.turretDestroy);
       attacker.score += a.type === 'generator' ? 20 : 10;
       attacker.rewardedSinceDeath = true;
+      if (a.type.includes('turret')) this.award(attacker, 'turret_down');
+      else if (a.type === 'radar') this.award(attacker, 'radar_down');
+      else if (a.type === 'generator') this.award(attacker, 'gener_hater');
     }
     this.io.broadcast({ t: 'event', kind: a.type === 'generator' ? 'gen_down' : 'asset_down', team: a.team, player: attacker?.id, text: `${a.team === 0 ? 'Blood Eagle' : 'Diamond Sword'} ${a.def.name} destroyed` });
   }
@@ -1355,7 +1557,7 @@ export class Match {
         for (const d of this.assets) if (d.capLink === a) { d.team = team; d.nextFire = this.now + 1; }
         a.capHeldSince = this.now;
         a.capNextScore = this.now + 5;
-        for (const o of this.players.values()) if (o.alive && o.team === team && distSq(o.move.pos, a.pos) < 3.2 * 3.2) { this.earn(o, CREDITS.capPointHold); o.score += 10; o.rewardedSinceDeath = true; }
+        for (const o of this.players.values()) if (o.alive && o.team === team && distSq(o.move.pos, a.pos) < 3.2 * 3.2) { this.earn(o, CREDITS.capPointHold); o.score += 10; o.rewardedSinceDeath = true; this.award(o, 'capture_and_hold'); }
         this.io.broadcast({ t: 'event', kind: 'cap_point', team, text: `${team === 0 ? 'Blood Eagle' : 'Diamond Sword'} captured point ${a.tag ?? ''}` });
         // Damaged defenses return to half health when a point is taken.
         for (const d of this.assets) if (d.team === team && d.owner < 0 && d.def.health && d.health < d.maxHealth / 2 && distSq(d.pos, a.pos) < 150 * 150) { d.health = d.maxHealth / 2; d.destroyed = false; }
@@ -1365,6 +1567,11 @@ export class Match {
       this.scores[a.capTeam]++;
       a.capNextScore = this.now + 5;
     }
+    // Hold the Line: keep a point you just took for a full stretch with a defender on it.
+    if (a.capTeam !== undefined && a.capTeam !== 255 && a.capHeldSince !== undefined
+      && this.now - a.capHeldSince >= MEDAL_HOLD_LINE_TIME && this.now - a.capHeldSince < MEDAL_HOLD_LINE_TIME + 1) {
+      for (const o of this.players.values()) if (o.alive && o.team === a.capTeam && distSq(o.move.pos, a.pos) < 6 * 6) this.award(o, 'hold_the_line');
+    }
   }
 
   // ------------------------------------------------------------------ vehicles
@@ -1372,6 +1579,7 @@ export class Match {
     if (!this.mode.vehicles || !p.alive || p.vehicle) return;
     const def = VEHICLES[type];
     if (!def) return;
+    if (def.deployOnly) { this.io.send(p, { t: 'toast', text: `${def.name} is deployed from a pack` }); return; }
     const pad = this.assets.filter((a) => a.type === 'vehicle_pad' && a.team === p.team).sort((a, b) => distSq(a.pos, p.move.pos) - distSq(b.pos, p.move.pos))[0];
     if (!pad || distSq(pad.pos, p.move.pos) > 8 * 8) { this.io.send(p, { t: 'toast', text: 'Stand at a vehicle station' }); return; }
     if (!this.isPowered(pad)) { this.io.send(p, { t: 'toast', text: 'Vehicle station has no power' }); return; }
@@ -1427,17 +1635,20 @@ export class Match {
         v.gunnerNext = this.now + v.def.gunner.refire;
         const eye = { x: v.pos.x, y: v.pos.y + v.def.size[1] + 1, z: v.pos.z };
         const dir = dirFromAngles(cmd.yaw + (this.rng() - 0.5) * v.def.gunner.spread, cmd.pitch + (this.rng() - 0.5) * v.def.gunner.spread);
-        const end = this.hitscan(p, eye, dir, 300, (t, _d) => this.damagePlayer(t, v.def.gunner!.damage, p, 'veh_beowulf_gun', false, dir, 0));
-        if (this.tick % 3 === 0) this.io.broadcast({ t: 'fx', kind: 'tracer', pos: eye, to: end, item: 'veh_beowulf_gun', player: p.id });
+        const gun = `veh_${v.type}_gun`;
+        const end = this.hitscan(p, eye, dir, 300, (t, _d) => this.damagePlayer(t, v.def.gunner!.damage, p, gun, false, dir, 0));
+        if (this.tick % 3 === 0) this.io.broadcast({ t: 'fx', kind: 'tracer', pos: eye, to: end, item: gun, player: p.id });
       }
       return;
     }
     const d = v.def;
-    const turnRate = d.flying ? 2.4 : v.type === 'gravcycle' ? 3.2 : 1.4;
+    const turnRate = d.flying ? 2.4 : v.type === 'gravcycle' ? 3.2 : v.type === 'heavy_turret' ? 2.6 : 1.4;
     let dy = cmd.yaw - v.yaw;
     while (dy > Math.PI) dy -= Math.PI * 2;
     while (dy < -Math.PI) dy += Math.PI * 2;
-    v.yaw += clamp(dy, -turnRate * DT, turnRate * DT);
+    const turn = clamp(dy, -turnRate * DT, turnRate * DT);
+    v.yaw += turn;
+    v.turn = turn / DT; // Yaw rate this tick (rad/s); consumed by ground banking.
     const boosting = (cmd.buttons & BTN.JET) !== 0 && v.energy > 0;
     if (boosting) v.energy = Math.max(0, v.energy - 25 * DT); else v.energy = Math.min(d.energy, v.energy + 12 * DT);
     const accel = d.accel + (boosting ? d.boostAccel : 0);
@@ -1455,12 +1666,23 @@ export class Match {
       v.roll = clamp(-dy * 1.5, -0.8, 0.8);
     } else {
       const f = { x: -Math.sin(v.yaw), z: -Math.cos(v.yaw) };
-      v.vel.x += f.x * cmd.fwd * accel * DT; v.vel.z += f.z * cmd.fwd * accel * DT;
-      if (v.type === 'beowulf') { const r = { x: Math.cos(v.yaw), z: -Math.sin(v.yaw) }; v.vel.x += r.x * cmd.strafe * accel * 0.5 * DT; v.vel.z += r.z * cmd.strafe * accel * 0.5 * DT; }
+      // Reverse is a brake, not a second forward gear: it scrubs speed fast and only
+      // creeps backwards, so backing out of a corner is deliberate instead of floaty.
+      const drive = cmd.fwd >= 0 ? cmd.fwd : cmd.fwd * 0.35;
+      v.vel.x += f.x * drive * accel * DT; v.vel.z += f.z * drive * accel * DT;
+      if (cmd.fwd < 0) { const k = Math.max(0, 1 - 3.5 * DT); v.vel.x *= k; v.vel.z *= k; }
+      const strafe = v.type === 'beowulf' ? 0.5 : v.type === 'gravcycle' ? 0.22 : 0;
+      if (strafe > 0) { const r = { x: Math.cos(v.yaw), z: -Math.sin(v.yaw) }; v.vel.x += r.x * cmd.strafe * accel * strafe * DT; v.vel.z += r.z * cmd.strafe * accel * strafe * DT; }
       v.pitch = clamp(cmd.pitch, -0.6, 0.6);
     }
     const hs = Math.hypot(v.vel.x, v.vel.z);
     if (hs > maxSpeed) { v.vel.x *= maxSpeed / hs; v.vel.z *= maxSpeed / hs; }
+    if (d.flying) {
+      // The xz clamp above leaves vertical speed unbounded; a full 3D clamp stops a
+      // dive from exceeding the craft's rated speed.
+      const h3 = Math.hypot(v.vel.x, v.vel.y, v.vel.z);
+      if (h3 > maxSpeed) { const k = maxSpeed / h3; v.vel.x *= k; v.vel.y *= k; v.vel.z *= k; }
+    }
     if ((cmd.buttons & BTN.FIRE) && this.now >= v.nextFire && this.now >= v.reloadUntil && v.clip > 0) {
       const pd = projDef(`veh_${v.type}`)!;
       const dir = dirFromAngles(v.type === 'beowulf' ? cmd.yaw : v.yaw, v.type === 'beowulf' ? cmd.pitch : v.pitch);
@@ -1483,8 +1705,13 @@ export class Match {
         v.vel.y -= GRAVITY * this.world.gravityScale * DT * (v.pos.y > target + 2.5 ? 1 : 0.15);
         const n = this.world.terrain.normalAt(v.pos.x, v.pos.z);
         const f = { x: -Math.sin(v.yaw), z: -Math.cos(v.yaw) };
-        v.pitch = Math.asin(clamp(f.x * n.x + f.z * n.z, -1, 1)) * -1;
-        v.roll = 0;
+        // A manned emplacement aims its gun at a target, so its pitch tracks the
+        // gunner's input; every other ground vehicle pitches with the terrain it rides.
+        if (v.type !== 'heavy_turret') v.pitch = Math.asin(clamp(f.x * n.x + f.z * n.z, -1, 1)) * -1;
+        // Ground vehicles bank into a turn (same sign convention as flying roll); a
+        // manned emplacement is bolted down and stays level.
+        const bank = v.type === 'heavy_turret' || !v.driver ? 0 : clamp(-(v.turn ?? 0) * 0.16, -0.35, 0.35);
+        v.roll += (bank - v.roll) * Math.min(1, 6 * DT);
       } else if (!v.driver) {
         v.vel.y -= GRAVITY * this.world.gravityScale * DT;
       }
@@ -1495,12 +1722,20 @@ export class Match {
       const speed = Math.hypot(v.vel.x, v.vel.y, v.vel.z);
       v.pos.x += v.vel.x * DT; v.pos.y += v.vel.y * DT; v.pos.z += v.vel.z * DT;
       const c = this.world.resolveCapsule(v.pos, v.vel, d.size[0], d.size[1] * 2, undefined, prev);
-      if (c.impact > 25) this.damageVehicle(v, (c.impact - 25) * 80, null, 'vehicle_crash', true);
+      if (c.impact > 25) {
+        this.damageVehicle(v, (c.impact - 25) * 80, null, 'vehicle_crash', true);
+        // Throttle per vehicle so a scrape along a wall is one thud, not a machine gun of them.
+        if (this.now - (v.lastCrash ?? -10) > 0.35) {
+          v.lastCrash = this.now;
+          this.io.broadcast({ t: 'fx', kind: 'impact', pos: v.pos, item: `vehicle_${v.type}`, radius: clamp((c.impact - 25) / 60, 0.5, 3) });
+        }
+      }
       if (speed > 12) {
         for (const o of this.players.values()) {
           if (!o.alive || o.vehicle || distSq(o.move.pos, v.pos) > (d.size[2] + 1) ** 2) continue;
           if (o.team !== v.team) {
             if (!o.hasPerk('safe_fall')) this.damagePlayer(o, speed * (v.type === 'beowulf' ? 80 : 35), v.driver, 'vehicle_crash', true, v.vel, 0);
+            this.io.broadcast({ t: 'fx', kind: 'impact', pos: o.move.pos, item: 'rollover', radius: speed / 40, player: o.id });
           }
           const dir = { x: o.move.pos.x - v.pos.x, y: 1, z: o.move.pos.z - v.pos.z };
           const l = Math.hypot(dir.x, dir.z) || 1;
@@ -1512,7 +1747,8 @@ export class Match {
         occ.move.pos = { x: v.pos.x, y: v.pos.y, z: v.pos.z };
         occ.move.vel = { ...v.vel };
       }
-      if (!v.driver && !v.gunner && this.now - v.emptySince > 60) this.destroyVehicle(v, null);
+      // Emplacements are player-owned structures: they persist until destroyed or the owner leaves the class.
+      if (v.type !== 'heavy_turret' && !v.driver && !v.gunner && this.now - v.emptySince > 60) this.destroyVehicle(v, null);
       if (v.pos.y < this.killZ || v.pos.y < this.hazardY || this.volumeAt(v.pos)?.kind === 'kill') this.destroyVehicle(v, null);
     }
   }
@@ -1521,7 +1757,11 @@ export class Match {
     if (!explosive || this.phase === PHASE.WARMUP) return;
     amount *= assetDamageMult(true, false, v.type === 'shrike' ? 'shrike' : 'vehicle');
     v.health -= amount;
-    if (attacker) this.io.send(attacker, { t: 'hit', target: v.id, dmg: Math.round(amount), kind: 'vehicle' });
+    if (attacker) {
+      this.io.send(attacker, { t: 'hit', target: v.id, dmg: Math.round(amount), kind: 'vehicle' });
+      const marks = this.vehDamagers.get(v.id) ?? this.vehDamagers.set(v.id, new Map()).get(v.id)!;
+      marks.set(attacker.id, (marks.get(attacker.id) ?? 0) + amount);
+    }
     if (v.health <= 0) this.destroyVehicle(v, attacker, item);
   }
 
@@ -1534,7 +1774,17 @@ export class Match {
       if (occ.hasPerk('pilot')) { occ.move.vel.y += 25; continue; }
       this.kill(occ, attacker, item);
     }
-    if (attacker) { this.earn(attacker, 200); attacker.score += 10; }
+    if (attacker) {
+      this.earn(attacker, 200);
+      attacker.score += 10;
+      this.award(attacker, VEHICLE_MEDALS[v.type] ?? 'vehicle_assist');
+      const marks = this.vehDamagers.get(v.id);
+      this.vehDamagers.delete(v.id);
+      // Vehicle Assist: you landed the kill, someone else did most of the work.
+      if (marks && marks.size > 1 && (marks.get(attacker.id) ?? 0) < Math.max(...[...marks.values()])) this.award(attacker, 'vehicle_assist');
+    } else {
+      this.vehDamagers.delete(v.id);
+    }
   }
 
   // ------------------------------------------------------------------ call-ins
@@ -1611,7 +1861,23 @@ export class Match {
     const wasHome = f.state === 0;
     f.state = 1; f.carrier = p; p.flag = f;
     p.rewardedSinceDeath = true;
-    if (wasHome) { this.earn(p, CREDITS.flagGrab); p.score += 10; }
+    // Accolades: sample grab speed now; the Flag Held timer starts here.
+    p.grabSpeed = Math.hypot(p.move.vel.x, p.move.vel.z);
+    p.flagHeldSince = this.now;
+    p.flagHeldAwarded = false;
+    const chain = this.flagCarriers.get(f.id) ?? [];
+    chain.push({ id: p.id, at: this.now });
+    this.flagCarriers.set(f.id, chain);
+    if (wasHome) {
+      this.earn(p, CREDITS.flagGrab);
+      p.score += 10;
+      this.award(p, 'flag_grab');
+      const kmh = p.grabSpeed * MS_TO_KMH;
+      if (kmh >= MEDAL_GRAB_SPEED_FAST) this.award(p, 'gotta_go_fast');
+      else if (kmh >= MEDAL_GRAB_SPEED_HIGH) this.award(p, 'high_speed_grab');
+      else if (kmh < MEDAL_GRAB_SPEED_SLOW) this.award(p, 'llama_grab');
+      if (this.isStealth(p)) this.award(p, 'e_grab');
+    }
     if (this.mode.id === 'rabbit') { p.modeScore += 1; }
     this.io.broadcast({ t: 'event', kind: 'flag_grab', team: f.team, player: p.id, text: `${p.name} took the ${this.flagName(f)}` });
     if (f.team <= 1) {
@@ -1626,7 +1892,7 @@ export class Match {
 
   private returnFlag(f: FlagState, p: Player | null) {
     f.state = 0; f.carrier = null; f.pos = { ...f.home }; f.vel = { x: 0, y: 0, z: 0 };
-    if (p) { p.returns++; this.earn(p, CREDITS.flagReturn); p.score += 10; p.rewardedSinceDeath = true; }
+    if (p) { p.returns++; this.earn(p, CREDITS.flagReturn); p.score += 10; p.rewardedSinceDeath = true; this.award(p, 'flag_return'); }
     this.io.broadcast({ t: 'event', kind: 'flag_return', team: f.team, player: p?.id, text: p ? `${p.name} returned the ${this.flagName(f)}` : `The ${this.flagName(f)} was returned` });
   }
 
@@ -1637,6 +1903,15 @@ export class Match {
     this.earn(p, CREDITS.flagCapture);
     p.score += 50;
     this.scores[p.team]++;
+    this.award(p, 'flag_capture');
+    // Capture Assist: teammates who carried this flag during the chain.
+    const chain = this.flagCarriers.get(f.id) ?? [];
+    for (const c of chain) {
+      if (c.id === p.id || this.now - c.at > MEDAL_ASSIST_WINDOW) continue;
+      const o = this.players.get(c.id);
+      if (o && o.alive && o.team === p.team) this.award(o, 'capture_assist');
+    }
+    this.flagCarriers.delete(f.id);
     if (this.mode.id === 'blitz' && f.stands.length > 1) {
       f.standIndex = (f.standIndex + 1 + Math.floor(this.rng() * (f.stands.length - 1))) % f.stands.length;
       f.home = { ...f.stands[f.standIndex] };
@@ -1657,6 +1932,7 @@ export class Match {
       ? { x: aim.x * FLAG_THROW_SPEED + p.move.vel.x, y: aim.y * FLAG_THROW_SPEED + p.move.vel.y + 3, z: aim.z * FLAG_THROW_SPEED + p.move.vel.z }
       : { x: p.move.vel.x * 0.8, y: p.move.vel.y * 0.8 + 2, z: p.move.vel.z * 0.8 };
     Object.assign(f, { noGrab: p.id, noGrabUntil: this.now + 1 });
+    if (thrown) this.award(p, 'flag_take');
     this.io.broadcast({ t: 'event', kind: 'flag_drop', team: f.team, player: p.id, text: `${p.name} dropped the ${this.flagName(f)}` });
   }
 
@@ -1670,6 +1946,10 @@ export class Match {
       if (f.state === 1 && f.carrier) {
         f.pos = { x: f.carrier.move.pos.x, y: f.carrier.move.pos.y + 1.4, z: f.carrier.move.pos.z };
         if (this.mode.id === 'rabbit' && this.phase === PHASE.PLAYING && this.tick % (60 * 10) === 0) f.carrier.modeScore += 1;
+        if (this.phase === PHASE.PLAYING && !f.carrier.flagHeldAwarded && this.now - f.carrier.flagHeldSince >= MEDAL_FLAG_HOLD_TIME) {
+          f.carrier.flagHeldAwarded = true;
+          this.award(f.carrier, 'flag_held');
+        }
       } else if (f.state === 2) {
         f.vel.y -= GRAVITY * this.world.gravityScale * DT;
         const next = { x: f.pos.x + f.vel.x * DT, y: f.pos.y + f.vel.y * DT, z: f.pos.z + f.vel.z * DT };
@@ -1706,7 +1986,7 @@ export class Match {
       this.phase = PHASE.PLAYING;
       this.phaseEnd = this.mode.timeLimit > 0 ? now + this.mode.timeLimit * 60 : Infinity;
       this.scores = [0, 0];
-      for (const p of this.players.values()) { p.kills = p.deaths = p.assists = p.caps = p.returns = 0; p.score = 0; p.modeScore = 0; p.credits = CREDITS.start; if (p.alive) this.kill(p, null, 'none', true); p.respawnAt = now; }
+      for (const p of this.players.values()) { p.kills = p.deaths = p.assists = p.caps = p.returns = 0; p.score = 0; p.modeScore = 0; p.credits = CREDITS.start; this.resetMedals(p); if (p.alive) this.kill(p, null, 'none', true); p.respawnAt = now; }
       this.io.broadcast({ t: 'event', kind: 'match_start', text: `${this.mode.name} has begun!` });
       this.broadcastMatch();
       return;
@@ -1714,7 +1994,7 @@ export class Match {
     if (this.phase === PHASE.ROUND_END && now >= this.phaseEnd) {
       this.phase = PHASE.PLAYING;
       this.tickets = [this.mode.respawnTickets ?? 25, this.mode.respawnTickets ?? 25];
-      for (const p of this.players.values()) { if (p.alive) this.kill(p, null, 'none', true); p.respawnAt = now; p.diedAt = 0; p.deaths = 0; }
+      for (const p of this.players.values()) { if (p.alive) this.kill(p, null, 'none', true); p.respawnAt = now; p.diedAt = 0; p.deaths = 0; this.resetMedals(p); }
       this.broadcastMatch();
       return;
     }
@@ -1729,6 +2009,7 @@ export class Match {
           const winner = 1 - team;
           this.roundWins[winner]++;
           this.scores = [...this.roundWins] as [number, number];
+          this.awardArenaSurvivors(winner);
           this.io.broadcast({ t: 'event', kind: 'round_end', team: winner, text: `${winner === 0 ? 'Blood Eagle' : 'Diamond Sword'} wins the round` });
           if (this.roundWins[winner] >= (this.mode.roundsToWin ?? 2)) { this.endMatch(winner); return; }
           this.phase = PHASE.ROUND_END;
@@ -1757,6 +2038,7 @@ export class Match {
     this.phase = PHASE.POSTGAME;
     this.phaseEnd = this.now + 15;
     this.broadcastMatch(winner);
+    this.awardMatchEnd(winner);
     this.io.onMatchOver(winner);
   }
 

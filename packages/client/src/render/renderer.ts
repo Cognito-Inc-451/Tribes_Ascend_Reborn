@@ -6,6 +6,15 @@ import { PostPipeline, structuralKey, type PostOptions } from './post.js';
 
 installHeightFog();
 
+/**
+ * The pixel ratio the renderer aims at when adaptive resolution is happy. Tied to the display's
+ * own scale factor: a HiDPI panel gets its sharpness, a normal panel stays at 1:1, and a 2x bill
+ * on a HiDPI panel is capped because it quadruples the pixel cost for a barely visible gain.
+ */
+export function renderCeiling(): number {
+  return Math.min(2, window.devicePixelRatio || 1);
+}
+
 const envCache = new WeakMap<THREE.WebGLRenderer, THREE.Texture>();
 /** Neutral prefiltered environment: gives PBR materials ambient specular/diffuse so unlit sides are not black. */
 export function studioEnvironment(r: THREE.WebGLRenderer): THREE.Texture {
@@ -33,8 +42,48 @@ const TONE: Record<typeof settings.toneMapping, THREE.ToneMapping> = {
   aces: THREE.ACESFilmicToneMapping, agx: THREE.AgXToneMapping, neutral: THREE.NeutralToneMapping, cineon: THREE.CineonToneMapping,
 };
 
+/**
+ * Index into post.ts's TONE_DEFINE. The post chain tone maps inside FINAL_FRAG (three compiles
+ * tone mapping out of every draw into a render target), so the shader needs the same curve the
+ * renderer is configured with.
+ */
+const TONE_INDEX: Record<typeof settings.toneMapping, 0 | 1 | 2 | 3> = { aces: 0, agx: 1, neutral: 2, cineon: 3 };
+
 /** Shadow map size per quality step. */
 export const SHADOW_RES: Record<typeof settings.shadowQuality, number> = { off: 0, low: 1024, medium: 2048, high: 2048, ultra: 4096 };
+
+/**
+ * Is the WebGPU backend available in this browser? Ray tracing needs it (compute shaders and
+ * ray-tracing pipelines); the client renders through WebGL today, so the RT toggles resolve to
+ * raster fallbacks until a WebGPU renderer lands.
+ */
+export const webgpuAvailable: boolean = typeof (navigator as { gpu?: unknown }).gpu !== 'undefined';
+
+/**
+ * What the three ray-tracing toggles actually buy on this backend. Each one is honoured for real
+ * only under WebGPU; on WebGL it degrades to the best raster approximation the chain has, so the
+ * player can set the toggles today and get the traced behaviour for free once WebGPU ships.
+ */
+export interface RtState {
+  /** Ray-traced shadows active (WebGPU). On WebGL: soft shadow maps forced on. */
+  rtShadows: boolean;
+  /** Ray-traced reflections active (WebGPU). On WebGL: screen-space reflections forced on. */
+  rtReflections: boolean;
+  /** Ray-traced GI active (WebGPU). On WebGL: sky environment IBL + high AO forced on. */
+  rtGI: boolean;
+  /** True when the toggles resolve to raster fallbacks rather than real tracing. */
+  fallback: boolean;
+}
+
+export function resolveRt(): RtState {
+  const gpu = webgpuAvailable;
+  return {
+    rtShadows: gpu && settings.rtShadows,
+    rtReflections: gpu && settings.rtReflections,
+    rtGI: gpu && settings.rtGI,
+    fallback: !gpu && (settings.rtShadows || settings.rtReflections || settings.rtGI),
+  };
+}
 
 /** Ambient intensity with the sky-based IBL installed, versus the neutral studio fallback. */
 const SKY_ENV_INTENSITY = 0.7;
@@ -70,7 +119,7 @@ export class Renderer {
   get canvas() { return this.renderer.domElement; }
 
   private skyEnv: THREE.Texture | null = null;
-  /** Adaptive-resolution multiplier (1 = the player's own slider value). */
+  /** Adaptive-resolution multiplier (1 = render at the display's own scale). */
   private adaptScale = 1;
   /**
    * Install a world's prefiltered sky as the scene environment, so PBR ambient comes from the
@@ -95,10 +144,14 @@ export class Renderer {
   configure() {
     settings.shadows = settings.shadowQuality !== 'off';
     this.renderer.shadowMap.enabled = settings.shadows;
-    const shadowType = settings.softShadows ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
+    const rt = resolveRt();
+    // RT Shadows on WebGL: best raster stand-in is the soft shadow filter.
+    const shadowType = (settings.softShadows || (!rt.rtShadows && settings.rtShadows)) ? THREE.PCFSoftShadowMap : THREE.PCFShadowMap;
     if (this.renderer.shadowMap.type !== shadowType) { this.renderer.shadowMap.type = shadowType; this.renderer.shadowMap.needsUpdate = true; }
     this.renderer.toneMapping = TONE[settings.toneMapping] ?? THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.05 * settings.brightness;
+    // With post on, FINAL_FRAG tone maps itself (uExposure carries the brightness) and three
+    // applies tone mapping to no draw at all, so keep the renderer's exposure neutral there.
+    this.renderer.toneMappingExposure = settings.post === 'off' ? 1.05 * settings.brightness : 1;
     const opts = this.postOptions();
     if (opts) {
       if (this.post && this.post.structuralKey === structuralKey(opts)) {
@@ -121,16 +174,22 @@ export class Renderer {
   private postOptions(): PostOptions | null {
     if (settings.post === 'off') return null;
     const g = GRADES[settings.grade] ?? GRADES.neutral;
+    const rt = resolveRt();
     return {
       hdr: settings.hdr, msaa: settings.antialias ? 4 : 0, bloom: settings.bloom ? settings.bloomStrength : 0,
-      ao: settings.ao === 'high' ? 2 : settings.ao === 'low' ? 1 : 0, godrays: settings.godrays ? 0.4 : 0, dof: settings.dof,
-      motionBlur: settings.motionBlur, ssr: settings.ssr, taa: settings.taa, fsr: settings.fsr, exposure: 1, contrast: settings.contrast, saturation: settings.saturation,
+      // RT GI on WebGL falls back to the strongest raster ambient occlusion the chain offers.
+      ao: rt.rtGI ? 2 : settings.ao === 'high' ? 2 : settings.ao === 'low' ? 1 : 0, godrays: settings.godrays ? 0.4 : 0, dof: settings.dof,
+      // RT Reflections on WebGL falls back to the screen-space reflection pass.
+      motionBlur: settings.motionBlur, ssr: settings.ssr || rt.rtReflections, fsr: settings.fsr, frameGen: settings.frameGen,
+      // FINAL_FRAG tone maps in-shader, so it carries the exposure the Brightness slider sets
+      // (1.05 baseline matches the no-post path).
+      exposure: 1.05 * settings.brightness, tone: TONE_INDEX[settings.toneMapping] ?? 0,
+      contrast: settings.contrast, saturation: settings.saturation,
       vibrance: settings.vibrance + (g.vibrance ?? 0), temperature: settings.temperature, tint: settings.tint,
       lift: new THREE.Vector3(...g.lift), gamma: new THREE.Vector3(...g.gamma), gain: new THREE.Vector3(...g.gain),
       vignette: settings.vignette, grain: settings.filmGrain, chromatic: settings.chromatic,
       // "Light" post is the cheap chain: no unsharp mask (menus label "full" as "On + sharpen").
       sharpen: settings.post === 'full' ? settings.sharpen : 0,
-      renderScale: settings.renderScale,
     };
   }
 
@@ -172,18 +231,22 @@ export class Renderer {
   resize() {
     const w = this.container.clientWidth || window.innerWidth, h = this.container.clientHeight || window.innerHeight;
     this.width = w; this.height = h;
-    // The player's slider is the ceiling; adaptive resolution can only scale it down.
-    const pr = Math.max(0.25, Math.min(2.5, settings.renderScale * this.adaptScale));
+    // Adaptive resolution owns the pixel ratio: the display's own scale is the ceiling and the
+    // frame-rate controller can only scale that down.
+    const pr = Math.max(0.25, Math.min(2.5, renderCeiling() * this.adaptScale));
     this.renderer.setPixelRatio(pr);
     this.renderer.setSize(w, h);
-    this.post?.setSize(w * pr, h * pr);
+    this.post?.setSize(w * pr, h * pr, w, h);
     this.setFov(settings.fov);
   }
 
   /** Applied by the frame-rate controller; 1 disables the effect. */
   setAdaptiveScale(scale: number) {
     const s = Math.max(0.25, Math.min(2.5, scale));
-    if (Math.abs(s - this.adaptScale) < 0.002) return;
+    /* The controller moves on a 0.05 grid; anything finer than that is noise. Reacting to
+       a 0.002 change re-creates every render target on each step, which drops the motion
+       history and makes the whole image flicker. */
+    if (Math.abs(s - this.adaptScale) < 0.045) return;
     this.adaptScale = s;
     this.resize();
   }
@@ -197,6 +260,11 @@ export class Renderer {
     this.camera.fov = THREE.MathUtils.radToDeg(v);
     this.camera.aspect = aspect;
     this.camera.updateProjectionMatrix();
+  }
+
+  /** True when the post pipeline is ready to present a frame-generated (interpolated) frame. */
+  get wantsGeneratedFrame(): boolean {
+    return this.post?.wantsGeneratedFrame === true;
   }
 
   render() {

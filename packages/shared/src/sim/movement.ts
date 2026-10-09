@@ -1,4 +1,4 @@
-import { AIR_DRAG, AIR_DRAG_START, AIRBORNE_DRAG, GRAVITY, JET_MAX_THRUST_SPEED, JET_THRUST_AT_MAX, PAWN_GRAVITY_SCALE, SKI_SLOPE_GRAVITY_BOOST, TERMINAL_VELOCITY } from '../constants.js';
+import { AIR_DRAG, AIR_DRAG_START, AIRBORNE_DRAG, AIR_STRAFE_ACCEL, AIR_STRAFE_FRACTION, GRAVITY, JET_MAX_THRUST_SPEED, JET_THRUST_AT_MAX, PAWN_GRAVITY_SCALE, SKI_SLOPE_FLOW, SKI_SLOPE_GRAVITY_BOOST, SKI_SPEED_CAP, TERMINAL_VELOCITY } from '../constants.js';
 import type { ArmorPhysics } from '../data/classes.js';
 import { inVolume, type MapBoost } from '../map/spec.js';
 import type { Vec3 } from '../math.js';
@@ -124,7 +124,14 @@ export function stepMovement(s: MoveState, cmd: InputCmd, p: MoveParams, world: 
         const lat = wish.x * px + wish.z * pz;
         v.x += px * lat * ph.skiControl * dt;
         v.z += pz * lat * ph.skiControl * dt;
-        if (along < ph.skiAccelCap) { const add = Math.min(ph.skiAccel * dt, ph.skiAccelCap - along); v.x += wish.x * add; v.z += wish.z * add; }
+        // Normal play accelerates up to the armor cap; a fast downhill run keeps
+        // gaining (at a reduced rate) until it hits the global ski ceiling.
+        const cap = hs > ph.skiAccelCap ? SKI_SPEED_CAP : ph.skiAccelCap;
+        if (along < cap) {
+          const rate = hs > ph.skiAccelCap ? ph.skiAccel * 0.85 : ph.skiAccel;
+          const add = Math.min(rate * dt, cap - along);
+          v.x += wish.x * add; v.z += wish.z * add;
+        }
       }
     } else if (s.jetting) {
       // Full lift up to half the max thrust speed, fading to 16 % at it: a held jet settles into a steady climb.
@@ -134,9 +141,23 @@ export function stepMovement(s: MoveState, cmd: InputCmd, p: MoveParams, world: 
         const add = Math.min(ph.jetSideAccel * dt, ph.jetHorizCap - along);
         v.x += wish.x * add; v.z += wish.z * add;
       }
-    } else if (wishLen > 0 && along < ph.airSpeedCap) {
-      const add = Math.min(ph.airControl * dt, ph.airSpeedCap - along);
-      v.x += wish.x * add; v.z += wish.z * add;
+    } else if (wishLen > 0) {
+      // Air-strafing (Quake/TA): steering authority acts across the current
+      // velocity, so turning mid-air curves the flight path and a sustained
+      // turn keeps bleeding speed into the new direction.
+      const hs = Math.hypot(v.x, v.z) || 1;
+      const px = -v.z / hs, pz = v.x / hs;
+      const lat = wish.x * px + wish.z * pz;
+      if (lat !== 0) {
+        const steer = (ph.airControl * AIR_STRAFE_FRACTION + AIR_STRAFE_ACCEL) * dt;
+        const amt = Math.min(Math.abs(lat) * steer, hs);
+        const s = Math.sign(lat) * amt;
+        v.x += px * s; v.z += pz * s;
+      }
+      if (along < ph.airSpeedCap) {
+        const add = Math.min(ph.airControl * dt, ph.airSpeedCap - along);
+        v.x += wish.x * add; v.z += wish.z * add;
+      }
     }
   }
 
@@ -178,6 +199,24 @@ export function stepMovement(s: MoveState, cmd: InputCmd, p: MoveParams, world: 
     if (c.onGround) { onGround = true; gn = c.groundNormal; }
     impact = Math.max(impact, c.impact);
     hitWall ||= c.hitWall;
+  }
+
+  // Slope-flow energy conservation: surface clipping zeroes the velocity component that
+  // points into the slope, which bleeds the downhill acceleration. On a frictionless ski
+  // slope that energy keeps flowing downhill, so restore most of it along the surface.
+  if (onGround && s.skiing) {
+    const nl = Math.hypot(gn.x, gn.y, gn.z) || 1;
+    const nx = gn.x / nl, ny = gn.y / nl, nz = gn.z / nl;
+    const vn = v.x * nx + v.y * ny + v.z * nz;
+    if (vn < 0) { v.x -= SKI_SLOPE_FLOW * vn * nx; v.y -= SKI_SLOPE_FLOW * vn * ny; v.z -= SKI_SLOPE_FLOW * vn * nz; }
+  }
+
+  // Hard ceiling: a ski run can climb all the way to the global cap (~460 km/h)
+  // on a long descent, but never past it. The HUD speedometer reads the full
+  // 3D velocity, so the ceiling applies to that magnitude.
+  if (s.skiing) {
+    const sp = Math.hypot(v.x, v.y, v.z);
+    if (sp > SKI_SPEED_CAP) { const k = SKI_SPEED_CAP / sp; v.x *= k; v.y *= k; v.z *= k; }
   }
 
   // Stick to the ground when walking downhill instead of bouncing off.

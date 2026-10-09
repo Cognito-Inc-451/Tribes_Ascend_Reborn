@@ -1,8 +1,8 @@
 /**
  * Adaptive resolution: nudge the renderer's pixel ratio to hold a frame-rate target.
  *
- * The player's own "Screen Percentage" is the *ceiling* — this controller can only
- * drop below it, never above, so a tuned slider is never overridden by the game.
+ * The display's own scale factor is the *ceiling* — this controller can only
+ * drop below it, never above, so the renderer never spends more pixels than the panel shows.
  * All logic is pure so it can be tested without a GL context.
  */
 
@@ -11,7 +11,7 @@ export interface AdaptiveRule {
   target: number;
   /** Lowest scale the controller may pick. */
   min: number;
-  /** Highest scale the controller may pick (the player's saved renderScale). */
+  /** Highest scale the controller may pick (the display's own scale factor). */
   max: number;
   /** Quantisation grid, so the scale lands on slider-friendly values. */
   step: number;
@@ -38,22 +38,22 @@ export const ADAPTIVE_RULE: AdaptiveRule = {
   samples: 45,
 };
 
-export function initialAdaptiveState(playerScale: number, rule: AdaptiveRule = ADAPTIVE_RULE): AdaptiveState {
-  return { scale: clamp(playerScale, rule.min, rule.max), streak: 0 };
+export function initialAdaptiveState(ceiling: number, rule: AdaptiveRule = ADAPTIVE_RULE): AdaptiveState {
+  return { scale: clamp(ceiling, rule.min, rule.max), streak: 0 };
 }
 
 /**
- * One sample of the controller. `fps` is the smoothed frame rate; `playerScale` is the
- * live slider value, so raising it mid-fight is honoured immediately.
+ * One sample of the controller. `fps` is the smoothed frame rate; `ceiling` is the highest
+ * scale the controller is allowed to use, so lowering it mid-fight is honoured immediately.
  */
 export function adaptiveStep(
   state: AdaptiveState,
   fps: number,
-  playerScale: number,
+  ceiling: number,
   rule: AdaptiveRule = ADAPTIVE_RULE,
 ): AdaptiveState {
-  const max = clamp(playerScale, rule.min, rule.max);
-  // The player lowered the ceiling below where we are: obey at once, no waiting.
+  const max = clamp(ceiling, rule.min, rule.max);
+  // The ceiling dropped below where we are: obey at once, no waiting.
   if (state.scale > max) return { scale: max, streak: 0 };
 
   const slow = fps <= rule.target * (1 - rule.deadband);

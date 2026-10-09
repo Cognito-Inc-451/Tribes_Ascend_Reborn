@@ -254,6 +254,7 @@ export type S2C =
   | { t: 'chat'; from: number; name: string; text: string; team: boolean; bot: boolean }
   | { t: 'vgs'; from: number; name: string; id: string; team: boolean; voice: string; bot: boolean }
   | { t: 'kill'; killer: number; victim: number; item: string; assist?: number; headshot?: boolean }
+  | { t: 'medal'; id: string; player: number }
   | { t: 'event'; kind: string; team?: number; player?: number; text: string }
   | { t: 'fx'; kind: FxKind; pos: Vec3; to?: Vec3; item?: string; radius?: number; player?: number }
   | { t: 'hit'; target: number; dmg: number; kind: 'player' | 'asset' | 'vehicle'; blueplate?: boolean }

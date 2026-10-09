@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import type { ArmorSkin, SkinPattern } from '@ar/shared';
+import { ACCUM_APPLY, ACCUM_FRAG, ACCUM_ROUGH } from './accum.js';
 import { withFog } from './fog.js';
 
 /** `userData` flag: this material is owned by a module cache, never by one instance. */
@@ -50,6 +51,9 @@ export function surfaceMaterial(color: number, opts: { roughness?: number; metal
     side: opts.side ?? THREE.FrontSide,
   });
   const detail = opts.detail ?? 0.18, scale = opts.scale ?? 0.35;
+  // Accumulation uniforms are injected into this shader, so the program layout
+  // differs from a plain MeshStandardMaterial — key it to avoid program reuse.
+  m.customProgramCacheKey = () => `${key}|accum`;
   m.onBeforeCompile = (sh) => {
     withFog(sh);
     sh.uniforms.uDetail = { value: detail };
@@ -74,11 +78,15 @@ export function surfaceMaterial(color: number, opts: { roughness?: number; metal
         float h3(vec3 p){ p = fract(p*0.3183099+0.1); p*=17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
         float vn(vec3 x){ vec3 i=floor(x); vec3 f=fract(x); f=f*f*(3.0-2.0*f);
           return mix(mix(mix(h3(i),h3(i+vec3(1,0,0)),f.x),mix(h3(i+vec3(0,1,0)),h3(i+vec3(1,1,0)),f.x),f.y),
-                     mix(mix(h3(i+vec3(0,0,1)),h3(i+vec3(1,0,1)),f.x),mix(h3(i+vec3(0,1,1)),h3(i+vec3(1,1,1)),f.x),f.y),f.z); }`)
+                     mix(mix(h3(i+vec3(0,0,1)),h3(i+vec3(1,0,1)),f.x),mix(h3(i+vec3(0,1,1)),h3(i+vec3(1,1,1)),f.x),f.y),f.z); }
+        ${ACCUM_FRAG}`)
       .replace('#include <color_fragment>', `#include <color_fragment>
         float n = vn(vWPos*uScale)*0.55 + vn(vWPos*uScale*4.1)*0.3 + vn(vWPos*uScale*13.0)*0.15;
         float ao = mix(1.0, 0.82, smoothstep(0.2, -0.6, vWNrm.y));
-        diffuseColor.rgb *= (1.0 - uDetail*0.5 + n*uDetail) * ao;`);
+        diffuseColor.rgb *= (1.0 - uDetail*0.5 + n*uDetail) * ao;
+        ${ACCUM_APPLY.replace(/AR_NRM/g, 'vWNrm').replace(/AR_ALT/g, 'vWPos.y')}`)
+      .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+        ${ACCUM_ROUGH}`);
   };
   m.userData[SHARED] = true;
   surfaceCache.set(key, m);

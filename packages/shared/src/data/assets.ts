@@ -49,7 +49,7 @@ export const ASSETS: Record<AssetType, AssetDef> = {
   supply_drop: { type: 'supply_drop', name: 'Supply Drop', health: 2000, armored: true, needsPower: false, lifetime: 90, size: [1, 1.4, 1], solid: true, src: 'TD/Call-Ins' },
 };
 
-export type VehicleType = 'gravcycle' | 'beowulf' | 'shrike' | 'bomber' | 'havoc';
+export type VehicleType = 'gravcycle' | 'beowulf' | 'shrike' | 'heavy_turret';
 
 export interface VehicleDef {
   type: VehicleType;
@@ -69,19 +69,21 @@ export interface VehicleDef {
   weapon: { damage: number; splash: number; radius: number; speed: number; clip: number; reload: number; refire: number; gravity: number };
   gunner?: { damage: number; refire: number; spread: number };
   src: string;
+  /** Deployed from a class pack (skips the vehicle station; bought vehicles are rejected). */
+  deployOnly?: boolean;
 }
 
 export const VEHICLES: Record<VehicleType, VehicleDef> = {
+  // seats: 1 — the bike is a solo machine; a passenger body reads as a block on its narrow frame
   gravcycle: { type: 'gravcycle', name: 'Grav Cycle', cost: 500, health: 1400, energy: 100, seats: 1, maxPerTeam: 4, maxSpeed: 58, accel: 22, boostAccel: 40, flying: false, hover: 1.1, mass: 400, size: [0.9, 0.7, 2.2],
     weapon: { damage: 250, splash: 200, radius: 3, speed: 110, clip: 8, reload: 3.81, refire: 0.2, gravity: 0 }, src: 'TD/Grav_Cycle' },
   beowulf: { type: 'beowulf', name: 'Beowulf', cost: 2500, health: 8000, energy: 70, seats: 2, maxPerTeam: 2, maxSpeed: 32, accel: 10, boostAccel: 18, flying: false, hover: 1.4, mass: 2500, size: [2.4, 1.4, 3.6],
     weapon: { damage: 2000, splash: 1500, radius: 9, speed: 70, clip: 1, reload: 3.82, refire: 3.82, gravity: 0.6 }, gunner: { damage: 100, refire: 0.1, spread: 0.03 }, src: 'TD/Beowulf' },
   shrike: { type: 'shrike', name: 'Shrike', cost: 4000, health: 3200, energy: 70, seats: 1, maxPerTeam: 2, maxSpeed: 55, accel: 20, boostAccel: 35, flying: true, hover: 0, mass: 1200, size: [3, 0.9, 3],
     weapon: { damage: 350, splash: 300, radius: 4, speed: 120, clip: 4, reload: 3.86, refire: 0.3, gravity: 0 }, src: 'TD/Shrike' },
-  bomber: { type: 'bomber', name: 'Bomber', cost: 6000, health: 4000, energy: 80, seats: 3, maxPerTeam: 2, maxSpeed: 45, accel: 15, boostAccel: 25, flying: true, hover: 0, mass: 2000, size: [4, 1.2, 5],
-    weapon: { damage: 500, splash: 400, radius: 6, speed: 100, clip: 6, reload: 4.5, refire: 0.5, gravity: 0.1 }, gunner: { damage: 150, refire: 0.15, spread: 0.04 }, src: 'TD/Bomber' },
-  havoc: { type: 'havoc', name: 'Havoc', cost: 8000, health: 6000, energy: 100, seats: 6, maxPerTeam: 1, maxSpeed: 40, accel: 12, boostAccel: 20, flying: true, hover: 0, mass: 3000, size: [5, 2, 6],
-    weapon: { damage: 300, splash: 250, radius: 5, speed: 90, clip: 10, reload: 5, refire: 0.4, gravity: 0.1 }, gunner: { damage: 200, refire: 0.1, spread: 0.02 }, src: 'TD/Havoc' },
+  // Player-manned emplacement: deployed from the Technician's Heavy Turret pack, never bought at a pad.
+  heavy_turret: { type: 'heavy_turret', name: 'Heavy Turret', cost: 2000, health: 2500, energy: 100, seats: 1, maxPerTeam: 2, maxSpeed: 0, accel: 0, boostAccel: 0, flying: false, hover: 1.2, mass: 1500, size: [1.2, 1.2, 1.4],
+    weapon: { damage: 700, splash: 500, radius: 4.5, speed: 105, clip: 5, reload: 4.2, refire: 0.55, gravity: 0 }, src: 'TD/Base_Turret', deployOnly: true },
 };
 
 export type CallInType = 'tactical_strike' | 'orbital_strike' | 'supply_drop';

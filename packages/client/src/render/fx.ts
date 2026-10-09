@@ -93,6 +93,161 @@ function spriteTex(kind: 'glow' | 'ring'): THREE.Texture {
 }
 let GLOW: THREE.Texture | null = null, RING: THREE.Texture | null = null;
 
+/** Scorch/crater decal: dark radial core plus spatter so it is not a clean disc. */
+function decalTex(): THREE.Texture {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d')!;
+  const core = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  core.addColorStop(0, 'rgba(255,255,255,.95)');
+  core.addColorStop(0.45, 'rgba(255,255,255,.55)');
+  core.addColorStop(0.8, 'rgba(255,255,255,.16)');
+  core.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = core;
+  g.fillRect(0, 0, 128, 128);
+  let s = 20260426;
+  const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
+  g.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 26; i++) {
+    const a = rnd() * Math.PI * 2, r = 26 + rnd() * 40, rad = 3 + rnd() * 9;
+    const x = 64 + Math.cos(a) * r, y = 64 + Math.sin(a) * r;
+    const b = g.createRadialGradient(x, y, 0, x, y, rad);
+    b.addColorStop(0, 'rgba(255,255,255,.5)');
+    b.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = b;
+    g.beginPath();
+    g.arc(x, y, rad, 0, Math.PI * 2);
+    g.fill();
+  }
+  g.globalCompositeOperation = 'source-over';
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+let SCORCH: THREE.Texture | null = null;
+
+/**
+ * Quaternion carrying +Z onto `n`: the rotation that lays a Z-facing quad flat on a
+ * surface with normal `n`. Pure (no three.js objects) so it can be unit-tested.
+ */
+export function decalQuaternion(n: Vec3): [number, number, number, number] {
+  const len = Math.hypot(n.x, n.y, n.z);
+  if (!(len > 1e-6)) return [0, 0, 0, 1]; // degenerate normal: keep the quad as-is
+  const x = n.x / len, y = n.y / len, z = n.z / len;
+  if (z > 0.9999) return [0, 0, 0, 1];
+  if (z < -0.9999) return [1, 0, 0, 0]; // half turn about X
+  const ax = -y, ay = x; // (0,0,1) x n
+  const al = Math.hypot(ax, ay) || 1;
+  const h = Math.acos(Math.min(1, Math.max(-1, z))) / 2;
+  return [(ax / al) * Math.sin(h), (ay / al) * Math.sin(h), 0, Math.cos(h)];
+}
+
+const DECAL_CAP = 128;
+const Z_AXIS = new THREE.Vector3(0, 0, 1);
+
+/** Fixed pool of projected decals; the oldest slot is recycled once the pool is full. */
+export class DecalPool {
+  readonly mesh: THREE.InstancedMesh;
+  private alpha = new Float32Array(DECAL_CAP);
+  private life = new Float32Array(DECAL_CAP);
+  private maxLife = new Float32Array(DECAL_CAP);
+  private tint = new Float32Array(DECAL_CAP * 3);
+  private next = 0;
+  private written = 0;
+  private m4 = new THREE.Matrix4();
+  private q1 = new THREE.Quaternion();
+  private q2 = new THREE.Quaternion();
+  private at = new THREE.Vector3();
+  private sc = new THREE.Vector3();
+  private col = new THREE.Color();
+
+  constructor() {
+    SCORCH ??= decalTex();
+    const geo = new THREE.PlaneGeometry(1, 1);
+    geo.setAttribute('aAlpha', new THREE.InstancedBufferAttribute(this.alpha, 1));
+    geo.setAttribute('aTint', new THREE.InstancedBufferAttribute(this.tint, 3));
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uMap: { value: SCORCH } },
+      transparent: true,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -4,
+      polygonOffsetUnits: -4,
+      vertexShader: `
+attribute float aAlpha;
+attribute vec3 aTint;
+varying vec2 vUv;
+varying float vA;
+varying vec3 vT;
+void main() {
+  vUv = uv; vA = aAlpha; vT = aTint;
+  gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+}`,
+      fragmentShader: `
+uniform sampler2D uMap;
+varying vec2 vUv;
+varying float vA;
+varying vec3 vT;
+void main() {
+  float a = texture2D(uMap, vUv).a * vA;
+  if (a < 0.012) discard;
+  gl_FragColor = vec4(vT, a * 0.85);
+}`,
+    });
+    this.mesh = new THREE.InstancedMesh(geo, mat, DECAL_CAP);
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 2;
+    this.mesh.count = 0;
+  }
+
+  /** Stamps a decal of `size` metres at `p`, oriented by the surface normal `axis`. */
+  spawn(p: Vec3, axis: Vec3, size: number, color: number, life: number) {
+    const i = this.next;
+    this.next = (this.next + 1) % DECAL_CAP;
+    this.written = Math.min(DECAL_CAP, Math.max(this.written, this.next === 0 ? DECAL_CAP : this.next));
+    const [x, y, z, w] = decalQuaternion(axis);
+    this.q1.set(x, y, z, w).normalize();
+    this.q2.setFromAxisAngle(Z_AXIS, Math.random() * Math.PI * 2); // break up identical silhouettes
+    this.q1.multiply(this.q2);
+    const off = 0.07 + size * 0.02; // lift off the surface to avoid z-fighting
+    this.at.set(p.x + axis.x * off, p.y + axis.y * off, p.z + axis.z * off);
+    this.sc.set(size, size, size);
+    this.m4.compose(this.at, this.q1, this.sc);
+    this.mesh.setMatrixAt(i, this.m4);
+    this.col.setHex(color);
+    this.tint[i * 3] = this.col.r;
+    this.tint[i * 3 + 1] = this.col.g;
+    this.tint[i * 3 + 2] = this.col.b;
+    this.alpha[i] = 1;
+    this.life[i] = life;
+    this.maxLife[i] = life;
+    this.mesh.count = this.written;
+    this.mesh.instanceMatrix.needsUpdate = true;
+    this.mesh.geometry.getAttribute('aAlpha').needsUpdate = true;
+    this.mesh.geometry.getAttribute('aTint').needsUpdate = true;
+  }
+
+  /** Decals hold full strength for two thirds of their life, then fade out. */
+  update(dt: number) {
+    if (!this.mesh.count) return;
+    for (let i = 0; i < this.mesh.count; i++) {
+      if (this.life[i] <= 0) continue;
+      this.life[i] -= dt;
+      const k = Math.max(0, this.life[i] / this.maxLife[i]);
+      this.alpha[i] = k > 0.66 ? 1 : k / 0.66;
+    }
+    this.mesh.geometry.getAttribute('aAlpha').needsUpdate = true;
+  }
+
+  clear() {
+    this.alpha.fill(0);
+    this.life.fill(0);
+    this.next = 0;
+    this.written = 0;
+    this.mesh.count = 0;
+  }
+}
+
 const HALO_SIZE: Record<string, number> = { disc: 1.6, grenade: 0.7, bolt: 1.1, plasma: 1.8, mortar: 2.6, rocket: 1.3, knife: 0.5, mine: 0.6, nova: 1.6, saber: 1.6 };
 const TRAIL: Record<string, { size: number; life: number; per: number }> = {
   disc: { size: 0.32, life: 0.28, per: 3 }, bolt: { size: 0.22, life: 0.35, per: 2 }, plasma: { size: 0.4, life: 0.3, per: 2 },
@@ -119,6 +274,14 @@ export class Effects {
   readonly smoke = new Particles(THREE.NormalBlending);
   /** TA's own weapon effects when imported (trails, explosions, fractal shards). */
   readonly ta = new TaParticles();
+  /** Scorch marks and craters left on surfaces by impacts. */
+  readonly decals = new DecalPool();
+  /**
+   * Surface probe supplied by the game client (world raycast with a terrain fallback):
+   * casts `from` to `to` and reports the hit point and outward normal, or null if the
+   * ray finds nothing. Decals need this to lie flat on the surface they were hit on.
+   */
+  surfaceQuery: ((from: Vec3, to: Vec3) => { point: Vec3; normal: Vec3 } | null) | null = null;
   private projMeshes = new Map<number, { mesh: THREE.Mesh; halo: THREE.Sprite; last: THREE.Vector3 | null; model: string; color: THREE.Color; trail: FxHandle | null }>();
   private matCache = new Map<number, THREE.MeshBasicMaterial>();
   private transients: Transient[] = [];
@@ -128,7 +291,7 @@ export class Effects {
   constructor() {
     GLOW ??= spriteTex('glow');
     RING ??= spriteTex('ring');
-    this.group.add(this.smoke.points, this.particles.points, this.ta.group);
+    this.group.add(this.smoke.points, this.particles.points, this.ta.group, this.decals.mesh);
     void this.ta.load();
     const nLights = settings.quality === 'low' ? 1 : 4;
     for (let i = 0; i < nLights; i++) {
@@ -224,10 +387,28 @@ export class Effects {
     this.sprite(pos, GLOW!, color, 0.07, (k) => 0.9 + k * 0.5, (k) => 1 - k);
   }
 
-  impact(pos: Vec3, color = 0xffe0a0) {
+  impact(pos: Vec3, color = 0xffe0a0, dir?: Vec3) {
     const c = new THREE.Color(color);
     for (let i = 0; i < 5; i++) this.particles.emit(pos, { x: 0, y: 2, z: 0 }, c, 0.07, 0.25 + Math.random() * 0.2, { spread: 9, gravity: 14 });
     this.smoke.emit(pos, { x: 0, y: 0.6, z: 0 }, DUST, 0.35, 0.8, { spread: 0.8, grow: 0.9 });
+    this.decal(pos, dir ?? null, 0.5, 0x241d16, 7);
+  }
+
+  /**
+   * Scorch a decal onto the surface at `pos`. `dir` is the direction the hit came from
+   * (defaults to straight down); the surface probe supplies the exact point and normal.
+   */
+  decal(pos: Vec3, dir: Vec3 | null, size: number, color: number, life: number) {
+    const q = this.surfaceQuery;
+    if (!q || Math.random() > 0.3 + settings.particles * 0.7) return;
+    const d = dir ?? { x: 0, y: 1, z: 0 };
+    const len = Math.hypot(d.x, d.y, d.z) || 1;
+    const ux = d.x / len, uy = d.y / len, uz = d.z / len;
+    const hit = q(
+      { x: pos.x + ux * 1.5, y: pos.y + uy * 1.5, z: pos.z + uz * 1.5 },
+      { x: pos.x - ux * 3, y: pos.y - uy * 3, z: pos.z - uz * 3 },
+    );
+    if (hit) this.decals.spawn(hit.point, hit.normal, size, color, life);
   }
 
   flash(pos: Vec3, color: number, intensity: number, dur = 0.25) {
@@ -250,6 +431,7 @@ export class Effects {
     this.sprite(pos, GLOW!, color, 0.45, (k) => radius * (1.6 + k * 1.6), (k) => (1 - k) * 0.8);
     this.sprite(pos, RING!, color, 0.4, (k) => radius * (0.6 + k * 3.2), (k) => (1 - k) * 0.9);
     this.flash(pos, color, 60 + radius * 20, 0.35);
+    this.decal(pos, { x: 0, y: 1, z: 0 }, Math.min(6, 1.2 + radius * 0.55), 0x1a140f, 14);
     const c = new THREE.Color(color), hot = new THREE.Color(0xfff0c0);
     const n = Math.round(12 + radius * 3);
     for (let i = 0; i < n; i++) {
@@ -262,13 +444,14 @@ export class Effects {
   }
 
   tracer(from: Vec3, to: Vec3, color = 0xfff0a0, width = 1) {
-    if (settings.tracers) { this.tracerRound(from, to, color); this.impact(to, color); return; }
+    const dir = { x: from.x - to.x, y: from.y - to.y, z: from.z - to.z };
+    if (settings.tracers) { this.tracerRound(from, to, color); this.impact(to, color, dir); return; }
     const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(from.x, from.y, from.z), new THREE.Vector3(to.x, to.y, to.z)]);
     const line = new THREE.Line(g, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.35 * width, blending: THREE.AdditiveBlending, depthWrite: false }));
     line.frustumCulled = false;
     this.group.add(line);
     this.transients.push({ obj: line, t: 0, life: 0.05, update: (k) => { (line.material as THREE.LineBasicMaterial).opacity = (1 - k) * 0.35; }, dispose: () => (line.material as THREE.Material).dispose() });
-    this.impact(to, color);
+    this.impact(to, color, dir);
   }
 
   /** A bright streak flying from muzzle to impact at TA bullet speed (21000 uu/s = 420 m/s), with a hot glowing head. */
@@ -346,6 +529,7 @@ export class Effects {
   update(dt: number, viewportH: number) {
     this.particles.update(dt, viewportH);
     this.smoke.update(dt, viewportH);
+    this.decals.update(dt);
     this.ta.update(dt);
     for (const tr of [...this.transients]) {
       tr.t += dt;
@@ -365,6 +549,7 @@ export class Effects {
     for (const e of this.projMeshes.values()) { this.group.remove(e.mesh, e.halo); e.halo.material.dispose(); e.trail?.stop(); }
     this.projMeshes.clear();
     this.ta.clear();
+    this.decals.clear();
   }
 }
 

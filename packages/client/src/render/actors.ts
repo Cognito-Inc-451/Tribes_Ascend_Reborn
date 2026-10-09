@@ -6,9 +6,12 @@ import {
 import { settings } from '../settings.js';
 import { forceFieldMaterial } from './forcefield.js';
 import { isSharedMaterial, markShared, ownMaterial, skinMaterial } from './materials.js';
+import { bannerWind, createCloth, resetCloth, stepCloth, type ClothVec } from './cloth.js';
 import { CharacterRig, models, staticModel } from './models.js';
 
 const _jet = new THREE.Vector3();
+const _flagTarget = new THREE.Vector3();
+const _noVel = { x: 0, y: 0, z: 0 };
 
 const NEUTRAL = 0xd0d0d0;
 export const teamColor = (t: number) => (t === 0 || t === 1 ? TEAM_COLORS[t] : NEUTRAL);
@@ -29,7 +32,7 @@ function shared<T extends THREE.Material>(key: string, make: () => T): T {
 }
 
 /** Clone a shared material for one actor; `out` records it so the actor disposes it. */
-function own<T extends THREE.Material>(mat: T, out?: T[]): T {
+function own<T extends THREE.Material>(mat: T, out?: THREE.Material[]): T {
   const c = ownMaterial(mat);
   out?.push(c);
   return c;
@@ -71,6 +74,7 @@ export class PlayerModel {
   private armR: THREE.Group;
   private flames: THREE.Mesh[] = [];
   private flag: THREE.Group;
+  private flagVisual: FlagVisual;
   private shield: THREE.Mesh;
   private weapon: THREE.Mesh;
   private mats: THREE.Material[] = [];
@@ -148,14 +152,12 @@ export class PlayerModel {
     const wmat = own(shared(`wfinish|${fin.tint}|${fin.metalness}`, () => new THREE.MeshStandardMaterial({ color: fin.tint, metalness: fin.metalness, roughness: 0.4 })), this.mats);
     this.weapon = mk(box(0.12, 0.14, 0.7), wmat, 0, -0.1, -0.35, this.armR);
     mk(box(0.14 * k, 0.4, 0.14 * k), skin, 0, -0.15, 0, this.armR);
-    // Flag (hidden unless carrying).
+    // Flag (hidden unless carrying): the exact assembly the standing flag uses, so a captured
+    // flag looks identical in the hand and on the cap point.
     this.flag = new THREE.Group();
-    const pole = new THREE.Mesh(cyl(0.025, 0.025, 2.2, 6), dark);
-    pole.position.y = 1.1;
-    const cloth = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.55), own(shared(`flagcloth|${tc}`, () => new THREE.MeshStandardMaterial({ color: tc, side: THREE.DoubleSide, emissive: tc, emissiveIntensity: 0.3 })), this.mats));
-    cloth.position.set(0.45, 1.9, 0);
-    this.flag.add(pole, cloth);
-    this.flag.position.set(0, legH, 0.3 * k);
+    this.flagVisual = new FlagVisual(team, { scale: FLAG_CARRY_SCALE, mats: this.mats });
+    this.flag.add(this.flagVisual.root);
+    this.flag.position.set(0, legH - FLAG_CARRY_DROP, 0.3 * k);
     this.flag.visible = false;
     this.body.add(this.flag);
     this.shield = new THREE.Mesh(new THREE.SphereGeometry(h * 0.62, 20, 14), own(glowMat(tc, 0.8, 0.18), this.mats));
@@ -172,7 +174,7 @@ export class PlayerModel {
       this.root.add(this.rig.root);
       for (const o of this.procedural) o.visible = false;
       for (const f of this.flames) f.position.set(f.position.x, this.rig.height * 0.6, 0.3 * k);
-      this.flag.position.set(0, this.rig.height * 0.35, 0.32 * k);
+      this.flag.position.set(0, this.rig.height * 0.35 - FLAG_CARRY_DROP, 0.32 * k);
       if (this.weaponItem) this.rig.setWeapon(this.weaponItem);
       if (this.stealthed) { this.stealthed = false; this.applyStealth(true); }
     });
@@ -207,20 +209,34 @@ export class PlayerModel {
       f.visible = jet && this.jetL > 0;
       if (f.visible) f.scale.set(this.jetW, (0.7 + Math.random() * 0.6) * this.jetL, this.jetW);
     }
-    if (ground && !ski && speed > 1) {
+    if ((flags & PF.IN_VEHICLE) !== 0) {
+      // Seated on a vehicle: legs folded under the hull, hands on the bars.
+      this.legL.rotation.x = 1.45; this.legR.rotation.x = 1.35;
+      this.armR.rotation.x = pitch * 0.4 - 0.5;
+      this.body.position.y = -0.18;
+    } else if (ground && !ski && speed > 1) {
       this.phase += dt * Math.min(12, speed * 1.2);
       this.legL.rotation.x = Math.sin(this.phase) * 0.7;
       this.legR.rotation.x = -Math.sin(this.phase) * 0.7;
       this.body.position.y = Math.abs(Math.sin(this.phase)) * 0.04;
     } else if (ski && ground) {
-      this.legL.rotation.x = 0.25; this.legR.rotation.x = -0.1;
-      this.body.position.y = -0.12;
+      // TA boots retract into the skis as speed builds: legs tuck up under the
+      // torso and the body settles into the crouch.
+      const tuck = Math.min(1, speed / 30);
+      this.legL.rotation.x = 0.25 + 0.55 * tuck;
+      this.legR.rotation.x = -0.1 + 0.45 * tuck;
+      this.body.position.y = -0.12 - 0.1 * tuck;
     } else {
       this.legL.rotation.x = 0.35; this.legR.rotation.x = 0.15;
       this.body.position.y = 0;
     }
     this.flag.visible = flagTeam !== null;
-    if (flagTeam !== null) ((this.flag.children[1] as THREE.Mesh).material as THREE.MeshStandardMaterial).color.setHex(teamColor(flagTeam));
+    if (flagTeam !== null) {
+      this.flagVisual.setTeam(flagTeam);
+      this.flagVisual.step(dt, vel ?? _noVel, yaw);
+    } else {
+      this.flagVisual.reset();
+    }
     this.shield.visible = (flags & PF.SHIELD) !== 0;
     this.applyStealth((flags & PF.STEALTH) !== 0);
     this.rig?.update(dt, pitch, flags, speed, vel);
@@ -239,7 +255,11 @@ export class PlayerModel {
 
   dispose() {
     this.disposed = true;
-    this.body.traverse((o) => (o as THREE.Mesh).geometry?.dispose());
+    // Imported skins/flags share geometry with the model cache; only per-actor geometry is ours.
+    this.body.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.geometry && !m.userData.sharedGeometry) m.geometry.dispose();
+    });
     // Only this actor's clones are disposed; the shared templates stay alive for other actors.
     for (const m of this.mats) if (!isSharedMaterial(m)) m.dispose();
     this.mats.length = 0;
@@ -399,47 +419,162 @@ export class AssetModel {
   }
 }
 
-export class FlagModel {
-  readonly root = new THREE.Group();
-  private cloth: THREE.Mesh;
-  private t = Math.random() * 10;
+/** Banner size, shared by the world flag and the carried flag. */
+const FLAG_W = 1.1;
+const FLAG_H = 0.7;
+/** A carried flag is the *same* flag, just held: a touch smaller so it reads as hand-carried. */
+const FLAG_CARRY_SCALE = 0.72;
+/** How far below the carrier's hand anchor the pole base sits. */
+const FLAG_CARRY_DROP = 0.55;
 
-  constructor(team: number) {
+/**
+ * One flag assembly: metal pole, live-cloth banner, the imported TA flag model when it loads,
+ * and the capture beacon. Both the world flag and the flag on a carrier's back are built here,
+ * so the two can never drift apart.
+ *
+ * Materials come from the shared cache. Pass `mats` to get per-instance clones (recorded for
+ * disposal) — required for a carried flag, which recolours per carrier and is faded by stealth.
+ */
+class FlagVisual {
+  readonly root = new THREE.Group();
+  readonly cloth: THREE.Mesh;
+  private pole: THREE.Mesh;
+  private banner: THREE.MeshStandardMaterial;
+  private clothSim = createCloth(FLAG_W, FLAG_H, 9, 5);
+  private t = Math.random() * 10;
+  private wind = { x: 0, y: 0, z: 0 };
+  private team: number;
+  private real: THREE.Group | null = null;
+
+  constructor(team: number, opts: { scale?: number; beacon?: boolean; mats?: THREE.Material[] } = {}) {
+    this.team = team;
     const tc = teamColor(team);
-    // Flag visuals are identical per team and never mutated after construction, so they are shared.
-    const pole = new THREE.Mesh(cyl(0.04, 0.04, 2.6, 6), shared('flag-pole', () => new THREE.MeshStandardMaterial({ color: 0x3a3f46, metalness: 0.7, roughness: 0.4 })));
-    pole.position.y = 1.3;
-    const g = new THREE.PlaneGeometry(1.1, 0.7, 8, 4);
-    this.cloth = new THREE.Mesh(g, shared(`flag-cloth|${tc}`, () => new THREE.MeshStandardMaterial({ color: tc, emissive: tc, emissiveIntensity: 0.45, side: THREE.DoubleSide })));
+    const mat = <T extends THREE.Material>(key: string, make: () => T): T => (opts.mats ? own(shared(key, make), opts.mats) : shared(key, make));
+    if (opts.scale !== undefined) this.root.scale.setScalar(opts.scale);
+    this.pole = new THREE.Mesh(cyl(0.04, 0.04, 2.6, 6), mat('flag-pole', () => new THREE.MeshStandardMaterial({ color: 0x3a3f46, metalness: 0.7, roughness: 0.4 })));
+    this.pole.position.y = 1.3;
+    this.banner = mat(`flag-cloth|${tc}`, () => new THREE.MeshStandardMaterial({ color: tc, emissive: tc, emissiveIntensity: 0.45, side: THREE.DoubleSide }));
+    this.cloth = new THREE.Mesh(new THREE.PlaneGeometry(FLAG_W, FLAG_H, 8, 4), this.banner);
     this.cloth.position.set(0.55, 2.2, 0);
-    const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.4, 60, 8, 1, true), shared(`flagbeacon|${tc}`, () => new THREE.MeshBasicMaterial({ color: tc, transparent: true, opacity: 0.12, depthWrite: false, blending: THREE.AdditiveBlending })));
-    beacon.position.y = 30;
-    this.root.add(pole, this.cloth, beacon);
+    this.root.add(this.pole, this.cloth);
+    if (opts.beacon) {
+      const beacon = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.4, 60, 8, 1, true), mat(`flagbeacon|${tc}`, () => new THREE.MeshBasicMaterial({ color: tc, transparent: true, opacity: 0.12, depthWrite: false, blending: THREE.AdditiveBlending })));
+      beacon.position.y = 30;
+      this.root.add(beacon);
+    }
     void models.get(`flag_${team === 1 ? 1 : 0}`).then((m) => {
-      if (!m) return;
-      pole.visible = false; this.cloth.visible = false;
+      if (!m || this.real) return;
       const real = staticModel(m, undefined, 0, tc);
       real.position.y = 1;
-      this.root.add(real);
+      this.attachReal(real);
     });
   }
 
-  update(f: FlagSnap, dt: number) {
-    this.root.visible = f.state !== 1;
-    this.root.position.set(f.pos.x, f.pos.y - 1, f.pos.z);
-    this.t += dt;
-    const p = this.cloth.geometry.getAttribute('position') as THREE.BufferAttribute;
-    for (let i = 0; i < p.count; i++) {
-      const x = p.getX(i) + 0.55;
-      p.setZ(i, Math.sin(this.t * 6 + x * 5) * 0.08 * x);
+  /** Swap in the imported TA flag mesh; the procedural pole + banner are its fallback. */
+  private attachReal(real: THREE.Group) {
+    this.real = real;
+    this.pole.visible = false;
+    this.cloth.visible = false;
+    this.root.add(real);
+  }
+
+  /** Recolour the banner for a flag captured from another team. */
+  setTeam(team: number) {
+    if (team === this.team) return;
+    this.team = team;
+    const tc = teamColor(team);
+    this.banner.color.setHex(tc);
+    this.banner.emissive.setHex(tc);
+    // The imported flag mesh is team-specific art, so swap it for the new team's model.
+    if (this.real) {
+      this.root.remove(this.real);
+      this.real = null;
+      this.pole.visible = true;
+      this.cloth.visible = true;
     }
+    void models.get(`flag_${team === 1 ? 1 : 0}`).then((m) => {
+      if (!m || this.team !== team || this.real) return;
+      const real = staticModel(m, undefined, 0, tc);
+      real.position.y = 1;
+      this.attachReal(real);
+    });
+  }
+
+  /** Advance the banner. `vel` is the banner's world airspeed, `yaw` the assembly's heading. */
+  step(dt: number, vel: ClothVec, yaw: number) {
+    this.t += dt;
+    if (!this.cloth.visible) return; // a real flag mesh replaced the banner
+    bannerWind(vel, yaw, 2.6, this.wind);
+    stepCloth(this.clothSim, dt, this.t, this.wind);
+    const p = this.cloth.geometry.getAttribute('position') as THREE.BufferAttribute;
+    const pos = this.clothSim.pos;
+    for (let i = 0; i < p.count; i++) p.setXYZ(i, pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
     p.needsUpdate = true;
+    this.cloth.geometry.computeVertexNormals();
+  }
+
+  /** Park the banner flat (flag at base / not carried) so it does not keep a stale shape. */
+  reset() {
+    resetCloth(this.clothSim);
   }
 }
+
+export class FlagModel {
+  readonly root = new THREE.Group();
+  private visual: FlagVisual;
+  /** Last world position, used to derive the banner's airspeed (FlagSnap has no velocity). */
+  private last: THREE.Vector3 | null = null;
+  private vel = new THREE.Vector3();
+
+  constructor(team: number) {
+    // Flag visuals are identical per team and never mutated after construction, so they are shared.
+    this.visual = new FlagVisual(team, { beacon: true });
+    this.root.add(this.visual.root);
+  }
+
+  update(f: FlagSnap, dt: number) {
+    const visible = f.state !== 1;
+    this.root.visible = visible;
+    this.root.position.set(f.pos.x, f.pos.y - 1, f.pos.z);
+    // A carried flag is drawn on the player, so park the banner flat and drop the stale velocity.
+    if (!visible) {
+      this.visual.reset();
+      this.vel.set(0, 0, 0);
+      this.last = null;
+      return;
+    }
+    // FlagSnap carries no velocity, so the banner's airspeed comes from the snapshot deltas.
+    if (this.last && dt > 0) {
+      const inv = 1 / Math.min(dt, 0.1);
+      _flagTarget.set((f.pos.x - this.last.x) * inv, (f.pos.y - this.last.y) * inv, (f.pos.z - this.last.z) * inv);
+      this.vel.lerp(_flagTarget, Math.min(1, 6 * dt));
+      this.last.set(f.pos.x, f.pos.y, f.pos.z);
+    } else {
+      this.last = new THREE.Vector3(f.pos.x, f.pos.y, f.pos.z);
+      this.vel.set(0, 0, 0);
+    }
+    // The root is axis-aligned, so world airflow is already banner-local.
+    this.visual.step(dt, this.vel, 0);
+  }
+}
+
+/**
+ * Rider sockets in hull-local space. A character's root sits at its feet and the body is ~1.8 m
+ * tall above it, so sockets sit *below* the hull top: the hips land on the seat and the legs tuck
+ * inside the bodywork. Sockets are shared by the procedural hull and the imported TA skin.
+ */
+const SEAT_SOCKETS: Record<string, [THREE.Vector3, THREE.Vector3]> = {
+  gravcycle: [new THREE.Vector3(0, -0.5, 0.35), new THREE.Vector3(0, -0.55, -0.62)],
+  beowulf: [new THREE.Vector3(0, -0.3, 0.7), new THREE.Vector3(0, -0.3, -0.9)],
+  shrike: [new THREE.Vector3(0, -0.55, 0.6), new THREE.Vector3(0, -0.55, -0.5)],
+};
+const SEAT_FALLBACK = new THREE.Vector3(0, -0.5, 0);
 
 export class VehicleModel {
   readonly root = new THREE.Group();
   private turret: THREE.Object3D | null = null;
+  private gun: THREE.Object3D | null = null;
+  private real = false;
   readonly type: string;
 
   constructor(v: VehSnap) {
@@ -472,27 +607,30 @@ export class VehicleModel {
       add(cyl(0.22, 0.28, 3.6, 10), hull, 0, 0.1, -2.6, this.turret).rotation.x = Math.PI / 2;
       add(box(1.2, 0.15, 0.2), glow, 0, 0.3, -1.3, this.turret);
       this.root.add(this.turret);
-    } else if (this.type === 'bomber') {
-      add(box(4, 1.2, 5), hull, 0, 0.2);
-      add(box(4.5, 0.3, 5.5), accent, 0, -0.4);
-      this.turret = new THREE.Group();
-      this.turret.position.y = 1.5;
-      add(box(2.5, 1, 2.5), hull, 0, 0, 0, this.turret);
-      add(cyl(0.25, 0.3, 4, 10), hull, 0, 0.1, -3, this.turret).rotation.x = Math.PI / 2;
-      add(box(1.5, 0.15, 0.2), glow, 0, 0.3, -1.5, this.turret);
-      this.root.add(this.turret);
-      // Bomb bay doors
-      add(box(3, 0.1, 2), accent, 0, -0.8, 0);
-    } else if (this.type === 'havoc') {
-      add(box(5, 2, 6), hull, 0, 0.5);
-      add(box(5.5, 0.4, 6.5), accent, 0, -0.5);
-      // Side gunner positions
-      for (const x of [-2.5, 2.5]) {
-        add(box(1.5, 1, 1.5), hull, x, 0.5, 0);
-        add(box(0.3, 0.3, 0.1), glow, x, 0.5, 1.5);
+    } else if (this.type === 'heavy_turret') {
+      /* Player-manned emplacement: base pad, pedestal, a yaw axis at the pad, and a gun group
+         hinged at the trunnion so elevating the gun tips the barrel and not the base. */
+      add(box(2.2, 0.35, 2.2), hull, 0, -0.95);
+      add(box(1.5, 0.45, 1.5), accent, 0, -0.6);
+      for (const x of [-0.9, 0.9]) {
+        for (const z of [-0.9, 0.9]) add(box(0.28, 0.12, 0.28), accent, x, -0.72, z);
       }
-      // Rear ramp
-      add(box(3, 1.5, 0.2), accent, 0, 0, -3.1);
+      add(cyl(0.55, 0.75, 1.1, 12), hull, 0, 0.05);
+      add(cyl(0.85, 0.85, 0.18, 12), accent, 0, 0.62);
+      this.turret = new THREE.Group();
+      this.turret.position.y = 1.1;
+      this.gun = new THREE.Group();
+      this.turret.add(this.gun);
+      add(box(1.5, 0.9, 1.5), hull, 0, -0.25, 0, this.gun);
+      const slope = add(box(1.55, 0.5, 0.7), hull, 0, 0.2, -0.75, this.gun);
+      slope.rotation.x = -0.5;
+      add(box(1.1, 0.25, 0.35), accent, 0, 0.15, 0, this.gun);
+      // Ammunition drums feeding the twin barrels
+      for (const x of [-0.95, 0.95]) add(cyl(0.35, 0.35, 0.9, 10), accent, x, -0.3, 0.2, this.gun).rotation.z = Math.PI / 2;
+      for (const x of [-0.4, 0.4]) add(cyl(0.11, 0.11, 2.2, 8), hull, x, 0.05, -1.5, this.gun).rotation.x = Math.PI / 2;
+      add(box(0.9, 0.12, 0.16), glow, 0, 0.17, -0.8, this.gun);
+      for (const x of [-0.4, 0.4]) add(cyl(0.16, 0.16, 0.1, 8), glow, x, 0.05, -2.62, this.gun).rotation.x = Math.PI / 2;
+      this.root.add(this.turret);
     } else {
       // Shrike and any future vehicle type falls back to this hull.
       add(box(1.2, 0.8, 4.2), hull, 0, 0);
@@ -501,20 +639,58 @@ export class VehicleModel {
       add(box(0.9, 0.5, 1.2), glowMat(0x88ccff, 0.6, 0.6), 0, 0.5, -0.8);
       for (const x of [-2.6, 2.6]) add(box(0.4, 0.3, 0.2), glow, x, 0, 1.45);
     }
+    // Imported TA meshes cover the three original vehicles; the manned heavy turret reuses the
+    // base turret's mesh. The procedural hull built above is the fallback when assets are absent.
     const proc = [...this.root.children];
-    void models.get(`veh_${this.type}`).then((m) => {
-      if (!m) return;
-      for (const o of proc) if (o !== this.turret) o.visible = false;
-      if (this.turret) this.turret.visible = false;
-      const real = staticModel(m);
-      real.position.y = this.type === 'beowulf' ? -1.2 : this.type === 'bomber' ? -1.5 : this.type === 'havoc' ? -2 : -0.6;
-      this.root.add(real);
+    const skin = this.type === 'heavy_turret' ? 'dep_turret_heavy' : `veh_${this.type}`;
+    void models.get(skin).then((m) => {
+      if (!m || this.real) return;
+      this.real = true;
+      /* The heavy turret's donor mesh rides inside the turret group, so that group must stay
+         visible: hide its procedural children individually instead of the group itself. */
+      for (const o of proc) {
+        if (o === this.turret) for (const c of o.children) c.visible = false;
+        else o.visible = false;
+      }
+      const real = staticModel(m, undefined, 0, tc);
+      if (this.type === 'heavy_turret') {
+        /* The donor mesh rides inside the gun group, so it keeps rotating with the gunner and
+           elevates with the barrel. Its pivot sits at the emplacement's base, so drop it from the
+           trunnion down onto the pad. The AI base turret renders this mesh at 3.25x. */
+        const host = this.gun ?? this.turret ?? this.root;
+        real.scale.setScalar(2.2);
+        real.position.y = host === this.gun ? -1.1 : -0.85;
+        host.add(real);
+      } else {
+        if (this.turret) this.turret.visible = false;
+        real.position.y = this.type === 'beowulf' ? -1.2 : -0.6;
+        this.root.add(real);
+      }
     });
   }
 
   update(v: VehSnap, aimYaw: number | null) {
     this.root.position.set(v.pos.x, v.pos.y, v.pos.z);
+    if (this.type === 'heavy_turret') {
+      /* An emplacement is bolted to the ground: only its gun elevates, so the gunner's pitch
+         drives the gun group instead of tipping the whole vehicle into the terrain. */
+      this.root.rotation.set(0, v.yaw, v.roll, 'YXZ');
+      if (this.turret) {
+        if (aimYaw !== null) this.turret.rotation.y = aimYaw - v.yaw;
+        /* The donor mesh is a whole emplacement, so a full ±34° elevation would tip its base too.
+           Damp the gun pitch: the barrel visibly rises, the pad stays planted. */
+        if (this.gun) this.gun.rotation.x = v.pitch * 0.35;
+      }
+      return;
+    }
     this.root.rotation.set(v.pitch, v.yaw, v.roll, 'YXZ');
     if (this.turret && aimYaw !== null) this.turret.rotation.y = aimYaw - v.yaw;
+  }
+
+  /** Hull-local rider socket for a seat index (0 = driver). */
+  seatSocket(seat: number): THREE.Vector3 {
+    const sockets = SEAT_SOCKETS[this.type];
+    if (!sockets) return SEAT_FALLBACK;
+    return sockets[Math.min(seat, sockets.length - 1)];
   }
 }

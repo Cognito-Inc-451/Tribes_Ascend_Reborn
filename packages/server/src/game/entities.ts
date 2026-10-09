@@ -76,6 +76,28 @@ export class Player {
   rewardedSinceDeath = true;
   determination = 0;
 
+  // ---------------------------------------------------------- accolades
+  /** Consecutive kills without dying, tracked per weapon class. */
+  streakGeneral = 0;
+  streakDisc = 0;
+  streakExplosive = 0;
+  streakSniper = 0;
+  /** Kills chained inside MEDAL_MULTI_WINDOW seconds, and when the chain last ticked. */
+  multiKills = 0;
+  multiKillAt = -99;
+  /** Id of the player who last killed this player (Revenge accolade). */
+  lastKiller = -1;
+  /** When this player picked up the flag (0 = not carrying), and if Flag Held was paid. */
+  flagHeldSince = 0;
+  flagHeldAwarded = false;
+  /** Horizontal speed (m/s) at the moment of the last flag grab, for grab accolades. */
+  grabSpeed = 0;
+  /** Hitpoints restored to teammates this round (Base Repair accolade). */
+  healed = 0;
+  healedAwarded = false;
+  /** Accolades already awarded this round, so one-shot medals never repeat. */
+  medals = new Set<string>();
+
   flag: FlagState | null = null;
   vehicle: Vehicle | null = null;
   seat = 0;
@@ -173,6 +195,12 @@ export interface Vehicle {
   gunnerNext: number;
   emptySince: number;
   box: OBB | null;
+  /** Deployed-by player (server-only, not sent in snapshots); -1/undefined for map or pad vehicles. */
+  owner?: number;
+  /** Last time this vehicle made a crash sound (server-only, throttles the impact fx). */
+  lastCrash?: number;
+  /** Yaw error the driver is steering through this tick (server-only, drives ground banking). */
+  turn?: number;
 }
 
 export function vehicleDef(t: VehicleType) { return VEHICLES[t]; }

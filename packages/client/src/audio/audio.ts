@@ -20,7 +20,13 @@ const SAMPLE_FOR: Partial<Record<SoundName, string>> = {
 };
 
 interface FireLoop { item: string; src: AudioBufferSourceNode | null; gain: GainNode; panner: PannerNode | null; last: number; hold: number; vol: number }
-interface Engine { type: string; srcs: AudioBufferSourceNode[]; idle: GainNode; fast: GainNode; panner: PannerNode }
+interface Engine {
+  type: string;
+  srcs: AudioScheduledSourceNode[];
+  idle: GainNode;
+  fast: GainNode;
+  panner: PannerNode;
+}
 
 /** Procedural WebAudio sound engine: all effects are synthesised (no game assets). */
 export class AudioEngine {
@@ -162,7 +168,10 @@ export class AudioEngine {
     for (const [owner, l] of this.fireLoops) if (now - l.last > l.hold) this.endFireLoop(owner);
     const seen = new Set<number>();
     for (const v of vehicles) {
-      if (!this.sfx[`veh_${v.type}_idle`] || this.far(v.pos, 450)) continue;
+      // Recorded loops cover every vehicle; the manned emplacement borrows the base generator hum.
+      const idleKey = `veh_${v.type}_idle`;
+      const donor = this.sfx[idleKey] ? idleKey : v.type === 'heavy_turret' && this.sfx['gen_hum'] ? 'gen_hum' : null;
+      if (!donor || this.far(v.pos, 450)) continue;
       seen.add(v.id);
       let e = this.engines.get(v.id);
       if (!e) {
@@ -174,7 +183,7 @@ export class AudioEngine {
         const eng: Engine = { type: v.type, srcs: [], idle, fast, panner };
         e = eng;
         this.engines.set(v.id, eng);
-        for (const [key, g] of [[`veh_${v.type}_idle`, idle], [`veh_${v.type}_fast`, fast]] as const) {
+        for (const [key, g] of [[donor, idle], [`veh_${v.type}_fast`, fast]] as const) {
           void this.sample(key).then((buf) => {
             if (!buf || !this.ctx || this.engines.get(v.id) !== eng) return;
             const src = this.ctx.createBufferSource();

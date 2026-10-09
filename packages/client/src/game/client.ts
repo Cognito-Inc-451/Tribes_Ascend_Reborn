@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import {
-  AF, ASSET_TYPES, ASSETS, BTN, buildCollisionWorld, CLASSES, DT, ITEM_IDS, ITEM_INDEX, ITEMS, MODES, PF, PHASE, projDef, TEAM_NAMES, VEHICLE_TYPES, VEHICLES, VGS_BY_ID, dirFromAngles, GRAVITY, jetStyleFor,
+  AF, angleWrap, ASSET_TYPES, ASSETS, BTN, buildCollisionWorld, CLASSES, DT, ITEM_IDS, ITEM_INDEX, ITEMS, MEDALS, MODES, PF, PHASE, projDef, TEAM_NAMES, VEHICLE_TYPES, VEHICLES, VGS_BY_ID, dirFromAngles, GRAVITY, jetStyleFor,
   makeOBB, type AssetSnap, type CollisionWorld, type InputCmd, type JetStyle, type Loadout, type MapData, type ModeId, type PlayerSnap, type S2C, type Snapshot, type Vec3,
 } from '@ar/shared';
 import { audio } from '../audio/audio.js';
@@ -8,7 +8,7 @@ import type { Input } from '../input/input.js';
 import type { Session } from '../net/session.js';
 import { AssetModel, FlagModel, PlayerModel, teamColor, VehicleModel } from '../render/actors.js';
 import { Effects } from '../render/fx.js';
-import type { Renderer } from '../render/renderer.js';
+import { renderCeiling, type Renderer } from '../render/renderer.js';
 import { ADAPTIVE_RULE, adaptiveStep, initialAdaptiveState, type AdaptiveState } from '../render/adaptive.js';
 import { WorldView } from '../render/world.js';
 import { TextureStore } from '../render/textures.js';
@@ -48,6 +48,8 @@ export class GameClient {
   private assetViews = new Map<number, AssetModel>();
   private flagViews = new Map<number, FlagModel>();
   private vehViews = new Map<number, VehicleModel>();
+  /** Smoothed vehicle orientation - snapshots arrive at ~10 Hz and raw angles snap. */
+  private vehAngles = new Map<number, { yaw: number; pitch: number; roll: number }>();
   private overlayRoot: HTMLElement;
   private overlay: HTMLElement | null = null;
   private scoreEl: HTMLElement | null = null;
@@ -80,6 +82,8 @@ export class GameClient {
   private viewModel: THREE.Group;
   private strikes: { pos: Vec3; until: number; kind: string }[] = [];
   private lastFrameTime = 0;
+  private lastRaf = 0;
+  private displayPeriod = 16.7;
   private fps = 0;
   private adapt: AdaptiveState = initialAdaptiveState(1);
   private cmdHistory: InputCmd[] = [];
@@ -102,6 +106,15 @@ export class GameClient {
     this.view.onSkyEnv = (t) => r.setSkyEnvironment(t);
     r.setSkyEnvironment(this.view.setSkyIBL());
     r.scene.add(this.fx.group);
+    // Decals need a surface to lie on: prefer the exact geometry the ray hits, fall back to
+    // the heightfield when the cast misses every box/triangle (open sky above terrain).
+    this.fx.surfaceQuery = (from, to) => {
+      const hit = this.world.raycast(from, to, undefined, false);
+      if (hit) return { point: hit.point, normal: hit.normal };
+      const y = this.map.terrain.heightAt(to.x, to.z);
+      if (!Number.isFinite(y)) return null;
+      return { point: { x: to.x, y, z: to.z }, normal: this.map.terrain.normalAt(to.x, to.z) };
+    };
     this.pred = new Predictor(this.world, !!session.server.options?.infiniteEnergy);
     // The server keeps our last input seq across map changes and drops anything at or below it.
     this.pred.seq = session.inputSeq;
@@ -376,7 +389,17 @@ export class GameClient {
   private frame(t: number) {
     if (this.disposed) return;
     this.raf = requestAnimationFrame((n) => this.frame(n));
-    if (settings.maxFps > 0 && t - this.lastFrameTime < 1000 / settings.maxFps - 0.5) return;
+    if (this.lastRaf) this.displayPeriod = Math.min(50, Math.max(4, this.displayPeriod * 0.9 + (t - this.lastRaf) * 0.1));
+    this.lastRaf = t;
+    if (settings.maxFps > 0 && t - this.lastFrameTime < 1000 / settings.maxFps - 0.5) {
+      // Frame generation presents an interpolated frame on the ticks the frame-rate limit skips,
+      // so the display updates at the monitor refresh rate while the scene renders at the capped rate.
+      if (this.r.wantsGeneratedFrame && t - this.lastFrameTime >= this.displayPeriod * 0.9) {
+        this.r.render();
+        this.lastFrameTime = t;
+      }
+      return;
+    }
     const dt = Math.min(0.1, (t - this.last) / 1000);
     this.last = t;
     this.lastFrameTime = t;
@@ -394,7 +417,7 @@ export class GameClient {
   }
 
   /**
-   * Hold the frame-rate target by trimming render resolution below the player's slider.
+   * Hold the frame-rate target by trimming render resolution below the display's own scale.
    * The controller only moves after a sustained trend, so brief hitches never change quality.
    */
   private updateAdaptive() {
@@ -407,7 +430,7 @@ export class GameClient {
     const cap = settings.maxFps > 0 ? Math.min(settings.maxFps, 120) : 0;
     const target = cap > 0 ? Math.max(20, Math.round(cap * 0.9)) : ADAPTIVE_RULE.target;
     const rule = target === ADAPTIVE_RULE.target ? ADAPTIVE_RULE : { ...ADAPTIVE_RULE, target };
-    this.adapt = adaptiveStep(this.adapt, this.fps, settings.renderScale, rule);
+    this.adapt = adaptiveStep(this.adapt, this.fps, renderCeiling(), rule);
     this.r.setAdaptiveScale(this.adapt.scale);
   }
 
@@ -574,7 +597,13 @@ export class GameClient {
     const myTeam = this.pinfo(this.session.myId)?.team ?? 255;
     switch (m.t) {
       case 'kill': {
-        this.hud.killFeed(this.pinfo(m.killer), this.pinfo(m.victim), m.item, m.assist !== undefined ? this.pinfo(m.assist) : undefined);
+        const snaps = this.session.latest?.players;
+        const kp = m.killer !== m.victim ? snaps?.find((p) => p.id === m.killer) : undefined;
+        const vp0 = snaps?.find((p) => p.id === m.victim);
+        const shotDist = kp && vp0
+          ? Math.hypot(kp.pos.x - vp0.pos.x, kp.pos.y - vp0.pos.y, kp.pos.z - vp0.pos.z)
+          : undefined;
+        this.hud.killFeed(this.pinfo(m.killer), this.pinfo(m.victim), m.item, m.assist !== undefined ? this.pinfo(m.assist) : undefined, m.headshot, shotDist);
         if (m.killer === this.session.myId && m.victim !== m.killer) {
           audio.play('kill'); this.combatUntil = performance.now() + 12000;
           const snaps = this.session.latest?.players;
@@ -588,6 +617,13 @@ export class GameClient {
           if (vp) audio.playKey('death', vp.pos, 0.8);
         }
         if (m.assist === this.session.myId) this.stats.assist();
+        break;
+      }
+      case 'medal': {
+        // Only the earner sees their own ribbon; a feed of everyone's medals is spam.
+        if (m.player !== this.session.myId) break;
+        this.hud.medal(m.id, this.pinfo(m.player)?.team ?? 255, true);
+        audio.play(MEDALS[m.id]?.tier === 'big' ? 'flag_cap' : 'blueplate');
         break;
       }
       case 'chat': this.hud.chatLine(this.pinfo(m.from), m.name, m.text, m.team, false, m.bot); break;
@@ -659,6 +695,7 @@ export class GameClient {
       case 'match_start': audio.play('match_start'); this.hud.announce(text); break;
       case 'vehicle_menu': this.setOverlay(vehicleMenu(this.session.latest?.self?.credits ?? 0, (v) => { this.session.send({ t: 'buyvehicle', vehicle: v }); this.closeOverlay(); }, () => this.closeOverlay())); break;
       case 'round_end': this.hud.announce(text, col); break;
+      case 'medal_broadcast': this.hud.announce(text, '#ffd166'); break;
       default: this.hud.toast(text);
     }
   }
@@ -685,6 +722,14 @@ export class GameClient {
         const def = projDef(item);
         if (!this.fx.taExplosion(item, m.pos, m.radius ?? 4)) this.fx.explosion(m.pos, Math.max(2, (m.radius ?? 4) * 0.6), def?.color ?? 0xffa040);
         audio.playExplosion(item, m.pos, Math.min(1.4, (m.radius ?? 5) / 6));
+        break;
+      }
+      case 'impact': {
+        // Vehicle crash / run-over: loudness scales with the impact severity the server reported.
+        const vol = Math.min(1.1, Math.max(0.25, (m.radius ?? 1) * 0.45));
+        if (!audio.playKey(item === 'rollover' ? 'rollover' : 'impact', m.pos, vol)) audio.play('hurt', m.pos, vol);
+        // Scrape the ground where the vehicle slammed; a rollover leaves a wider mark.
+        this.fx.decal(m.pos, { x: 0, y: 1, z: 0 }, item === 'rollover' ? 1.6 : Math.min(3, 0.6 + (m.radius ?? 1) * 0.7), 0x1f1811, 9);
         break;
       }
       case 'fractal':
@@ -746,6 +791,30 @@ export class GameClient {
       out.push({ p: b, pos, yaw: a.yaw + dy * Math.min(1, k), pitch: a.pitch + (b.pitch - a.pitch) * Math.min(1, k) });
     }
     return out;
+  }
+
+  /** Poses an in-vehicle player (driver or passenger) at their seat on the vehicle. */
+  private placeRider(v: VehicleModel, p: PlayerSnap, yaw: number, seen: Set<number>, dt: number) {
+    const isMe = p.id === this.session.myId;
+    const info = this.pinfo(p.id);
+    const cosKey = JSON.stringify(info?.cosmetics ?? {});
+    const clsId = CLASSES[p.cls]?.id ?? this.cls;
+    const jetStyle = jetStyleFor(settings.jetStyles, clsId);
+    let view = this.players.get(p.id);
+    if (!view || view.cls !== p.cls || view.team !== p.team || view.cosKey !== cosKey || view.jetStyle !== jetStyle) {
+      if (view) { this.r.scene.remove(view.model.root); view.model.dispose(); }
+      view = { model: new PlayerModel(p.cls, p.team, info?.cosmetics ?? settings.cosmetics, jetStyle), cls: p.cls, team: p.team, cosKey, jetStyle };
+      this.players.set(p.id, view);
+      this.r.scene.add(view.model.root);
+    }
+    seen.add(p.id);
+    // Seat sockets live in hull space, so transform them through the vehicle root (scale and tilt included).
+    v.root.updateWorldMatrix(true, false);
+    view.model.root.position.copy(v.root.localToWorld(v.seatSocket(p.seat).clone()));
+    // Riders face the vehicle, not their own aim; the seated pose comes from the IN_VEHICLE flag.
+    view.model.update(dt, yaw, 0, p.flags | PF.IN_VEHICLE, 0, null, { x: 0, y: 0, z: 0 });
+    view.model.setWeapon('');
+    view.model.root.visible = !isMe || this.thirdPerson;
   }
 
   private render(dt: number) {
@@ -819,10 +888,24 @@ export class GameClient {
         if (!v) { v = new VehicleModel(veh); this.vehViews.set(veh.id, v); this.r.scene.add(v.root); }
         const a = br?.a.snap.vehicles.find((x) => x.id === veh.id), b = br?.b.snap.vehicles.find((x) => x.id === veh.id);
         const vs = a && b && br ? { ...b, pos: { x: a.pos.x + (b.pos.x - a.pos.x) * Math.min(1, br.k), y: a.pos.y + (b.pos.y - a.pos.y) * Math.min(1, br.k), z: a.pos.z + (b.pos.z - a.pos.z) * Math.min(1, br.k) } } : veh;
+        // Ease the quantized snapshot angles toward their target: raw 10 Hz angles make the bike snap.
+        let ang = this.vehAngles.get(veh.id);
+        if (!ang) { ang = { yaw: veh.yaw, pitch: veh.pitch, roll: veh.roll }; this.vehAngles.set(veh.id, ang); }
+        const ka = 1 - Math.exp(-dt * 14);
+        ang.yaw += angleWrap(vs.yaw - ang.yaw) * ka;
+        ang.pitch += (vs.pitch - ang.pitch) * ka;
+        ang.roll += (vs.roll - ang.roll) * ka;
         const driver = snap.players.find((p) => p.id === veh.gunner) ?? snap.players.find((p) => p.id === veh.driver);
-        v.update(vs, driver ? (driver.id === myId ? this.input.yaw : driver.yaw) : null);
+        v.update({ ...vs, yaw: ang.yaw, pitch: ang.pitch, roll: ang.roll }, driver ? (driver.id === myId ? this.input.yaw : driver.yaw) : null);
+        // The bike rides solo: its frame is too narrow for a second body to read as anything but a block.
+        if (VEHICLE_TYPES[veh.type] !== 'gravcycle') {
+          for (const p of snap.players) {
+            if (p.vehicle !== veh.id || !(p.flags & PF.IN_VEHICLE)) continue;
+            this.placeRider(v, p, ang.yaw, seen, dt);
+          }
+        }
       }
-      for (const [id, v] of this.vehViews) if (!vSeen.has(id)) { this.r.scene.remove(v.root); this.vehViews.delete(id); }
+      for (const [id, v] of this.vehViews) if (!vSeen.has(id)) { this.r.scene.remove(v.root); this.vehViews.delete(id); this.vehAngles.delete(id); }
 
       // --- projectiles: remote interpolated, own extrapolated to the present
       const projT = this.session.serverNow() - INTERP;
@@ -892,8 +975,11 @@ export class GameClient {
       // lift put the view above the shot line, exactly like the +0.8 lift did on foot).
       // Beowulf mortar and gunner hitscan both aim at the mouse; gravcycle and Shrike fire along
       // the hull, so their camera follows the hull angles (which lag the mouse while turning).
-      const ay = veh && veh.type !== 1 ? veh.yaw : yaw;
-      const ap = veh && veh.type !== 1 ? veh.pitch : pitch;
+      // Use the eased hull angles here too: the raw snapshot angles arrive at ~10 Hz and would
+      // shake the camera in steps that the hull itself no longer shows.
+      const vang = veh ? this.vehAngles.get(veh.id) : undefined;
+      const ay = veh && veh.type !== 1 ? (vang?.yaw ?? veh.yaw) : yaw;
+      const ap = veh && veh.type !== 1 ? (vang?.pitch ?? veh.pitch) : pitch;
       const d = dirFromAngles(ay, ap);
       // Shot origin: gunner hitscan fires from the turret eye, driver fire from the muzzle height.
       const eye = { x: base.x, y: base.y + (me.seat === 1 ? size[1] + 1 : size[1] * 0.8), z: base.z };
@@ -903,7 +989,7 @@ export class GameClient {
       // The eye sits inside the hull, so a world raycast alone would let the camera end up buried
       // in it once the lift is gone. Keep it outside the hull box: the support radius of an
       // oriented box along the view ray is its exact half-extent in that direction.
-      const hull = makeOBB({ x: base.x, y: base.y + size[1], z: base.z }, size, veh?.yaw ?? 0, veh?.pitch ?? 0, veh?.roll ?? 0);
+      const hull = makeOBB({ x: base.x, y: base.y + size[1], z: base.z }, size, vang?.yaw ?? veh?.yaw ?? 0, vang?.pitch ?? veh?.pitch ?? 0, vang?.roll ?? veh?.roll ?? 0);
       const ax = hull.axes;
       const r = Math.abs(d.x * ax[0] + d.y * ax[1] + d.z * ax[2]) * size[0]
         + Math.abs(d.x * ax[3] + d.y * ax[4] + d.z * ax[5]) * size[1]
@@ -1133,7 +1219,7 @@ export class GameClient {
       `transport  ${this.session.transport.kind}${this.fellBack ? ' (fallback)' : ''}`,
       `rtt        ${Math.round(this.session.rtt * 1000)} ms`,
       `fps        ${Math.round(this.fps)}`,
-      `render     ${Math.round(settings.renderScale * this.adapt.scale * 100)}%${this.adapt.scale < 0.995 ? ' (adaptive)' : ''}`,
+      `render     ${Math.round(renderCeiling() * this.adapt.scale * 100)}%${this.adapt.scale < 0.995 ? ' (adaptive)' : ''}`,
       `snapshots  ${this.session.snapsIn}`,
       `in / out   ${(this.session.bytesIn / 1024).toFixed(0)} / ${(this.session.bytesOut / 1024).toFixed(0)} KB`,
       `corrections ${this.pred.corrections}`,

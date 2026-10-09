@@ -391,8 +391,11 @@ input[type=checkbox] { accent-color: var(--amber); width: 18px; height: 18px; }
 .compass { position: absolute; top: 108px; left: 50%; width: 420px; height: 20px; transform: translateX(-50%); overflow: hidden; mask-image: linear-gradient(90deg, transparent, #000 25%, #000 75%, transparent); font-size: 12px; color: var(--dim); }
 .compass .strip { position: absolute; top: 0; white-space: nowrap; }
 .feed { position: absolute; right: 18px; top: 16px; display: flex; flex-direction: column; gap: 4px; align-items: flex-end; font-family: var(--body); font-size: 15px; }
-.feed .k { background: rgba(8, 11, 15, .72); padding: .25em .7em; animation: fadeOut 6s forwards; }
-.feed .t0 { color: #ff8a78; } .feed .t1 { color: #7cb8ff; } .feed .tn { color: #ddd; }
+.feed .k { background: rgba(8,11,15,.72); padding:.25em .7em; animation: fadeOut 6s forwards; display:flex; align-items:center; gap:.4em; }
+.feed .k img.g { width:18px; height:18px; flex:0 0 auto; filter:drop-shadow(0 0 2px rgba(0,0,0,.9)); }
+.feed .k img.hs { width:15px; height:15px; flex:0 0 auto; filter:drop-shadow(0 0 2px rgba(0,0,0,.9)); }
+.feed .k .d { font-size:12px; opacity:.6; }
+.feed .t0 { color:#ff8a78; } .feed .t1 { color:#7cb8ff; } .feed .tn { color:#ddd; }
 @keyframes fadeOut { 0%, 80% { opacity: 1; } 100% { opacity: 0; } }
 .leftcol { position: absolute; left: 18px; top: calc(236px * var(--hud-scale)); bottom: calc(150px * var(--hud-scale)); width: 480px; display: flex; flex-direction: column; gap: 10px; overflow: hidden; }
 .leftcol > * { flex-shrink: 0; }
@@ -415,6 +418,19 @@ input[type=checkbox] { accent-color: var(--amber); width: 18px; height: 18px; }
 .toasts { position: absolute; left: 50%; top: 30%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 6px; }
 .toasts div { background: rgba(8, 11, 15, .8); padding: .4em 1em; font-size: 16px; letter-spacing: .06em; animation: fadeOut 3.5s forwards; }
 .announce { position: absolute; left: 50%; top: 20%; transform: translateX(-50%); font-size: 30px; letter-spacing: .2em; text-transform: uppercase; text-shadow: 0 2px 10px #000; animation: fadeOut 3s forwards; white-space: nowrap; }
+/* Accolade ribbons: newest at the bottom of a centered stack under the announce line. */
+.medals { position: absolute; left: 50%; top: 12%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: 5px; }
+.medal { display: flex; align-items: center; gap: .55em; padding: .28em .9em .28em .45em; background: linear-gradient(90deg, rgba(10, 14, 19, .86), rgba(10, 14, 19, .5)); border: 1px solid rgba(255, 209, 102, .22); border-left: 3px solid rgba(255, 209, 102, .7); border-radius: 3px; font: 600 15px var(--display); letter-spacing: .1em; text-transform: uppercase; color: #e8eef5; text-shadow: 0 1px 3px #000; box-shadow: 0 4px 18px rgba(0, 0, 0, .45); animation: medalIn .32s cubic-bezier(.2, 1.6, .4, 1) both; white-space: nowrap; }
+.medal .g { width: 22px; height: 22px; filter: drop-shadow(0 1px 2px #000); }
+.medal .cr { color: #ffd166; font-size: 12px; letter-spacing: .06em; }
+.medal.streak { border-left-color: #7cb8ff; }
+.medal.multi { border-left-color: #b98bff; }
+.medal.big { font-size: 19px; border-left: 4px solid #ffd166; background: linear-gradient(90deg, rgba(46, 34, 6, .9), rgba(12, 12, 16, .55)); animation: medalBig .5s cubic-bezier(.2, 1.8, .35, 1) both; }
+.medal.mine { border-color: rgba(255, 209, 102, .55); box-shadow: 0 0 22px rgba(255, 209, 102, .22), 0 4px 18px rgba(0, 0, 0, .45); }
+.medal.out { animation: medalOut .42s ease-in forwards; }
+@keyframes medalIn { 0% { opacity: 0; transform: scale(.6) translateY(-14px); } 100% { opacity: 1; transform: none; } }
+@keyframes medalBig { 0% { opacity: 0; transform: scale(1.7); } 60% { transform: scale(.94); } 100% { opacity: 1; transform: none; } }
+@keyframes medalOut { 0% { opacity: 1; } 100% { opacity: 0; transform: translateY(-10px); } }
 .markers { position: absolute; inset: 0; }
 .marker { position: absolute; transform: translate(-50%, -100%); font-size: 12px; text-align: center; white-space: nowrap; text-shadow: 0 1px 3px #000; font-family: var(--body); }
 .marker .d { font-size: 11px; color: #ddd; }
