@@ -28,10 +28,20 @@ namespace AscendReborn.Launcher
     ///
     /// The repository has no CI, so the update check talks to the GitHub REST API
     /// directly - no gh CLI, no SDK.
+    ///
+    /// Everything here is ADVISORY. A version string is a label a maintainer stamps by
+    /// hand, so it can lag the tag (or be ahead of it) for entirely innocent reasons.
+    /// Nothing in this class is allowed to gate a feature: the play buttons, the import
+    /// step and the launcher self-update all ignore the version comparison outright.
+    /// Only "N commits behind main" is treated as actionable, because that number is
+    /// computed from git and cannot drift.
     /// </summary>
     public static class UpdateCheck
     {
         private const string ApiRoot = "https://api.github.com/repos/" + AppInfo.Owner + "/" + AppInfo.Repo;
+
+        /// <summary>Deadline for the git calls the check makes on the launcher's busy thread.</summary>
+        public const int GitTimeoutMs = 45000;
 
         public static UpdateInfo Run(string repoRoot, Action<string> log)
         {
@@ -74,8 +84,10 @@ namespace AscendReborn.Launcher
             {
                 try
                 {
-                    Runner.Run(repoRoot, "git fetch origin main --quiet", null);
-                    string counts = Runner.Capture(repoRoot, "git rev-list --left-right --count origin/main...HEAD");
+                    // Bounded: a fetch that stalls on a credential prompt or a dead network
+                    // must not sit on the launcher's busy flag indefinitely.
+                    Runner.Run(repoRoot, "git fetch origin main --quiet", null, null, GitTimeoutMs);
+                    string counts = Runner.Capture(repoRoot, "git rev-list --left-right --count origin/main...HEAD", null, GitTimeoutMs);
                     string[] parts = counts.Split(new char[] { '\t', ' ' }, StringSplitOptions.RemoveEmptyEntries);
                     if (parts.Length >= 2)
                     {
@@ -90,7 +102,9 @@ namespace AscendReborn.Launcher
             }
 
             info.Checked = true;
-            info.UpToDate = info.CommitsBehind <= 0 && !IsNewerTag(info.RemoteTag, info.LocalVersion);
+            // Version strings never feed this: see the class summary. Being at (or ahead of)
+            // the tip of main is the only thing that means "you have the current build".
+            info.UpToDate = info.CommitsBehind <= 0;
             info.Message = Describe(info);
             if (log != null) log(info.Message);
             return info;
@@ -112,44 +126,18 @@ namespace AscendReborn.Launcher
         {
             if (!info.Online) return "Could not reach GitHub (offline?).";
             List<string> bits = new List<string>();
-            if (IsNewerTag(info.RemoteTag, info.LocalVersion))
-                bits.Add("release " + info.RemoteTag + " is out (you have " + info.LocalVersion + ")");
             if (info.CommitsBehind > 0)
                 bits.Add(info.CommitsBehind + " commit(s) behind main");
+            // The release tag is reported as plain information. It is NOT compared with the
+            // clone's package.json: that number is a maintainer label and a mismatch is not
+            // something the player can act on, so presenting it as "you are old" is noise.
+            if (!string.IsNullOrEmpty(info.RemoteTag))
+                bits.Add("latest release " + info.RemoteTag + ", your clone is v" + info.LocalVersion);
             if (bits.Count == 0)
                 bits.Add(info.NoRelease
                     ? "up to date (v" + info.LocalVersion + ") - no release published yet"
                     : "up to date (v" + info.LocalVersion + ")");
             return string.Join(" - ", bits.ToArray());
-        }
-
-        /// <summary>True when the release tag is a later version than the local one.</summary>
-        private static bool IsNewerTag(string tag, string local)
-        {
-            int[] a = ParseVersion(tag);
-            int[] b = ParseVersion(local);
-            if (a == null || b == null) return false;
-            int n = Math.Max(a.Length, b.Length);
-            for (int i = 0; i < n; i++)
-            {
-                int x = i < a.Length ? a[i] : 0;
-                int y = i < b.Length ? b[i] : 0;
-                if (x != y) return x > y;
-            }
-            return false;
-        }
-
-        private static int[] ParseVersion(string text)
-        {
-            if (string.IsNullOrEmpty(text)) return null;
-            Match m = Regex.Match(text, @"(\d+)\.(\d+)\.(\d+)");
-            if (!m.Success) return null;
-            return new int[]
-            {
-                int.Parse(m.Groups[1].Value),
-                int.Parse(m.Groups[2].Value),
-                int.Parse(m.Groups[3].Value)
-            };
         }
 
         /// <summary>Direct download for the launcher asset on the latest release, if published.</summary>

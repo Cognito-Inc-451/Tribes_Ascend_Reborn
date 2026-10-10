@@ -39,6 +39,8 @@ namespace AscendReborn.Launcher
         private UpdateInfo _update;
         private string _repoRoot = "";
         private volatile bool _busy;
+        private volatile bool _checking;
+        private bool _importHintShown;
 
         public MainForm()
         {
@@ -280,6 +282,23 @@ namespace AscendReborn.Launcher
             if (_busy) return;
             _busy = true;
             SetButtonsEnabled(false);
+            RunStep(title, work, true);
+        }
+
+        /// <summary>
+        /// Runs a step without touching the buttons. Used by the update check: it is pure
+        /// information, so a slow GitHub/git round trip must never leave the player staring
+        /// at a window of dead buttons - the install and play buttons stay live throughout.
+        /// </summary>
+        private void StepAdvisory(string title, Work work)
+        {
+            if (_checking) return;
+            _checking = true;
+            RunStep(title, work, false);
+        }
+
+        private void RunStep(string title, Work work, bool blocking)
+        {
             Log("");
             Log("=== " + title + " ===");
             Thread thread = new Thread(delegate()
@@ -288,12 +307,17 @@ namespace AscendReborn.Launcher
                 try { work(Log); }
                 catch (Exception ex) { ok = false; Log("!! " + ex.Message); }
                 Log(ok ? "=== " + title + " done ===" : "=== " + title + " failed ===");
-                _busy = false;
-                BeginInvoke(new Action(delegate
+                if (blocking) _busy = false;
+                else _checking = false;
+                try
                 {
-                    SetButtonsEnabled(true);
-                    RefreshRepoState();
-                }));
+                    BeginInvoke(new Action(delegate
+                    {
+                        if (blocking) SetButtonsEnabled(true);
+                        RefreshRepoState();
+                    }));
+                }
+                catch { }
             });
             thread.IsBackground = true;
             thread.Start();
@@ -392,6 +416,14 @@ namespace AscendReborn.Launcher
             _btnImport.Text = imported ? "Re-import Tribes: Ascend assets" : "Import Tribes: Ascend assets";
             _btnPlay.Enabled = imported;
             _btnPlaySolo.Enabled = imported;
+            // The play buttons stay off until the Tribes: Ascend asset import has produced
+            // maps-original (the game files are not in the repo, so a fresh clone has none).
+            // Say so: a greyed button with no explanation reads as a broken install.
+            if (!imported && !_importHintShown)
+            {
+                _importHintShown = true;
+                Log("Start game is disabled until the assets are imported: press \"Import Tribes: Ascend assets\" (you need Tribes: Ascend installed, then pick its folder when asked).");
+            }
             ApplyBanner(root);
         }
 
@@ -526,11 +558,12 @@ namespace AscendReborn.Launcher
 
         private void BeginCheck()
         {
-            Step("Checking for updates", delegate(Action<string> log)
+            StepAdvisory("Checking for updates", delegate(Action<string> log)
             {
                 _update = UpdateCheck.Run(string.IsNullOrEmpty(_repoRoot) ? AppInfo.ExeDirectory : _repoRoot, log);
                 BeginInvoke(new Action(delegate
                 {
+                    // Advisory line only: nothing here disables a button.
                     _status.Text = _update.Message;
                     _status.ForeColor = _update.UpToDate ? Theme.Ok : Theme.Warn;
                 }));
@@ -550,11 +583,10 @@ namespace AscendReborn.Launcher
                 BeginCheck();
                 return;
             }
-            if (_update.UpToDate)
-            {
-                Log("this launcher is already current (" + _update.LocalVersion + ").");
-                return;
-            }
+            // No "already current" short-circuit here. The only version the launcher can
+            // honestly compare against is the release asset itself, and GitHub always hands
+            // back the newest one - so offering the download is always safe, and a clone
+            // whose package.json lags the release tag (which is normal) never blocks it.
             if (_update.LauncherAssetUrl.Length == 0)
             {
                 Log("the latest release has no launcher asset - downloading from the release page.");

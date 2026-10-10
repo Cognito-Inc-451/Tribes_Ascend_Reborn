@@ -27,6 +27,18 @@ namespace AscendReborn.Launcher
         /// </summary>
         public static int Run(string workingDir, string command, Action<string> log, string pathExtra)
         {
+            return Run(workingDir, command, log, pathExtra, 0);
+        }
+
+        /// <summary>
+        /// timeoutMs bounds the whole run. A command that hangs (a git fetch waiting on a
+        /// credential prompt, a dead proxy, no network) must never keep the launcher's
+        /// buttons disabled forever, so every call the UI makes passes a deadline.
+        /// Zero or less means "wait as long as it takes" - used for the long installs.
+        /// A timed-out command is killed and reported as exit code -1.
+        /// </summary>
+        public static int Run(string workingDir, string command, Action<string> log, string pathExtra, int timeoutMs)
+        {
             ProcessStartInfo psi = new ProcessStartInfo();
             psi.FileName = "cmd.exe";
             psi.Arguments = "/d /c " + command;
@@ -47,12 +59,44 @@ namespace AscendReborn.Launcher
                 outDrain.Start();
                 errDrain.Start();
                 int code;
-                p.WaitForExit();
-                code = p.ExitCode;
-                outDrain.Join();
-                errDrain.Join();
+                if (timeoutMs > 0)
+                {
+                    if (p.WaitForExit(timeoutMs)) code = p.ExitCode;
+                    else { KillTree(p, command, timeoutMs, log); code = -1; }
+                }
+                else
+                {
+                    p.WaitForExit();
+                    code = p.ExitCode;
+                }
+                outDrain.Join(5000);
+                errDrain.Join(5000);
                 return code;
             }
+        }
+
+        /// <summary>
+        /// Kills a hung command and everything it spawned (cmd.exe owns the git/node tree),
+        /// so a stalled step releases the launcher instead of freezing it.
+        /// </summary>
+        private static void KillTree(Process p, string command, int timeoutMs, Action<string> log)
+        {
+            int pid = -1;
+            try { pid = p.Id; } catch { }
+            if (log != null) log("!! '" + command + "' is still running after " + (timeoutMs / 1000) + "s - stopping it.");
+            if (pid < 0) return;
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo();
+                psi.FileName = "taskkill.exe";
+                psi.Arguments = "/f /t /pid " + pid;
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                Process kill = Process.Start(psi);
+                kill.WaitForExit(10000);
+            }
+            catch { }
+            try { if (!p.HasExited) p.Kill(); } catch { }
         }
 
         /// <summary>Launches a detached, visible console window (the game / server host).</summary>
@@ -69,10 +113,16 @@ namespace AscendReborn.Launcher
 
         public static string Capture(string workingDir, string command)
         {
-            return Capture(workingDir, command, null);
+            return Capture(workingDir, command, null, 0);
         }
 
         public static string Capture(string workingDir, string command, string pathExtra)
+        {
+            return Capture(workingDir, command, pathExtra, 0);
+        }
+
+        /// <summary>Capture with a deadline; a timed-out command yields an empty result.</summary>
+        public static string Capture(string workingDir, string command, string pathExtra, int timeoutMs)
         {
             ProcessStartInfo psi = new ProcessStartInfo();
             psi.FileName = "cmd.exe";
@@ -87,6 +137,25 @@ namespace AscendReborn.Launcher
 
             using (Process p = Process.Start(psi))
             {
+                if (timeoutMs > 0 && !p.WaitForExit(timeoutMs))
+                {
+                    int pid = -1;
+                    try { pid = p.Id; } catch { }
+                    if (pid >= 0)
+                    {
+                        try
+                        {
+                            ProcessStartInfo kill = new ProcessStartInfo();
+                            kill.FileName = "taskkill.exe";
+                            kill.Arguments = "/f /t /pid " + pid;
+                            kill.UseShellExecute = false;
+                            kill.CreateNoWindow = true;
+                            Process.Start(kill).WaitForExit(10000);
+                        }
+                        catch { }
+                    }
+                    return "";
+                }
                 string text = p.StandardOutput.ReadToEnd();
                 p.WaitForExit();
                 return text.Trim();
@@ -179,7 +248,14 @@ namespace AscendReborn.Launcher
 
         public void Join()
         {
-            if (_thread != null) _thread.Join();
+            Join(-1);
+        }
+
+        public void Join(int millisecondsTimeout)
+        {
+            if (_thread == null) return;
+            if (millisecondsTimeout > 0) _thread.Join(millisecondsTimeout);
+            else _thread.Join();
         }
 
         private void Drain()
