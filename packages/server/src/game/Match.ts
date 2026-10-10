@@ -38,6 +38,8 @@ export class Match {
   assets: Asset[] = [];
   vehicles: Vehicle[] = [];
   flags: FlagState[] = [];
+  /** Match-wide throttle: last time any bot answered a VGS call-in. */
+  lastVgsReply = 0;
   scores: [number, number] = [0, 0];
   phase: number = PHASE.WARMUP;
   phaseEnd = 0;

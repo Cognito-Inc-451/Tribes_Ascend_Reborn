@@ -3,9 +3,9 @@ import { readFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import {
-  BIN, BOT_TAG, decodeInput, decodeJson, encodeJson, fragment, isJsonFrame, LAYOUT_BY_ID, MODES, PHASE, PROTOCOL_VERSION,
+  ARMOR_SKINS, BIN, BOT_TAG, decodeInput, decodeJson, encodeJson, fragment, isJsonFrame, JET_TRAILS, LAYOUT_BY_ID, MODES, PHASE, PROTOCOL_VERSION,
   sanitizeCosmetics, TICK_RATE, VGS_BY_ID, VEHICLE_TYPES,
-  type C2S, type CallInType, type MapRef, type PlayerInfo, type S2C, type ServerInfo, type VehicleType,
+  type C2S, type CallInType, type CosmeticProfile, type MapRef, type PlayerInfo, type S2C, type ServerInfo, type VehicleType,
 } from '@ar/shared';
 import type { RootConfig, ServerConfig } from './config.js';
 import { BotBrain, BOT_NAMES } from './game/bots.js';
@@ -243,10 +243,24 @@ export class GameServer {
     const p = new Player(id, name, null, new BotBrain(this.cfg.bots.difficulty, id * 7919 + Date.now()));
     p.ready = true;
     const voices = this.botVoices();
-    p.cosmetics = sanitizeCosmetics({ voice: voices[id % voices.length] });
+    const look: Partial<CosmeticProfile> = { voice: voices[id % voices.length] };
+    // Optional flair: every bot gets a random armour skin and/or jet exhaust trail.
+    if (this.cfg.bots.skins ?? true) {
+      const skin = ARMOR_SKINS[Math.floor(Math.random() * ARMOR_SKINS.length)].id;
+      look.skinLight = skin; look.skinMedium = skin; look.skinHeavy = skin;
+    }
+    if (this.cfg.bots.exhausts ?? true) look.jetTrail = JET_TRAILS[Math.floor(Math.random() * JET_TRAILS.length)].id;
+    p.cosmetics = sanitizeCosmetics(look);
     this.match.addPlayer(p);
     this.match.setTeam(p, this.match.autoTeam());
     p.brain!.chooseRole(this.match, p);
+  }
+
+  /** Let nearby bots answer a player's call-in (throttled inside BotBrain.onVgs). */
+  private notifyBotsVgs(from: Player, id: string) {
+    for (const o of this.match.players.values()) {
+      if (o.isBot && o.brain) o.brain.onVgs(this.match, o, from, id);
+    }
   }
 
   private voiceList: string[] | null = null;
@@ -383,6 +397,7 @@ export class GameServer {
         if (p.vgsTimes.length >= 4) return;
         p.vgsTimes.push(m.now);
         this.broadcast({ t: 'vgs', from: p.id, name: p.name, id: leaf.id, team: !leaf.global, voice: p.cosmetics.voice, bot: false }, leaf.global ? undefined : (o) => o.team === p.team);
+        if (this.cfg.bots.vgsReply ?? true) this.notifyBotsVgs(p, leaf.id);
         break;
       }
       case 'buyvehicle':

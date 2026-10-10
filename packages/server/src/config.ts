@@ -12,7 +12,7 @@ export interface ServerConfig {
   port: number;
   wtPort?: number;
   maxPlayers: number;
-  bots: { fillTo: number; difficulty: BotDifficulty };
+  bots: { fillTo: number; difficulty: BotDifficulty; skins?: boolean; exhausts?: boolean; vgsReply?: boolean };
   password?: string;
   skillsMaxed?: boolean;
   region?: string;
@@ -38,6 +38,9 @@ export function loadConfig(path: string): RootConfig {
     s.maxPlayers = Math.max(2, Math.min(32, s.maxPlayers ?? 24));
     s.bots ??= { fillTo: 0, difficulty: 'recruit' };
     s.bots.fillTo = Math.max(0, Math.min(s.maxPlayers, s.bots.fillTo));
+    s.bots.skins ??= true;
+    s.bots.exhausts ??= true;
+    s.bots.vgsReply ??= true;
     s.skillsMaxed ??= true;
   }
   return raw;

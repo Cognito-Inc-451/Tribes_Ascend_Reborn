@@ -1,18 +1,19 @@
 import {
-  BTN, CLASS_BY_ID, clamp, distSq, FALL_DAMAGE_THRESHOLD, GRAVITY, hlen, ITEMS, mulberry32, PAWN_GRAVITY_SCALE, VGS_BY_ID,
-  type InputCmd, type Loadout, type Vec3,
+  ASSETS, BTN, CLASS_BY_ID, clamp, distSq, FALL_DAMAGE_THRESHOLD, GRAVITY, hlen, ITEMS, mulberry32, PAWN_GRAVITY_SCALE, VGS_BY_ID,
+  type AssetType, type InputCmd, type Loadout, type Vec3,
 } from '@ar/shared';
 import type { BotDifficulty } from '../config.js';
 import type { FlagState, Player } from './entities.js';
 import type { Match } from './Match.js';
 
-type Role = 'capper' | 'chaser' | 'defender' | 'offense' | 'sniper' | 'roamer' | 'farmer';
+type Role = 'capper' | 'chaser' | 'defender' | 'defender_dmb' | 'offense' | 'sniper' | 'roamer' | 'farmer' | 'engineer';
 
 interface Skill { reaction: number; aimError: number; turn: number; lead: number; fireAngle: number; vgs: number }
 
 const SKILL: Record<BotDifficulty, Skill> = {
-  recruit: { reaction: 0.6, aimError: 0.09, turn: 3, lead: 0.4, fireAngle: 0.2, vgs: 0.3 },
-  adept: { reaction: 0.4, aimError: 0.055, turn: 5, lead: 0.7, fireAngle: 0.14, vgs: 0.5 },
+  // Adept is the entry tier: it should lose most gunfights, so it reacts late, sprays wide and barely leads movers.
+  adept: { reaction: 0.7, aimError: 0.13, turn: 3, lead: 0.35, fireAngle: 0.1, vgs: 0.5 },
+  recruit: { reaction: 0.5, aimError: 0.085, turn: 4.5, lead: 0.55, fireAngle: 0.16, vgs: 0.3 },
   veteran: { reaction: 0.25, aimError: 0.032, turn: 8, lead: 0.9, fireAngle: 0.09, vgs: 0.6 },
   elite: { reaction: 0.15, aimError: 0.018, turn: 12, lead: 1, fireAngle: 0.06, vgs: 0.6 },
   godlike: { reaction: 0.08, aimError: 0.008, turn: 20, lead: 1, fireAngle: 0.04, vgs: 0.6 },
@@ -22,10 +23,88 @@ const ROLE_LOADOUT: Record<Role, { cls: string; loadout: Partial<Loadout> }> = {
   capper: { cls: 'pathfinder', loadout: { primary: 'light_spinfusor', secondary: 'shotgun', belt: 'impact_nitron', pack: 'energy_recharge_pack', perkA: 'reach', perkB: 'ultra_capacitor_2' } },
   chaser: { cls: 'pathfinder', loadout: { primary: 'light_spinfusor', secondary: 'light_assault_rifle', belt: 'impact_nitron', pack: 'thrust_pack', perkA: 'safe_fall', perkB: 'ultra_capacitor_2' } },
   defender: { cls: 'brute', loadout: { primary: 'heavy_spinfusor', secondary: 'nova_colt', belt: 'fractal_grenade', pack: 'survival_pack', perkA: 'safe_fall', perkB: 'super_heavy' } },
+  // Defender variant: Doombringer that mines the base and drops a force field at entrances.
+  defender_dmb: { cls: 'doombringer', loadout: { primary: 'chain_gun', secondary: 'saber_launcher', belt: 'mines', pack: 'force_field_pack', perkA: 'safe_fall', perkB: 'super_heavy' } },
   offense: { cls: 'raider', loadout: { primary: 'arx_buster', secondary: 'nj4_smg', belt: 'emp_grenade', pack: 'shield_pack', perkA: 'safe_fall', perkB: 'egocentric' } },
   sniper: { cls: 'sentinel', loadout: { primary: 'bxt1', secondary: 'falcon', belt: 'claymore', pack: 'energy_recharge_pack', perkA: 'safe_fall', perkB: 'ultra_capacitor_2' } },
   roamer: { cls: 'soldier', loadout: { primary: 'spinfusor', secondary: 'thumper_dx', belt: 'frag_xl', pack: 'energy_pack', perkA: 'safe_fall', perkB: 'ultra_capacitor_2' } },
   farmer: { cls: 'juggernaut', loadout: { primary: 'fusion_mortar', secondary: 'spinfusor_mkd', belt: 'heavy_ap', pack: 'regen_pack', perkA: 'safe_fall', perkB: 'egocentric' } },
+  // Engineer: Technician that deploys sensors/turrets and repairs the team's assets.
+  engineer: { cls: 'technician', loadout: { primary: 'tc24', secondary: 'repair_tool', belt: 'motion_sensor', pack: 'light_turret_pack', perkA: 'mechanic', perkB: 'ultra_capacitor_2' } },
+};
+
+/** Lines bots fire back at a teammate's VGS call (picked at random). Kept short so replies stay rare. */
+const VGS_REPLY: Record<string, string[]> = {
+  GlobalHi: ['GlobalHi', 'GlobalBye'],
+  GlobalBye: ['GlobalBye'],
+  GlobalYes: ['GlobalYes', 'CommandAcknowledged'],
+  GlobalNo: ['GlobalNo', 'CommandDeclined'],
+  GlobalRespondAnyTime: ['GlobalRespondThanks', 'GlobalComplimentGoodGame'],
+  GlobalRespondThanks: ['GlobalYes', 'GlobalComplimentYouRock'],
+  GlobalRespondWait: ['TeamWait', 'GlobalQuiet'],
+  GlobalRespondDontKnow: ['GlobalRespondDontKnow', 'TeamDontKnow'],
+  GlobalComplimentGreatShot: ['GlobalComplimentYouRock', 'GlobalWoohoo'],
+  GlobalComplimentYouRock: ['GlobalComplimentAwesome', 'GlobalRespondThanks'],
+  GlobalComplimentNiceMove: ['GlobalComplimentGoodGame', 'GlobalWoohoo'],
+  GlobalComplimentAwesome: ['GlobalComplimentYouRock', 'GlobalYes'],
+  GlobalComplimentGoodGame: ['GlobalComplimentGoodGame', 'GlobalRespondThanks'],
+  GlobalTauntBrag: ['GlobalTauntSarcasm', 'GlobalTauntLearn'],
+  GlobalTauntSarcasm: ['GlobalTauntObnoxious', 'GlobalTauntLearn'],
+  GlobalTauntObnoxious: ['GlobalTauntAww', 'GlobalShazbot'],
+  GlobalTauntLearn: ['GlobalTauntBrag', 'GlobalTauntSarcasm'],
+  GlobalTauntAww: ['GlobalTauntObnoxious', 'GlobalNo'],
+  GlobalShazbot: ['GlobalShazbot', 'GlobalOoops'],
+  GlobalOoops: ['GlobalOoops', 'GlobalQuiet'],
+  GlobalQuiet: ['GlobalQuiet', 'TeamCeaseFire'],
+  TeamYes: ['GlobalYes', 'CommandAcknowledged'],
+  TeamNo: ['GlobalNo', 'CommandDeclined'],
+  TeamAnytime: ['GlobalRespondAnyTime', 'GlobalRespondThanks'],
+  TeamThanks: ['GlobalRespondThanks', 'GlobalComplimentGoodGame'],
+  TeamSorry: ['GlobalRespondThanks', 'TeamThanks'],
+  TeamHelp: ['CommandAcknowledged', 'SelfTaskOnIt'],
+  TeamMove: ['CommandAcknowledged', 'SelfTaskOnIt'],
+  TeamWait: ['TeamWait', 'GlobalQuiet'],
+  TeamCeaseFire: ['TeamCeaseFire', 'GlobalQuiet'],
+  TeamDontKnow: ['GlobalRespondDontKnow', 'TeamDontKnow'],
+  TeamBaseSecure: ['BaseSecure', 'GlobalWoohoo'],
+  CommandAssignment: ['CommandAcknowledged', 'SelfTaskOnIt'],
+  CommandAcknowledged: ['GlobalYes'],
+  CommandDeclined: ['GlobalNo', 'GlobalRespondDontKnow'],
+  CommandCompleted: ['GlobalComplimentGoodGame', 'GlobalWoohoo'],
+  NeedCover: ['NeedCover', 'SelfTaskCover', 'CommandAcknowledged'],
+  NeedEscort: ['NeedEscort', 'CommandAcknowledged'],
+  NeedSupport: ['NeedSupport', 'SelfTaskOnIt'],
+  NeedVehicleReady: ['NeedVehicleReady', 'SelfTaskVehicle'],
+  NeedRide: ['NeedRide', 'NeedDriver'],
+  NeedDriver: ['NeedDriver', 'SelfTaskVehicle'],
+  NeedWhereTo: ['NeedWhereTo', 'SelfTaskOnIt'],
+  RepairGenerator: ['SelfRepairGenerator', 'SelfTaskOnIt'],
+  RepairSensors: ['SelfRepairSensors', 'SelfTaskOnIt'],
+  RepairTurrets: ['SelfRepairTurrets', 'SelfTaskOnIt'],
+  RepairVehicle: ['SelfRepairVehicle', 'SelfTaskOnIt'],
+  UpgradeGenerator: ['SelfUpgradeGenerator', 'CommandAcknowledged'],
+  UpgradeSensors: ['SelfUpgradeSensors', 'CommandAcknowledged'],
+  UpgradeTurrets: ['SelfUpgradeTurrets', 'CommandAcknowledged'],
+  Attack: ['SelfAttack', 'SelfTaskOnIt'],
+  AttackBase: ['SelfAttackBase', 'SelfTaskOnIt'],
+  AttackFlag: ['SelfAttackFlag', 'SelfTaskOnIt'],
+  AttackGenerator: ['SelfAttackGenerator', 'SelfTaskOnIt'],
+  AttackVehicle: ['SelfAttackVehicle', 'SelfTaskOnIt'],
+  AttackSensors: ['SelfAttackSensors', 'SelfTaskOnIt'],
+  AttackTurrets: ['SelfAttackTurrets', 'SelfTaskOnIt'],
+  DefendBase: ['SelfDefendBase', 'SelfTaskOnIt'],
+  DefendFlag: ['SelfDefendFlag', 'SelfTaskOnIt'],
+  DefendGenerator: ['SelfDefendGenerator', 'SelfTaskOnIt'],
+  DefendVehicle: ['SelfDefendVehicle', 'SelfTaskOnIt'],
+  DefendSensors: ['SelfDefendSensors', 'SelfTaskOnIt'],
+  DefendTurrets: ['SelfDefendTurrets', 'SelfTaskOnIt'],
+  DefendMe: ['SelfDefend', 'SelfTaskOnIt'],
+  WarnEnemies: ['WarnEnemies', 'DefendBase', 'TeamHelp'],
+  WarnVehicle: ['WarnVehicle', 'SelfAttackVehicle'],
+  FlagGiveMe: ['FlagIHave', 'FlagTake'],
+  FlagTake: ['FlagIHave', 'SelfTaskOnIt'],
+  TargetAcquired: ['TargetFireOnMy', 'TargetWait'],
+  TargetFireOnMy: ['TargetAcquired', 'SelfAttack'],
 };
 
 export const BOT_NAMES = [
@@ -74,6 +153,14 @@ export class BotBrain {
   /** Indoor objectives this bot keeps getting stuck on: goal key -> time until it tries again. */
   private abandoned = new Map<string, number>();
   private stuckHits = 0;
+  /** Pacing timer for pack/belt deploy presses (edge-triggered buttons). */
+  private nextDeployPress = 0;
+  /** Current repair beam target (asset centre), set by goal(). */
+  private repairGoal: Vec3 | null = null;
+  /** Current deploy spot, set by goal(). */
+  private deployGoal: Vec3 | null = null;
+  /** Set when this tick wants to fire the repair beam. */
+  private repairFiring = false;
 
   private static key(g: Vec3) { return `${Math.round(g.x)},${Math.round(g.y)},${Math.round(g.z)}`; }
   private gaveUp(m: Match, g: Vec3) { return (this.abandoned.get(BotBrain.key(g)) ?? 0) > m.now; }
@@ -159,6 +246,10 @@ export class BotBrain {
     Object.assign(this, {
       target: null, targetSince: 0, nextScan: 0, stuckCheck: 0, unstickUntil: 0, nextVgs: 0, nextSteer: 0, wander: null, voidBelow: false,
       routeKey: '', routeIdx: 0, charging: false, exitPath: null, exitIdx: 0, nextIndoorCheck: 0, stuckHits: 0, clearOut: null, clearUntil: 0,
+      nextDeployPress: 0,
+      repairGoal: null,
+      deployGoal: null,
+      repairFiring: false,
     });
     this.abandoned.clear();
   }
@@ -168,26 +259,29 @@ export class BotBrain {
     const mates = [...m.players.values()].filter((o) => o !== p && o.isBot && o.team === p.team).map((o) => o.brain!.role);
     const count = (r: Role) => mates.filter((x) => x === r).length;
     let role: Role = 'roamer';
+    // Teams like to keep one engineer (deploy + repair) and a Doombringer miner on the field.
+    const wantEngineer = this.rnd() < 0.75;
     if (mode === 'ctf' || mode === 'blitz') {
       if (count('capper') < 2) role = 'capper';
-      else if (count('defender') < 1) role = 'defender';
+      else if (count('defender') + count('defender_dmb') < 1) role = this.rnd() < 0.5 ? 'defender' : 'defender_dmb';
       else if (count('chaser') < 1) role = 'chaser';
+      else if (wantEngineer && count('engineer') < 1) role = 'engineer';
       else if (mode === 'ctf' && count('offense') < 1) role = 'offense';
       else if (mode === 'ctf' && count('farmer') < 1) role = 'farmer';
       else role = this.rnd() < 0.5 ? 'roamer' : 'chaser';
     } else if (mode === 'arena') role = this.rnd() < 0.3 ? 'chaser' : 'roamer';
-    else if (mode === 'cah') role = count('defender') < 2 ? 'defender' : 'roamer';
+    else if (mode === 'cah') role = count('defender') < 2 ? 'defender' : wantEngineer && count('engineer') < 1 ? 'engineer' : 'roamer';
     else role = this.rnd() < 0.2 ? 'sniper' : this.rnd() < 0.5 ? 'chaser' : 'roamer';
     this.role = role;
     const lo = ROLE_LOADOUT[role];
     m.setClass(p, CLASS_BY_ID[lo.cls].id, lo.loadout);
   }
 
-  private say(m: Match, p: Player, id: string, chance = 1) {
+  private say(m: Match, p: Player, id: string, chance = 1, minGap = 4) {
     if (this.rnd() > chance * this.skill.vgs || m.now < this.nextVgs) return;
     const leaf = VGS_BY_ID[id];
     if (!leaf) return;
-    this.nextVgs = m.now + 4 + this.rnd() * 6;
+    this.nextVgs = m.now + minGap + this.rnd() * 6;
     m.io.broadcast({ t: 'vgs', from: p.id, name: p.name, id, team: !leaf.global, voice: p.cosmetics.voice, bot: true }, leaf.global ? undefined : (o) => o.team === p.team);
   }
 
@@ -203,11 +297,29 @@ export class BotBrain {
     else if (kind === 'cap' && who.team === self.team && who !== self) this.say(m, self, 'GlobalComplimentNiceMove', 0.3);
   }
 
+  /**
+   * Optional call-in reply: answer a teammate's (or a global) VGS with a fitting line.
+   * Anti-spam: a match-wide reply window throttles how often any bot answers, each bot
+   * answers only a small fraction of call-ins, and say() adds its own per-bot cooldown.
+   */
+  onVgs(m: Match, p: Player, from: Player, id: string): void {
+    if (from === p || !p.alive) return;
+    const leaf = VGS_BY_ID[id];
+    if (!leaf || (from.team !== p.team && !leaf.global)) return;
+    const pool = VGS_REPLY[id];
+    if (!pool || pool.length === 0) return;
+    if (m.now - m.lastVgsReply < 6) return; // one answer per 6s window, match-wide
+    if (this.rnd() > 0.18 * this.skill.vgs) return;
+    m.lastVgsReply = m.now;
+    this.say(m, p, pool[Math.floor(this.rnd() * pool.length)], 1, 12);
+  }
+
   think(m: Match, p: Player): InputCmd {
     const cmd: InputCmd = { seq: ++this.seq, fwd: 0, strafe: 0, yaw: this.aimYaw, pitch: this.aimPitch, buttons: 0, weapon: 0 };
     if (!p.alive) { cmd.buttons = BTN.FIRE; return cmd; }
     const now = m.now;
     const pos = p.move.pos;
+    this.repairFiring = false;
     const dry = (k: number) => !p.weapons[k] || (p.weapons[k].clip === 0 && p.weapons[k].ammo === 0 && p.weapons[k].reloadUntil === 0);
     if (dry(0) && !dry(1)) cmd.weapon = 1;
 
@@ -263,6 +375,17 @@ export class BotBrain {
       if (dist < 25 && p.beltCount > 0 && this.rnd() < 0.01) cmd.buttons |= BTN.BELT;
       if (dist < 2.5) cmd.buttons |= BTN.MELEE;
       if (this.role === 'sniper' && dist > 40) cmd.buttons |= BTN.ZOOM;
+    } else if (this.repairGoal && p.weapons[1]?.def.kind === 'repair') {
+      // Repair beam: hold the beam on the friendly asset goal (no clip cost).
+      const dx = this.repairGoal.x - eye.x, dy = this.repairGoal.y - eye.y, dz = this.repairGoal.z - eye.z;
+      const dist = Math.hypot(dx, dy, dz);
+      const beamRange = p.weapons[1].def.hitscan?.range ?? 12;
+      if (dist <= beamRange - 1) {
+        desiredYaw = Math.atan2(-dx, -dz);
+        desiredPitch = Math.atan2(dy, Math.hypot(dx, dz));
+        fire = true;
+        this.repairFiring = true;
+      }
     } else if (goal) {
       desiredYaw = Math.atan2(-(goal.x - pos.x), -(goal.z - pos.z));
       desiredPitch = -0.05;
@@ -279,6 +402,7 @@ export class BotBrain {
     if (w.clip === 0 && w.ammo > 0 && w.reloadUntil === 0 && this.seq % 2 === 0) cmd.buttons |= BTN.RELOAD;
     if (w.def.spinup && this.target) cmd.buttons |= BTN.FIRE;
     if (w.def.kind === 'repair') cmd.weapon = 0;
+    if (this.repairFiring) cmd.weapon = 1;
 
     if (goal && !(gen && distSq(gen, pos) < 18 * 18)) this.navigate(m, p, goal, cmd);
     if (p.pending && this.rnd() < 0.005) cmd.buttons |= BTN.USE;
@@ -317,6 +441,72 @@ export class BotBrain {
       const st = m.restock[p.team].filter((s) => !this.gaveUp(m, s) && usable(s)).sort((a, b) => distSq(a, p.move.pos) - distSq(b, p.move.pos))[0];
       if (st) { this.staticGoal = true; return st; }
     }
+
+    // Engineer / Doombringer support duties: repair friendly assets near base, deploy defenses.
+    this.repairGoal = null;
+    this.deployGoal = null;
+    if (p.team <= 1 && (this.role === 'engineer' || this.role === 'defender_dmb')) {
+      const gen = m.assets.find((a) => a.team === p.team && a.type === 'generator' && !a.destroyed);
+      const ownFlag = m.flags.find((f) => f.team === p.team);
+      const anchor = gen?.pos ?? ownFlag?.home ?? null; // guard the generator, else the flag base
+      const beam = ITEMS[p.loadout.secondary]?.kind === 'repair' ? (ITEMS[p.loadout.secondary]!.hitscan?.range ?? 12) : 0;
+      // 1) Repair: highest-value friendly asset/vehicle already in beam range.
+      if (anchor && beam > 0) {
+        const eye = p.eye();
+        const reach = beam - 1.5;
+        let best: { c: Vec3; score: number; kind: AssetType | 'vehicle' } | null = null;
+        for (const a of m.assets) {
+          if (a.team !== p.team) continue;
+          const hurt = a.destroyed ? 2 : 1 - a.health / a.maxHealth;
+          if (hurt <= 0.08) continue;
+          const c: Vec3 = { x: a.pos.x, y: a.pos.y + (a.def.size[1] ?? 1), z: a.pos.z };
+          const d = Math.sqrt(distSq(c, eye));
+          if (d > reach) continue;
+          const rank = a.type === 'generator' ? 0 : a.type === 'radar' ? 1 : a.type === 'base_turret' ? 2 : a.type === 'repair_station' ? 3 : 4;
+          const score = rank * 30 - hurt * 12 + d * 0.5; // lower is better
+          if (!best || score < best.score) best = { c, score, kind: a.type };
+        }
+        for (const v of m.vehicles) {
+          if (v.team !== p.team || v.health >= v.def.health) continue;
+          const c: Vec3 = { x: v.pos.x, y: v.pos.y + 1, z: v.pos.z };
+          const d = Math.sqrt(distSq(c, eye));
+          if (d > reach) continue;
+          const score = 60 * (v.health / v.def.health) + d * 0.5;
+          if (!best || score < best.score) best = { c, score, kind: 'vehicle' };
+        }
+        if (best) {
+          this.repairGoal = best.c;
+          this.staticGoal = true;
+          this.say(m, p, best.kind === 'generator' ? 'SelfRepairGenerator' : best.kind === 'vehicle' ? 'SelfRepairVehicle'
+            : best.kind === 'radar' ? 'SelfRepairSensors' : 'SelfRepairBase', 0.6, 25);
+          return best.c;
+        }
+      }
+      // 2) Deploy: pack item first (force field / turret), belt item as fallback (sensor / mines).
+      const packDef = ITEMS[p.loadout.pack];
+      const beltDef = ITEMS[p.loadout.belt];
+      let deployType: AssetType | null = null;
+      if (packDef?.kind === 'deploy' && packDef.deploy && m.now >= p.packNext
+        && this.deployCount(m, p, packDef.deploy as AssetType) < (ASSETS[packDef.deploy as AssetType]?.maxPerPlayer ?? 1)) {
+        deployType = packDef.deploy as AssetType;
+      }
+      if (!deployType && beltDef?.kind === 'deploy' && beltDef.deploy && p.beltCount > 0 && m.now >= p.beltNext
+        && this.deployCount(m, p, beltDef.deploy as AssetType) < (ASSETS[beltDef.deploy as AssetType]?.maxPerPlayer ?? 1)) {
+        deployType = beltDef.deploy as AssetType;
+      }
+      if (deployType && anchor) {
+        const spot = this.deploySpot(m, p, anchor);
+        if (spot) {
+          this.deployGoal = spot;
+          this.staticGoal = true;
+          this.say(m, p, this.role === 'engineer'
+            ? (deployType === 'motion_sensor' ? 'SelfTaskDeploySensors' : 'SelfTaskDeployTurrets')
+            : (deployType === 'force_field' ? 'SelfTaskForcefield' : 'SelfTaskDefenses'), 0.5, 30);
+          return spot;
+        }
+      }
+    }
+
     if (mode === 'ctf' || mode === 'blitz') {
       if (p.flag && own) { this.flagGoal = true; this.staticGoal = true; return own.home; }
       if (this.role === 'chaser' || this.role === 'defender') {
@@ -413,6 +603,33 @@ export class BotBrain {
       this.wander = { x, y: hit ? hit.point.y + 0.5 : ground, z };
     }
     return this.wander;
+  }
+
+  /** How many deployables of this type this bot already has standing. */
+  private deployCount(m: Match, p: Player, type: AssetType): number {
+    let n = 0;
+    for (const a of m.assets) if (a.type === type && a.owner === p.id) n++;
+    return n;
+  }
+
+  /** A flat spot on a ring around `anchor` suitable for dropping a deployable. */
+  private deploySpot(m: Match, p: Player, anchor: Vec3): Vec3 | null {
+    for (let i = 0; i < 6; i++) {
+      const a = this.rnd() * Math.PI * 2;
+      const r = 5 + this.rnd() * 7;
+      const x = anchor.x + Math.cos(a) * r;
+      const z = anchor.z + Math.sin(a) * r;
+      const ground = m.world.terrain.heightAt(x, z);
+      const hit = m.world.raycast({ x, y: Math.max(ground, anchor.y) + 120, z }, { x, y: ground - 1, z }, undefined, false);
+      const y = (hit ? hit.point.y : ground) + 0.5;
+      if (hit && hit.normal.y < 0.7) continue; // needs a fairly flat surface
+      if (distSq({ x, y, z }, p.move.pos) > 90 * 90) continue; // don't cross the map for this
+      let clear = true;
+      for (const o of m.assets) if (o.owner >= 0 && distSq(o.pos, { x, y, z }) < 6 * 6) { clear = false; break; }
+      if (!clear) continue;
+      return { x, y, z };
+    }
+    return null;
   }
 
   private heading = 0;
@@ -560,6 +777,15 @@ export class BotBrain {
     if (ITEMS[p.loadout.pack]?.kind === 'toggle' && ['shield_pack', 'stealth_pack'].includes(p.loadout.pack)) {
       const want = this.target !== null ? p.loadout.pack === 'shield_pack' : p.loadout.pack === 'stealth_pack';
       if (want !== p.packActive && this.seq % 30 === 0 && energyFrac > 0.4) buttons |= BTN.PACK;
+    }
+    // Deploying a pack/belt: stand still, look straight down, press once (edge-triggered).
+    if (this.deployGoal && dist < 4 && now >= this.nextDeployPress) {
+      fwd = 0; strafe = 0; cmd.pitch = -1.0;
+      const packDef = ITEMS[p.loadout.pack];
+      const beltDef = ITEMS[p.loadout.belt];
+      if (packDef?.kind === 'deploy' && m.now >= p.packNext) buttons |= BTN.PACK;
+      else if (beltDef?.kind === 'deploy' && p.beltCount > 0 && m.now >= p.beltNext) buttons |= BTN.BELT;
+      this.nextDeployPress = now + 3;
     }
     cmd.fwd = clamp(fwd, -1, 1);
     cmd.strafe = clamp(strafe, -1, 1);

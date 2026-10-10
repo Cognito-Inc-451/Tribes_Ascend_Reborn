@@ -23,6 +23,9 @@ let kills = 0;
 const m = new Match(cfg, map, {
   broadcast: (msg) => {
     if (msg.t === 'event') events[msg.kind] = (events[msg.kind] ?? 0) + 1;
+    if (msg.t === 'fx' && msg.kind === 'deploy') events[`deploy_${msg.item}`] = (events[`deploy_${msg.item}`] ?? 0) + 1;
+    if (msg.t === 'fx' && msg.kind === 'repair') events.repair = (events.repair ?? 0) + 1;
+    if (msg.t === 'vgs') events.vgs = (events.vgs ?? 0) + 1;
     if (msg.t === 'kill') {
       kills++; causes[msg.item] = (causes[msg.item] ?? 0) + 1;
       if (process.env.DEBUG_DEATHS && (msg.item === 'killz' || msg.item === 'fall')) {
